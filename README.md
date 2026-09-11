@@ -1,0 +1,91 @@
+# qe-report
+
+A runner-agnostic test reporting protocol, with a Java and a TypeScript
+binding, producer SDKs, and a validator. Part of the
+[QE ecosystem](https://github.com/yannisyoussef/qe-ecosystem); the
+ecosystem architecture and decision records apply here.
+
+Status: protocol compatibility line 0.1 is defined and implemented in both
+languages. No adapter for a real runner, no HTTP transport, and no
+reporting server exist yet. Nothing is published.
+
+## What is here
+
+| Path | Contents |
+|---|---|
+| [`protocol/`](protocol/README.md) | The protocol: JSON Schema (source of truth), fixture corpus, redaction cases, documentation. |
+| [`java/`](java/) | Gradle build. `protocol` (model and codec) and `sdk` (session writer, file sink, redaction). Library bytecode targets Java 17. |
+| [`ts/`](ts/) | pnpm workspace. `protocol` (types and codec), `sdk` (session writer, file sink, redaction), `validator` (library and `qe-report-validate` CLI), and a test-only `equivalence` harness. Node 22 or newer. |
+
+Read [`protocol/README.md`](protocol/README.md) first: it explains the
+run, session, attempt, step, and attachment model, the status set, the two
+test identities, and the compatibility rules.
+
+## Building
+
+Java (JDK 25 is provisioned by the toolchain resolver; the wrapper pins
+Gradle):
+
+```bash
+cd java && ./gradlew check
+```
+
+TypeScript (Node 24 and pnpm 12; `corepack enable` provides pnpm):
+
+```bash
+cd ts && pnpm install && pnpm check
+```
+
+Cross-language equivalence, after both builds:
+
+```bash
+cd java && ./gradlew :sdk:equivalenceOutput && cd ../ts && pnpm test:equivalence
+```
+
+The check replays the fixture runs and a scripted session through both
+SDKs and compares the results after a test-only canonicalization: same
+schema validity, same parsed values in the same order, identical
+attachment hashes and bytes. Byte-identical JSON is not a protocol
+requirement.
+
+## Using the SDKs
+
+Java:
+
+```java
+try (ReportSession session =
+    ReportSession.builder("run-42", "jvm-1", FileSink.open(Path.of("build/qe-report")))
+        .start(SessionStarted.of(new Component("my-adapter", "0.1.0")))) {
+  session.emit(new AttemptStarted("a-1", 1, testCase));
+  session.attach("a-1", null, "log", "text/plain", logBytes);
+  session.emit(AttemptFinished.of("a-1", Status.PASSED));
+}
+```
+
+TypeScript:
+
+```ts
+const session = ReportSession.start(
+  { runId: 'run-42', sessionId: 'worker-1', sink: FileSink.open('qe-report') },
+  { producer: { name: 'my-adapter', version: '0.1.0' } },
+);
+session.emit({ eventType: 'attempt.started', payload: { attemptId: 'a-1', attemptNumber: 1, test } });
+session.attach({ attemptId: 'a-1', name: 'log', mediaType: 'text/plain' }, logBytes);
+session.emit({ eventType: 'attempt.finished', payload: { attemptId: 'a-1', status: 'passed' } });
+session.close();
+```
+
+Both fill the envelope, redact free text and textual attachments before
+anything is written, drop and report an oversized event, and never throw
+into the test being reported.
+
+Validate what was written:
+
+```bash
+node ts/packages/validator/dist/cli.js build/qe-report/events.ndjson --require-complete
+```
+
+## Contributing and security
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
+Licensed under [Apache-2.0](LICENSE).
