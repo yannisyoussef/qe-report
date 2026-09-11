@@ -1,0 +1,35 @@
+# Grouped and weekly to keep pull request volume reviewable.
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /java
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      java-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /ts
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      ts-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # TypeScript stays on 6.0.x until typescript-eslint supports a newer line.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns: ["*"]

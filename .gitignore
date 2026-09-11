@@ -1,0 +1,52 @@
+# Build output
+build/
+dist/
+out/
+.gradle/
+node_modules/
+coverage/
+test-results/
+playwright-report/
+*.tsbuildinfo
+
+# IDE and OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local environment; .env.example holds names only and is committed
+.env
+.env.*
+!.env.example
+
+# Local working material: plans, notes, reviews, prompts, drafts, scratch.
+# Anything a user or maintainer needs is rewritten into README, docs/, or an ADR.
+/local/
+/scratch/
+/notes/
+/prompts/
+*.local.md
+
+# Coding-agent configuration and session state
+.claude/
+.codex/
+.cursor/
+.agent/
+.agents/
+.ai/
+.aider*
+.windsurf/
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.github/copilot-instructions.md
+
+# Java
+.kotlin/
+*.class
+!gradle/wrapper/gradle-wrapper.jar
+
+# Probe and equivalence output
+test-results/
+playwright-report/
