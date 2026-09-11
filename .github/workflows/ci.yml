@@ -23,7 +23,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
       - name: Build, static analysis, tests, JUnit and JDK matrices, consumer fixtures
         working-directory: java
-        run: ./gradlew check -PtestJavaVersions=17,21 --no-daemon
+        # Tests always execute here: the consumer runs the equivalence job validates are produced by
+        # the adapter's tests and are not part of any task output the build cache could restore.
+        run: ./gradlew check -PtestJavaVersions=17,21 --no-daemon --no-build-cache
       - name: Java equivalence output
         working-directory: java
         run: ./gradlew :sdk:equivalenceOutput --no-daemon
