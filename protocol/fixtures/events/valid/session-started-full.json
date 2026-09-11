@@ -1,0 +1,35 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-2-0001",
+  "eventType": "session.started",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-2",
+  "sequence": 1,
+  "occurredAt": "2026-09-11T10:00:00.000+00:00",
+  "payload": {
+    "producer": {
+      "name": "fixture",
+      "version": "0.1.0"
+    },
+    "runner": {
+      "name": "junit-platform",
+      "version": "6.1.3"
+    },
+    "environment": {
+      "os.name": "Linux"
+    },
+    "executor": {
+      "name": "github-actions",
+      "buildId": "77",
+      "buildUrl": "https://example.invalid/77"
+    },
+    "source": {
+      "repository": "https://example.invalid/r.git",
+      "revision": "abc123",
+      "branch": "develop"
+    },
+    "labels": {
+      "team": "qa"
+    }
+  }
+}

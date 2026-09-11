@@ -1,0 +1,20 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-1-0012",
+  "eventType": "attempt.finished",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 12,
+  "occurredAt": "2026-09-11T10:00:11.000+00:00",
+  "payload": {
+    "attemptId": "a-5",
+    "status": "skipped",
+    "rawStatus": "ABORTED",
+    "durationMs": 0,
+    "failures": [
+      {
+        "message": "assumption failed"
+      }
+    ]
+  }
+}

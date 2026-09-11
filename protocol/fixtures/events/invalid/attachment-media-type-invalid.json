@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-1-0019",
+  "eventType": "attachment.added",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 19,
+  "occurredAt": "2026-09-11T10:00:18.000+00:00",
+  "payload": {
+    "attemptId": "a-1",
+    "name": "screenshot",
+    "mediaType": "png",
+    "sizeBytes": 69,
+    "sha256": "5869e55bf0b89552e9eca7bcb577174d4317ff4c339bc873303e5115bf59c83f"
+  }
+}

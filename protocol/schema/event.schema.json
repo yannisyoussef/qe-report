@@ -1,0 +1,595 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yannisyoussef.github.io/qe-report/schema/0.1/event.schema.json",
+  "title": "qe-report protocol event",
+  "description": "One event of the qe-report test reporting protocol, compatibility line 0.1. A run is a sequence of these events, one JSON object per line in a newline-delimited file or stream. Unknown properties are permitted everywhere so that a later minor version can add optional fields; consumers ignore them.",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "eventId",
+    "eventType",
+    "runId",
+    "sessionId",
+    "sequence",
+    "occurredAt",
+    "payload"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "description": "Full Semantic Version of the protocol the producer wrote. Compatibility line 0.1 accepts any 0.1.x.",
+      "type": "string",
+      "pattern": "^0\\.1\\.(0|[1-9][0-9]*)$"
+    },
+    "eventId": {
+      "description": "Unique within the run. A consumer that sees the same eventId twice treats the second occurrence as a harmless duplicate only if the content is identical.",
+      "$ref": "#/$defs/identifier"
+    },
+    "eventType": {
+      "description": "Discriminator for the payload. Names are dotted lower case. Types unknown to a consumer are an error unless the event is marked ignorable.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-zA-Z0-9]*(\\.[a-z][a-zA-Z0-9]*)+$"
+    },
+    "runId": {
+      "$ref": "#/$defs/identifier"
+    },
+    "sessionId": {
+      "description": "The producer process this event came from. Several sessions can contribute to one run.",
+      "$ref": "#/$defs/identifier"
+    },
+    "sequence": {
+      "description": "Position of the event within its session, starting at 1 and increasing by exactly 1 per event.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "occurredAt": {
+      "description": "Producer clock, ISO-8601 with an explicit offset.",
+      "$ref": "#/$defs/timestamp"
+    },
+    "ignorable": {
+      "description": "True when a consumer that does not understand this eventType may skip the event without misreading any other event. A producer sets it on event types introduced after the consumer's protocol minor. Absent means false.",
+      "type": "boolean"
+    },
+    "payload": {
+      "description": "Content specific to the eventType. Validated by the eventType branch below.",
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/event.session.started"
+    },
+    {
+      "$ref": "#/$defs/event.session.finished"
+    },
+    {
+      "$ref": "#/$defs/event.run.finished"
+    },
+    {
+      "$ref": "#/$defs/event.attempt.started"
+    },
+    {
+      "$ref": "#/$defs/event.attempt.finished"
+    },
+    {
+      "$ref": "#/$defs/event.step.started"
+    },
+    {
+      "$ref": "#/$defs/event.step.finished"
+    },
+    {
+      "$ref": "#/$defs/event.attachment.added"
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[\\x21-\\x7E]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "displayText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "durationMs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "stringMap": {
+      "description": "Key-value pairs with string values. Keys are bounded; at most 64 entries.",
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "status": {
+      "description": "Canonical attempt or step status. passed and failed are verdicts; skipped means the body did not run to a verdict by decision (disabled, assumption, runtime skip); inconclusive means execution ended without a verdict for reasons outside the test (interrupted, cancelled).",
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "skipped",
+        "inconclusive"
+      ]
+    },
+    "expectedStatus": {
+      "description": "What the test author declared the attempt should end with. Absent means passed. A consumer derives 'expected failure' (failed/failed) and 'unexpected pass' (passed/failed) from status and expectedStatus.",
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "skipped"
+      ]
+    },
+    "location": {
+      "description": "Where the test or step is defined, for display only. Never resolved on a server.",
+      "type": "object",
+      "required": [
+        "file"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "pathSegment": {
+      "description": "One container in the runner's own hierarchy. Well-known kinds are 'file' and 'group'; a runner-specific kind (for example Playwright 'project') is permitted and treated like a group by consumers that do not know it.",
+      "type": "object",
+      "required": [
+        "kind",
+        "name"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z][a-zA-Z0-9-]*$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      }
+    },
+    "component": {
+      "description": "A named, versioned piece of software: the adapter that produced the events, or the runner it observed.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/shortText"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "type": {
+          "description": "Runner-native classification, for example a Java exception class or an error name.",
+          "type": "string",
+          "maxLength": 512
+        },
+        "stackTrace": {
+          "type": "string",
+          "maxLength": 262144
+        },
+        "phase": {
+          "description": "Where the failure originated when the runner can tell: shared or per-test setup, the test body, or teardown.",
+          "type": "string",
+          "enum": [
+            "setup",
+            "test",
+            "teardown"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/failure"
+      }
+    },
+    "testCase": {
+      "type": "object",
+      "required": [
+        "executionId",
+        "displayName",
+        "path",
+        "historicalIdStability"
+      ],
+      "properties": {
+        "executionId": {
+          "description": "Identifies the logical test within this run. Every attempt of the same test in the run carries the same executionId.",
+          "$ref": "#/$defs/identifier"
+        },
+        "historicalId": {
+          "description": "Identifies the same logical test across runs. Derived by the adapter. Required unless historicalIdStability is 'unavailable'.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "historicalIdStability": {
+          "description": "stable: the adapter expects the historicalId to survive unrelated edits. uncertain: it is derived from positional information such as indexes or line numbers. unavailable: no historical identity can be given (for example a dynamically generated test).",
+          "type": "string",
+          "enum": [
+            "stable",
+            "uncertain",
+            "unavailable"
+          ]
+        },
+        "displayName": {
+          "$ref": "#/$defs/displayText"
+        },
+        "path": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/pathSegment"
+          }
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        },
+        "tags": {
+          "$ref": "#/$defs/tags"
+        },
+        "labels": {
+          "$ref": "#/$defs/stringMap"
+        }
+      },
+      "if": {
+        "properties": {
+          "historicalIdStability": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "historicalId": false
+        }
+      },
+      "else": {
+        "required": [
+          "historicalId"
+        ]
+      }
+    },
+    "event.session.started": {
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "const": "session.started"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "producer"
+          ],
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/component"
+            },
+            "runner": {
+              "$ref": "#/$defs/component"
+            },
+            "environment": {
+              "description": "Facts about the system under test and the machine, from an explicit allowlist only.",
+              "$ref": "#/$defs/stringMap"
+            },
+            "executor": {
+              "description": "The CI or local context that ran the session.",
+              "type": "object",
+              "properties": {
+                "name": {
+                  "$ref": "#/$defs/shortText"
+                },
+                "buildId": {
+                  "$ref": "#/$defs/shortText"
+                },
+                "buildUrl": {
+                  "type": "string",
+                  "maxLength": 2048
+                }
+              }
+            },
+            "source": {
+              "description": "Version control state of the tested code.",
+              "type": "object",
+              "properties": {
+                "repository": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "revision": {
+                  "$ref": "#/$defs/shortText"
+                },
+                "branch": {
+                  "$ref": "#/$defs/shortText"
+                }
+              }
+            },
+            "labels": {
+              "$ref": "#/$defs/stringMap"
+            }
+          }
+        }
+      }
+    },
+    "event.session.finished": {
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "const": "session.finished"
+        },
+        "payload": {
+          "type": "object"
+        }
+      }
+    },
+    "event.run.finished": {
+      "type": "object",
+      "description": "Emitted only by a producer that knows every session of the run has finished. After it, no further event for the run is valid.",
+      "properties": {
+        "eventType": {
+          "const": "run.finished"
+        },
+        "payload": {
+          "type": "object"
+        }
+      }
+    },
+    "event.attempt.started": {
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "const": "attempt.started"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "attemptId",
+            "attemptNumber",
+            "test"
+          ],
+          "properties": {
+            "attemptId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "attemptNumber": {
+              "description": "1 for the first execution of the test in this run, 2 for the first retry, and so on.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "test": {
+              "$ref": "#/$defs/testCase"
+            }
+          }
+        }
+      }
+    },
+    "event.attempt.finished": {
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "const": "attempt.finished"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "attemptId",
+            "status"
+          ],
+          "properties": {
+            "attemptId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "status": {
+              "$ref": "#/$defs/status"
+            },
+            "rawStatus": {
+              "description": "The runner's own status word, preserved for display and for mappings that lose information.",
+              "type": "string",
+              "maxLength": 64
+            },
+            "expectedStatus": {
+              "$ref": "#/$defs/expectedStatus"
+            },
+            "durationMs": {
+              "$ref": "#/$defs/durationMs"
+            },
+            "failures": {
+              "$ref": "#/$defs/failures"
+            }
+          }
+        }
+      }
+    },
+    "event.step.started": {
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "const": "step.started"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "stepId",
+            "attemptId",
+            "name"
+          ],
+          "properties": {
+            "stepId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "attemptId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "parentStepId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "name": {
+              "$ref": "#/$defs/displayText"
+            },
+            "kind": {
+              "description": "Runner-native step category, for example 'hook', 'expect', 'http', 'background'.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "location": {
+              "$ref": "#/$defs/location"
+            }
+          }
+        }
+      }
+    },
+    "event.step.finished": {
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "const": "step.finished"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "stepId",
+            "attemptId",
+            "status"
+          ],
+          "properties": {
+            "stepId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "attemptId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "status": {
+              "$ref": "#/$defs/status"
+            },
+            "rawStatus": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "durationMs": {
+              "$ref": "#/$defs/durationMs"
+            },
+            "failures": {
+              "$ref": "#/$defs/failures"
+            }
+          }
+        }
+      }
+    },
+    "event.attachment.added": {
+      "type": "object",
+      "description": "Metadata for bytes stored outside the event stream. Must be emitted before the attempt.finished of the attempt it belongs to.",
+      "properties": {
+        "eventType": {
+          "const": "attachment.added"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "attemptId",
+            "name",
+            "mediaType",
+            "sizeBytes",
+            "sha256"
+          ],
+          "properties": {
+            "attemptId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "stepId": {
+              "$ref": "#/$defs/identifier"
+            },
+            "name": {
+              "description": "Display name chosen by the producer. Never used to locate the bytes.",
+              "$ref": "#/$defs/shortText"
+            },
+            "mediaType": {
+              "type": "string",
+              "maxLength": 255,
+              "pattern": "^[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+(;.*)?$"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "sha256": {
+              "description": "Lower-case hex SHA-256 of the bytes as stored, after any producer-side redaction. Integrity and deduplication metadata; the sidecar file of a file sink is named by it.",
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

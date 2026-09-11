@@ -1,0 +1,534 @@
+{
+  "protocolVersion": "0.1.0",
+  "schema": "../schema/event.schema.json",
+  "events": {
+    "valid": [
+      {
+        "file": "events/valid/session-started-minimal.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-started-full.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/run-finished.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-started-full.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-started-historical-unavailable.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-started-retry-uncertain.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-started-boundary-max.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-minimal.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-failed-full.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-expected-failure.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-unexpected-pass.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-skipped-aborted.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-inconclusive.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attempt-finished-boundary-max.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/step-started-minimal.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/step-started-nested.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/step-finished-failed.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/step-finished-minimal.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attachment-added-minimal.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/attachment-added-step-scoped-empty.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/unknown-type-ignorable.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/forward-compatible-unknown-fields.json",
+        "roundTrip": "idempotent"
+      },
+      {
+        "file": "events/valid/newer-patch-version.json",
+        "roundTrip": "exact"
+      }
+    ],
+    "invalid": [
+      {
+        "file": "events/invalid/missing-protocol-version.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/protocol-version-not-semver.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/protocolVersion",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/unsupported-major.json",
+        "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+        "pointer": "/protocolVersion",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/unsupported-minor.json",
+        "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+        "pointer": "/protocolVersion",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/unknown-type-not-ignorable.json",
+        "reason": "UNSUPPORTED_EVENT_TYPE",
+        "pointer": "/eventType",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/known-type-marked-ignorable-still-validated.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/event-type-bad-format.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/eventType",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/sequence-zero.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/sequence",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/sequence-not-integer.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/sequence",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/occurred-at-without-offset.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/occurredAt",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/event-id-with-space.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/eventId",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/event-id-too-long.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/eventId",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/payload-not-object.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/status-unknown-value.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/expected-status-inconclusive.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/expectedStatus",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/duration-negative.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/durationMs",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/duration-fractional.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/durationMs",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/failures-empty-array.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/failure-without-message.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures/0",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/failure-phase-unknown.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures/0/phase",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/failures-too-many.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/attempt-number-zero.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/attemptNumber",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/historical-id-missing-when-stable.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/historical-id-present-when-unavailable.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/historical-stability-unknown.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/historicalIdStability",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/path-segment-without-kind.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/path/0",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/path-segment-kind-uppercase.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/path/0/kind",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/path-too-deep.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/path",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/display-name-empty.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/displayName",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/tags-not-strings.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/tags/0",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/labels-value-not-string.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/labels/k",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/labels-too-many.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/labels",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/location-without-file.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/location",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/location-line-zero.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/test/location/line",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/producer-missing.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/producer-name-empty.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/producer/name",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/environment-not-map.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/environment",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/step-without-name.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/step-finished-status-missing.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/attachment-sha256-uppercase.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/sha256",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/attachment-sha256-short.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/sha256",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/attachment-media-type-invalid.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/mediaType",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/attachment-size-negative.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/sizeBytes",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/attachment-bytes-inline.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/ignorable-not-boolean.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/ignorable",
+        "codec": "reject"
+      }
+    ]
+  },
+  "runs": [
+    {
+      "dir": "runs/junit",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": true,
+      "sessions": 1,
+      "attempts": 14
+    },
+    {
+      "dir": "runs/playwright",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 2,
+      "attempts": 12
+    },
+    {
+      "dir": "runs/karate",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": true,
+      "sessions": 1,
+      "attempts": 7
+    },
+    {
+      "dir": "runs/crashed",
+      "outcome": "VALID",
+      "complete": false,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2
+    },
+    {
+      "dir": "runs/duplicate-event-identical",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 1,
+      "duplicates": 1
+    },
+    {
+      "dir": "runs/compat/unknown-event-ignorable",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": true,
+      "sessions": 1,
+      "attempts": 1,
+      "ignored": 1
+    },
+    {
+      "dir": "runs/compat/newer-patch-version",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 1,
+      "roundTrip": "idempotent"
+    },
+    {
+      "dir": "runs/compat/unsupported-event",
+      "outcome": "INVALID",
+      "reason": "UNSUPPORTED_EVENT_TYPE",
+      "line": 3
+    },
+    {
+      "dir": "runs/compat/unsupported-major",
+      "outcome": "INVALID",
+      "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+      "line": 2
+    },
+    {
+      "dir": "runs/compat/unsupported-minor",
+      "outcome": "INVALID",
+      "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+      "line": 2
+    },
+    {
+      "dir": "runs/invalid/duplicate-completion",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "DUPLICATE_ATTEMPT_FINISHED",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/sequence-gap",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SEQUENCE_GAP",
+      "line": 3
+    },
+    {
+      "dir": "runs/invalid/attachment-after-finish",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "ATTACHMENT_AFTER_ATTEMPT_FINISHED",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/finished-before-started",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "ATTEMPT_NOT_STARTED",
+      "line": 2
+    },
+    {
+      "dir": "runs/invalid/step-outside-attempt",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "STEP_OUTSIDE_ATTEMPT",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/event-after-run-finished",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "EVENT_AFTER_RUN_FINISHED",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/session-not-started",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_NOT_STARTED",
+      "line": 1
+    },
+    {
+      "dir": "runs/invalid/attachment-hash-mismatch",
+      "outcome": "INVALID",
+      "reason": "ATTACHMENT_HASH_MISMATCH",
+      "line": 3
+    },
+    {
+      "dir": "runs/invalid/attachment-missing",
+      "outcome": "INVALID",
+      "reason": "ATTACHMENT_MISSING",
+      "line": 3
+    },
+    {
+      "dir": "runs/invalid/malformed-json",
+      "outcome": "INVALID",
+      "reason": "MALFORMED_JSON",
+      "line": 2
+    },
+    {
+      "dir": "runs/invalid/not-an-object",
+      "outcome": "INVALID",
+      "reason": "MALFORMED_JSON",
+      "line": 2
+    },
+    {
+      "dir": "runs/invalid/schema-invalid-line",
+      "outcome": "INVALID",
+      "reason": "SCHEMA_INVALID",
+      "line": 2
+    }
+  ]
+}

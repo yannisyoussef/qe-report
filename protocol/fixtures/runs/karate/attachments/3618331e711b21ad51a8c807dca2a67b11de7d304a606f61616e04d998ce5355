@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "http://127.0.0.1:8080/items",
+    "headers": {
+      "Authorization": "[REDACTED]"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Set-Cookie": "[REDACTED]"
+    },
+    "body": [
+      {
+        "id": 1
+      },
+      {
+        "id": 2
+      }
+    ]
+  }
+}

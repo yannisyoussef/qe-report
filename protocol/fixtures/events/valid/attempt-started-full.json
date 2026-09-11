@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-1-0004",
+  "eventType": "attempt.started",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 4,
+  "occurredAt": "2026-09-11T10:00:03.000+00:00",
+  "payload": {
+    "attemptId": "a-1",
+    "attemptNumber": 1,
+    "test": {
+      "executionId": "t-1",
+      "historicalId": "suite::t-1",
+      "historicalIdStability": "stable",
+      "displayName": "a test",
+      "path": [
+        {
+          "kind": "file",
+          "name": "a.spec"
+        },
+        {
+          "kind": "group",
+          "name": "group"
+        }
+      ],
+      "location": {
+        "file": "a.spec",
+        "line": 3,
+        "column": 1
+      },
+      "tags": [
+        "smoke"
+      ],
+      "labels": {
+        "owner": "qa"
+      }
+    }
+  }
+}

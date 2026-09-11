@@ -1,0 +1,17 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-1-0020",
+  "eventType": "attachment.added",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 20,
+  "occurredAt": "2026-09-11T10:00:19.000+00:00",
+  "payload": {
+    "attemptId": "a-1",
+    "stepId": "st-1",
+    "name": "log",
+    "mediaType": "text/plain; charset=utf-8",
+    "sizeBytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-1-0005",
+  "eventType": "attempt.started",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 5,
+  "occurredAt": "2026-09-11T10:00:04.000+00:00",
+  "payload": {
+    "attemptId": "a-2",
+    "attemptNumber": 1,
+    "test": {
+      "executionId": "t-2",
+      "historicalIdStability": "unavailable",
+      "displayName": "dynamic test #2",
+      "path": [],
+      "historicalId": "x"
+    }
+  }
+}

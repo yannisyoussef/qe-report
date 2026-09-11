@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "0.1.0",
+  "eventId": "sess-1-0013",
+  "eventType": "attempt.finished",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 13,
+  "occurredAt": "2026-09-11T10:00:12.000+00:00",
+  "payload": {
+    "attemptId": "a-6",
+    "status": "inconclusive",
+    "rawStatus": "interrupted"
+  }
+}

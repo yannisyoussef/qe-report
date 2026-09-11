@@ -1,0 +1,151 @@
+{
+  "text": [
+    {
+      "name": "authorization header line",
+      "input": "GET /items HTTP/1.1\nAuthorization: Bearer abc.def.ghi\nAccept: application/json\n",
+      "expected": "GET /items HTTP/1.1\nAuthorization: [REDACTED]\nAccept: application/json\n"
+    },
+    {
+      "name": "authorization header json",
+      "input": "{\"Authorization\": \"Basic dXNlcjpwYXNz\", \"Accept\": \"text/plain\"}",
+      "expected": "{\"Authorization\": \"[REDACTED]\", \"Accept\": \"text/plain\"}"
+    },
+    {
+      "name": "cookie and set-cookie",
+      "input": "Cookie: session=abc123; theme=dark\nSet-Cookie: sid=XYZ; Path=/; HttpOnly",
+      "expected": "Cookie: [REDACTED]\nSet-Cookie: [REDACTED]"
+    },
+    {
+      "name": "proxy authorization",
+      "input": "proxy-authorization=Basic Zm9vOmJhcg==",
+      "expected": "proxy-authorization=[REDACTED]"
+    },
+    {
+      "name": "api key header variants",
+      "input": "X-API-Key: k-123\napi-key: k-456\nx-auth-token: t-789\nX-Amz-Security-Token: FwoGZXIvYXdzE",
+      "expected": "X-API-Key: [REDACTED]\napi-key: [REDACTED]\nx-auth-token: [REDACTED]\nX-Amz-Security-Token: [REDACTED]"
+    },
+    {
+      "name": "bearer bare",
+      "input": "request failed with bearer eyJabcDEF.ghiJKL and token=xyz",
+      "expected": "request failed with Bearer [REDACTED] and token=[REDACTED]"
+    },
+    {
+      "name": "jwt bare",
+      "input": "jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c end",
+      "expected": "jwt=[REDACTED] end"
+    },
+    {
+      "name": "jwt inside sentence",
+      "input": "The value eyJhbGciOiJIUzI1NiJ9.eyJmb28iOiJiYXIifQ.dGhpc2lzYXNpZ25hdHVyZQ was rejected",
+      "expected": "The value [REDACTED] was rejected"
+    },
+    {
+      "name": "aws access key id",
+      "input": "using AKIAIOSFODNN7EXAMPLE and ASIAIOSFODNN7EXAMPLE now",
+      "expected": "using [REDACTED] and [REDACTED] now"
+    },
+    {
+      "name": "github token",
+      "input": "remote: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij0123 rejected",
+      "expected": "remote: [REDACTED] rejected"
+    },
+    {
+      "name": "slack token",
+      "input": "xoxb-1234567890-abcdefghij",
+      "expected": "[REDACTED]"
+    },
+    {
+      "name": "google api key",
+      "input": "key=AIzaSyA1234567890abcdefghijklmnopqrstuv",
+      "expected": "key=[REDACTED]"
+    },
+    {
+      "name": "password key value forms",
+      "input": "password=hunter2&user=bob\npasswd: secret1\n\"pwd\": \"p@ss w0rd\"\nPassword = 'quoted one'",
+      "expected": "password=[REDACTED]&user=bob\npasswd: [REDACTED]\n\"pwd\": \"[REDACTED]\"\nPassword = '[REDACTED]'"
+    },
+    {
+      "name": "secret style keys",
+      "input": "client_secret=abc123, secret: shh, access_token=tok, refresh-token: rt, apiKey=xyz; next",
+      "expected": "client_secret=[REDACTED], secret: [REDACTED], access_token=[REDACTED], refresh-token: [REDACTED], apiKey=[REDACTED]; next"
+    },
+    {
+      "name": "password word in prose is kept",
+      "input": "The password field was empty and the token expired at 12:00",
+      "expected": "The password field was empty and the token expired at 12:00"
+    },
+    {
+      "name": "private key block",
+      "input": "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nAbCd\n-----END RSA PRIVATE KEY-----\nafter",
+      "expected": "before\n[REDACTED]\nafter"
+    },
+    {
+      "name": "url userinfo",
+      "input": "connecting to https://user:pa55@example.invalid/path and http://example.invalid/ok",
+      "expected": "connecting to https://[REDACTED]@example.invalid/path and http://example.invalid/ok"
+    },
+    {
+      "name": "url userinfo any scheme",
+      "input": "postgres://user:pw@host/db amqp://guest:guest@rabbit:5672/ redis://h/0",
+      "expected": "postgres://[REDACTED]@host/db amqp://[REDACTED]@rabbit:5672/ redis://h/0"
+    },
+    {
+      "name": "json body nested",
+      "input": "{\"user\":{\"name\":\"bob\",\"password\":\"x1\"},\"tokens\":{\"token\":\"t1\",\"refresh_token\":\"t2\"}}",
+      "expected": "{\"user\":{\"name\":\"bob\",\"password\":\"[REDACTED]\"},\"tokens\":{\"token\":\"[REDACTED]\",\"refresh_token\":\"[REDACTED]\"}}"
+    },
+    {
+      "name": "karate step text",
+      "input": "header Authorization = 'Bearer secret-token-123'",
+      "expected": "header Authorization = '[REDACTED]'"
+    },
+    {
+      "name": "multiline stack trace",
+      "input": "java.lang.IllegalStateException: token=abc\n\tat com.example.Foo.bar(Foo.java:10)\nCaused by: Authorization: Bearer x.y.z",
+      "expected": "java.lang.IllegalStateException: token=[REDACTED]\n\tat com.example.Foo.bar(Foo.java:10)\nCaused by: Authorization: [REDACTED]"
+    },
+    {
+      "name": "no secrets",
+      "input": "expected: <1> but was: <2>",
+      "expected": "expected: <1> but was: <2>"
+    },
+    {
+      "name": "empty",
+      "input": "",
+      "expected": ""
+    },
+    {
+      "name": "unicode around",
+      "input": "Käse token: käse-token Ünd more",
+      "expected": "Käse token: [REDACTED]"
+    },
+    {
+      "name": "key without separator is kept",
+      "input": "token expired; the secret was rotated",
+      "expected": "token expired; the secret was rotated"
+    },
+    {
+      "name": "header name only in prose",
+      "input": "Set the Authorization header before calling",
+      "expected": "Set the Authorization header before calling"
+    }
+  ],
+  "headers": [
+    {
+      "name": "header map",
+      "input": {
+        "Authorization": "Bearer abc",
+        "Content-Type": "application/json",
+        "X-Trace": "password=in-text",
+        "set-cookie": "a=b"
+      },
+      "expected": {
+        "Authorization": "[REDACTED]",
+        "Content-Type": "application/json",
+        "X-Trace": "password=[REDACTED]",
+        "set-cookie": "[REDACTED]"
+      }
+    }
+  ]
+}
