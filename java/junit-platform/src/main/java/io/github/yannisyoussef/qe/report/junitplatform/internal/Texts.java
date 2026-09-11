@@ -12,6 +12,7 @@ final class Texts {
   static final int MAX_DISPLAY = 1024;
   static final int MAX_LABEL = 1024;
   static final int MAX_TAG = 128;
+  static final int MAX_TYPE = 512;
 
   private Texts() {}
 
@@ -19,9 +20,9 @@ final class Texts {
     if (text.length() <= max) {
       return text;
     }
-    String marker = " [truncated " + (text.length() - max) + " characters]";
-    int keep = Math.max(0, max - marker.length());
-    return text.substring(0, keep) + marker;
+    // The marker takes room of its own, so the count it shows includes what it displaced.
+    int keep = Math.max(0, max - (" [truncated " + text.length() + " characters]").length());
+    return text.substring(0, keep) + " [truncated " + (text.length() - keep) + " characters]";
   }
 
   static String stackTrace(Throwable t) {

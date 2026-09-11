@@ -13,6 +13,7 @@ import io.github.yannisyoussef.qe.report.protocol.Failure;
 import io.github.yannisyoussef.qe.report.protocol.FailurePhase;
 import io.github.yannisyoussef.qe.report.protocol.HistoricalIdStability;
 import io.github.yannisyoussef.qe.report.protocol.PathSegment;
+import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import java.nio.charset.StandardCharsets;
@@ -44,6 +45,10 @@ class LifecycleMappingTest {
             qe.fixtures.LifecycleFixtures.BodyAndAfterEachFail.class,
             qe.fixtures.LifecycleFixtures.BeforeAllFails.class,
             qe.fixtures.LifecycleFixtures.AfterAllFails.class,
+            qe.fixtures.LifecycleFixtures.AfterAllLeaksSecret.class,
+            qe.fixtures.LifecycleFixtures.BeforeAllAndAfterAllFail.class,
+            qe.fixtures.LifecycleFixtures.AllDisabledAndAfterAllFails.class,
+            qe.fixtures.LifecycleFixtures.FactoryFails.class,
             qe.fixtures.LifecycleFixtures.ExtensionFails.class,
             qe.fixtures.DisabledContainer.class,
             qe.fixtures.ReportingTests.class);
@@ -249,23 +254,138 @@ class LifecycleMappingTest {
   }
 
   @Test
-  void afterAllFailureIsNotAttributedToTestsAndIsReportedVisibly() {
+  void afterAllFailureIsOneScopeFailureOfTheClassThatLeavesChildVerdictsAlone() {
+    ScopeFailed scope = scopeUnder("AfterAllFails");
     assertEquals(
-        Status.PASSED,
-        byHistory("qe.fixtures.LifecycleFixtures$AfterAllFails#a()").finished().status());
+        List.of(
+            new PathSegment("engine", "junit-jupiter"),
+            new PathSegment("class", "qe.fixtures.LifecycleFixtures$AfterAllFails")),
+        scope.path());
+    assertEquals("LifecycleFixtures$AfterAllFails", scope.displayName(), "JUnit's own name");
+    assertEquals("FAILED", scope.rawStatus());
+    assertNull(scope.location(), "JUnit gives no file or line for a class");
+    assertEquals(1, scope.failures().size());
+    Failure f = scope.failures().get(0);
+    assertEquals(FailurePhase.TEARDOWN, f.phase());
+    assertEquals("java.lang.IllegalStateException", f.type());
+    assertEquals("afterAll broke", f.message());
+    assertTrue(f.stackTrace().contains("qe.fixtures.LifecycleFixtures$AfterAllFails.aa"));
+
+    Attempt a = byHistory("qe.fixtures.LifecycleFixtures$AfterAllFails#a()");
+    assertEquals(Status.PASSED, a.finished().status());
+    assertEquals("SUCCESSFUL", a.finished().rawStatus());
+    assertEquals(List.of(), a.finished().failures());
+    assertNotNull(a.finished().durationMs(), "a real execution, not a synthesised one");
+    Attempt b = byHistory("qe.fixtures.LifecycleFixtures$AfterAllFails#b()");
+    assertEquals(Status.FAILED, b.finished().status());
+    assertEquals("b broke", b.finished().failures().get(0).message());
+    assertEquals(FailurePhase.TEST, b.finished().failures().get(0).phase());
+    assertNotNull(b.finished().durationMs());
+    assertEquals(List.of("a()", "b()"), names(attemptsUnder("AfterAllFails")), "no invented test");
+    assertFalse(run.log().contains("AfterAllFails"), "nothing about it on standard error");
+  }
+
+  @Test
+  void scopeFailureIsEmittedAfterTheTestsBelowItFinished() {
+    ScopeFailed scope = scopeUnder("AfterAllFails");
+    List<String> children =
+        attemptsUnder("AfterAllFails").stream().map(a -> a.finished().attemptId()).toList();
+    int scopeIndex = -1;
+    int lastChildFinish = -1;
+    for (int i = 0; i < run.events().size(); i++) {
+      var e = run.events().get(i);
+      if (e.payload() instanceof ScopeFailed s && s.equals(scope)) {
+        scopeIndex = i;
+      }
+      if (e.payload() instanceof io.github.yannisyoussef.qe.report.protocol.AttemptFinished f
+          && children.contains(f.attemptId())) {
+        lastChildFinish = i;
+      }
+    }
+    assertTrue(scopeIndex > lastChildFinish, "scope.failed follows its last child");
+  }
+
+  @Test
+  void scopePathIsAPrefixOfEveryTestPathBelowTheScope() {
+    ScopeFailed scope = scopeUnder("AfterAllFails");
     assertEquals(
-        Status.FAILED,
-        byHistory("qe.fixtures.LifecycleFixtures$AfterAllFails#b()").finished().status());
+        new PathSegment("class", "qe.fixtures.LifecycleFixtures$AfterAllFails"),
+        scope.path().get(scope.path().size() - 1),
+        "the path ends with the failed container itself");
+    List<Attempt> children = attemptsUnder("AfterAllFails");
+    assertEquals(2, children.size());
+    for (Attempt child : children) {
+      assertEquals(scope.path(), prefix(child.started().test().path(), scope.path().size()));
+    }
+    for (ScopeFailed s : run.scopeFailures()) {
+      PathSegment self = s.path().get(s.path().size() - 1);
+      for (Attempt a : run.attempts().values()) {
+        if (a.started().test().path().contains(self)) {
+          assertEquals(
+              s.path(),
+              prefix(a.started().test().path(), s.path().size()),
+              "every test below a failed scope starts with its path: " + s.path());
+        }
+      }
+    }
+  }
+
+  @Test
+  void secretsInScopeFailuresAreRedacted() throws Exception {
+    Failure f = scopeUnder("AfterAllLeaksSecret").failures().get(0);
+    assertEquals("cleanup failed with Authorization: [REDACTED]", f.message());
+    assertFalse(f.stackTrace().contains("abc.def.ghi"));
+    assertEquals(FailurePhase.TEARDOWN, f.phase());
+    String file = Files.readString(run.eventFile(), StandardCharsets.UTF_8);
+    assertFalse(file.contains("abc.def.ghi"), "nothing on disk carries the secret");
+  }
+
+  @Test
+  void beforeAllFailureDoesNotAlsoBecomeAScopeFailure() {
+    assertEquals(List.of(), scopesUnder("BeforeAllFails"));
+    assertEquals(3, attemptsUnder("BeforeAllFails").size(), "only the synthesised set-up failures");
     assertEquals(
-        2,
-        run.attempts().values().stream()
-            .filter(
-                a ->
-                    a.started().test().path().stream()
-                        .anyMatch(p -> p.name().contains("AfterAllFails")))
-            .count());
-    assertTrue(run.log().contains("AfterAllFails' failed after its tests completed"), run.log());
-    assertTrue(run.log().contains("afterAll broke"), run.log());
+        List.of(
+            "LifecycleFixtures$AfterAllFails",
+            "LifecycleFixtures$AfterAllLeaksSecret",
+            "LifecycleFixtures$AllDisabledAndAfterAllFails",
+            "breaks()"),
+        run.scopeFailures().stream().map(ScopeFailed::displayName).sorted().toList(),
+        "no other container of this run is a scope failure");
+  }
+
+  @Test
+  void afterAllFailureWithEveryTestSkippedIsAScopeFailureAndInventsNoAttempt() {
+    ScopeFailed scope = scopeUnder("AllDisabledAndAfterAllFails");
+    assertEquals(FailurePhase.TEARDOWN, scope.failures().get(0).phase());
+    assertEquals("afterAll broke with nothing run", scope.failures().get(0).message());
+    List<Attempt> skipped = attemptsUnder("AllDisabledAndAfterAllFails");
+    assertEquals(List.of("a()", "b()"), names(skipped));
+    for (Attempt a : skipped) {
+      assertEquals(Status.SKIPPED, a.finished().status());
+      assertEquals(1, a.started().attemptNumber(), "skipped once, never re-reported as failed");
+    }
+  }
+
+  @Test
+  void failingTestFactoryIsAScopeFailureWithoutATestPhase() {
+    ScopeFailed scope = scopeUnder("FactoryFails");
+    assertEquals(new PathSegment("group", "breaks()"), scope.path().get(scope.path().size() - 1));
+    assertEquals("breaks()", scope.displayName());
+    assertEquals("factory broke", scope.failures().get(0).message());
+    assertNull(scope.failures().get(0).phase(), "a test phase means nothing at a scope");
+    assertEquals(List.of(), attemptsUnder("FactoryFails"), "no dynamic test was registered");
+  }
+
+  @Test
+  void setUpAndTearDownBothFailingIsReportedBySetUpRuleOnly() {
+    assertEquals(List.of(), scopesUnder("BeforeAllAndAfterAllFail"));
+    List<Attempt> prevented = attemptsUnder("BeforeAllAndAfterAllFail");
+    assertEquals(List.of("t()"), names(prevented));
+    Failure f = prevented.get(0).finished().failures().get(0);
+    assertEquals(FailurePhase.SETUP, f.phase());
+    assertEquals("beforeAll broke", f.message());
+    assertTrue(f.stackTrace().contains("afterAll broke too"), "JUnit suppresses the second one");
   }
 
   @Test
@@ -319,6 +439,37 @@ class LifecycleMappingTest {
         run.attempts().values().stream()
             .filter(a -> a.finished().status() == Status.PASSED)
             .count());
+  }
+
+  private static List<Attempt> attemptsUnder(String className) {
+    return run.attempts().values().stream()
+        .filter(a -> a.started().test().path().stream().anyMatch(p -> isClass(p, className)))
+        .toList();
+  }
+
+  private static List<ScopeFailed> scopesUnder(String className) {
+    return run.scopeFailures().stream()
+        .filter(s -> s.path().stream().anyMatch(p -> isClass(p, className)))
+        .toList();
+  }
+
+  private static ScopeFailed scopeUnder(String className) {
+    List<ScopeFailed> found = scopesUnder(className);
+    assertEquals(1, found.size(), "exactly one scope failure under " + className + ": " + found);
+    return found.get(0);
+  }
+
+  /** The segment of one of the lifecycle fixture classes, by its simple name. */
+  private static boolean isClass(PathSegment segment, String className) {
+    return segment.kind().equals("class") && segment.name().endsWith("$" + className);
+  }
+
+  private static List<String> names(List<Attempt> attempts) {
+    return attempts.stream().map(a -> a.started().test().displayName()).sorted().toList();
+  }
+
+  private static List<PathSegment> prefix(List<PathSegment> path, int length) {
+    return path.size() < length ? path : path.subList(0, length);
   }
 
   private static FailurePhase phaseOf(String historicalId) {

@@ -66,7 +66,9 @@ The run directory is the SDK's file layout: `events/<session file>.ndjson` per s
 `attachments/<sha256>`. One JUnit test plan is one session. Gradle and Surefire run one plan per
 fork, so a fork is a session. No fork emits `run.finished`: a worker cannot know that every
 other worker has finished, and a run consisting of finished sessions without `run.finished` is
-complete and open by protocol definition. Validate a run with the qe-report validator:
+complete and open by protocol definition. The adapter writes protocol line 0.2: a run in which a
+container failed carries `scope.failed`, which a line 0.1 reader would not see. Validate a run
+with the qe-report validator:
 
 ```
 qe-report-validate build/qe-report --require-complete
@@ -83,7 +85,7 @@ qe-report-validate build/qe-report --require-complete
 | Skipped test (`@Disabled`, `@Ignore`) | a synthesised `attempt.started` and `attempt.finished` with `skipped`, `rawStatus: SKIPPED`, the reason in `failures[0].message`, no duration |
 | Skipped container | every planned test below it reported as skipped with the container's reason, so the count of planned tests stays honest |
 | Container failed before any test started (`@BeforeAll`) | every planned test below it reported as `failed` with the container's failure and `phase: setup`, no duration |
-| Container failed after its tests ran (`@AfterAll`) | not representable in protocol 0.1; the failure is printed on standard error and the run does not record it (see limitations) |
+| Container failed after its tests ran or were skipped (`@AfterAll`), or a container with no planned test (a throwing `@TestFactory`) | one `scope.failed` for the container: `path` is its own position in the hierarchy (a prefix of every test path below it), `displayName`, `rawStatus: FAILED`, and the failure with its inferred phase, `teardown` for `@AfterAll`; the tests below keep their own verdicts and no attempt is invented |
 | Failure | `message`, `type` (exception class), `stackTrace` (JUnit-pruned, bounded to 64 KiB with a visible marker), `phase` |
 | `TestReporter` entry on a test | a `text/plain` attachment named `junit-report-entry`, one `key: value` line per entry plus its timestamp, redacted like every text attachment |
 | `TestReporter` entry on a container | not recorded; reported once on standard error |
@@ -94,11 +96,12 @@ qe-report-validate build/qe-report --require-complete
 frames, so the top frame is the user's method, and its Jupiter annotation (`@BeforeEach`,
 `@AfterEach`, `@BeforeAll`, `@AfterAll`, `@Test` and the template annotations) or the callback
 interface of a throwing extension decides `setup`, `teardown`, or `test`. Where nothing decides,
-no phase is written.
+no phase is written, and a scope failure never carries `test`, which means nothing at a scope.
 
 ### Path and identity
 
-The test path is the JUnit hierarchy above the test, outermost first: the engine as an
+The test path is the JUnit hierarchy above the test, outermost first, and the path of a
+`scope.failed` is the same hierarchy ending with the failed container itself: the engine as an
 `engine` segment (`junit-jupiter`, `junit-vintage`), classes and nested classes as `class`
 segments with their binary names (`Outer$Inner`), and templates, factories, dynamic containers,
 and runners as `group` segments. JUnit provides no file or line for class and method sources, so
@@ -136,7 +139,8 @@ below; a version outside this list is unsupported until CI proves it.
 
 The consumer fixtures run Gradle 9.7 with `maxParallelForks` and `forkEvery`, and Maven Surefire
 3.6 with `forkCount` and `reuseForks=false`, both on JUnit 6.1.3, and their run directories are
-validated with the protocol validator in CI.
+validated with the protocol validator in CI, which derives the run verdict `failed` from their
+one failing test and one `@AfterAll` failure.
 
 ## Failure isolation
 
@@ -148,8 +152,9 @@ callback is contained the same way.
 
 ## Limitations
 
-- A container-level failure after its tests completed, such as `@AfterAll`, has no
-  representation in protocol 0.1. It is printed, not recorded, and not attributed to any test.
+- When `@BeforeAll` and `@AfterAll` both fail, JUnit delivers one container result whose
+  throwable is the set-up one, so the set-up rule applies and the teardown failure is only
+  visible as a suppressed exception in that stack trace.
 - The skip reason of a skipped test travels in `failures[0].message`, as the protocol corpus does.
 - Report entries published on a container are not recorded.
 - Durations are measured by the adapter, not reported by JUnit.

@@ -2,11 +2,15 @@ package qe.fixtures;
 
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -78,6 +82,53 @@ public final class LifecycleFixtures {
     @Test
     public void b() {
       fail("b broke");
+    }
+  }
+
+  public static class AfterAllLeaksSecret {
+    @AfterAll
+    public static void aa() {
+      throw new IllegalStateException("cleanup failed with Authorization: Bearer abc.def.ghi");
+    }
+
+    @Test
+    public void t() {}
+  }
+
+  public static class BeforeAllAndAfterAllFail {
+    @BeforeAll
+    public static void ba() {
+      throw new IllegalStateException("beforeAll broke");
+    }
+
+    @AfterAll
+    public static void aa() {
+      throw new IllegalStateException("afterAll broke too");
+    }
+
+    @Test
+    public void t() {}
+  }
+
+  public static class AllDisabledAndAfterAllFails {
+    @AfterAll
+    public static void aa() {
+      throw new IllegalStateException("afterAll broke with nothing run");
+    }
+
+    @Disabled("off")
+    @Test
+    public void a() {}
+
+    @Disabled("off")
+    @Test
+    public void b() {}
+  }
+
+  public static class FactoryFails {
+    @TestFactory
+    public Stream<DynamicTest> breaks() {
+      throw new IllegalStateException("factory broke");
     }
   }
 

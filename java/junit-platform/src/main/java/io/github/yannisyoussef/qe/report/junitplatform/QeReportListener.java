@@ -31,7 +31,7 @@ public final class QeReportListener implements TestExecutionListener {
   private final Clock clock;
   private final Diagnostics diagnostics;
   private int plansStarted;
-  private @Nullable RunReporter reporter;
+  private volatile @Nullable RunReporter reporter;
 
   /** Used by {@code ServiceLoader}. */
   public QeReportListener() {

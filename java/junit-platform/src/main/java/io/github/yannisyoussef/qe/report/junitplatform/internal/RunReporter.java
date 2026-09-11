@@ -5,6 +5,7 @@ import io.github.yannisyoussef.qe.report.protocol.AttemptStarted;
 import io.github.yannisyoussef.qe.report.protocol.Component;
 import io.github.yannisyoussef.qe.report.protocol.Failure;
 import io.github.yannisyoussef.qe.report.protocol.FailurePhase;
+import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.TestCase;
@@ -29,8 +30,9 @@ import org.junit.platform.launcher.TestIdentifier;
 import org.junit.platform.launcher.TestPlan;
 
 /**
- * Turns the lifecycle of one test plan into attempts of one session. Safe under concurrent
- * callbacks: state lives in concurrent maps keyed by unique id, and the SDK serialises writes.
+ * Turns the lifecycle of one test plan into the attempts and scope failures of one session. Safe
+ * under concurrent callbacks: state lives in concurrent maps keyed by unique id, and the SDK
+ * serialises writes.
  *
  * <p>State is bounded to open attempts, open containers, and one counter per test that has executed
  * in this plan (needed to number repeated executions of the same unique id).
@@ -43,8 +45,9 @@ public final class RunReporter {
 
   private record OpenAttempt(String attemptId, long startedAt) {}
 
+  /** A container being executed; counts the tests below it that started or were skipped. */
   private static final class OpenContainer {
-    final AtomicInteger startedTests = new AtomicInteger();
+    final AtomicInteger seenTests = new AtomicInteger();
   }
 
   private final ReportSession session;
@@ -99,12 +102,7 @@ public final class RunReporter {
     if (!id.isTest()) {
       return;
     }
-    for (Optional<TestIdentifier> c = p.getParent(id); c.isPresent(); c = p.getParent(c.get())) {
-      OpenContainer oc = containers.get(c.get().getUniqueId());
-      if (oc != null) {
-        oc.startedTests.incrementAndGet();
-      }
-    }
+    noteSeen(p, id);
     startAttempt(p, id);
   }
 
@@ -136,12 +134,13 @@ public final class RunReporter {
     Throwable cause = result.getThrowable().orElse(null);
     Set<TestIdentifier> planned = p.getDescendants(id);
     long plannedTests = planned.stream().filter(TestIdentifier::isTest).count();
-    if (container != null && container.startedTests.get() == 0 && plannedTests > 0) {
-      // Shared set-up failed before any planned test could start: each planned test is reported
-      // as prevented by set-up, with the container's failure. See the adapter documentation.
+    if (container != null && container.seenTests.get() == 0 && plannedTests > 0) {
+      // Shared set-up failed before any planned test could start or be skipped: each planned test
+      // is reported as prevented by set-up, with the container's failure.
       Failure failure =
           cause == null
-              ? Failure.of("container " + id.getDisplayName() + " failed")
+              ? Failure.of(
+                  Texts.bounded("container " + id.getDisplayName() + " failed", Texts.MAX_MESSAGE))
               : JunitMapper.failure(cause, FailurePhase.SETUP);
       for (TestIdentifier t : planned) {
         if (t.isTest()) {
@@ -150,14 +149,25 @@ public final class RunReporter {
       }
       return;
     }
-    // Container failed after its tests ran (a JUnit @AfterAll, for example). Protocol 0.1 has no
-    // event for a failure that belongs to no test; it is not hidden and not attributed to a test.
-    diagnostics.once(
-        "container-failure:" + id.getUniqueId(),
-        "container '"
-            + id.getDisplayName()
-            + "' failed after its tests completed; protocol 0.1 cannot represent a container-level failure, so the run does not record it",
-        cause);
+    // Container failed after its tests ran or were skipped (a JUnit @AfterAll, for example), or
+    // had no planned test at all. The failure belongs to the container itself: one scope failure
+    // names it, and the tests below keep their verdicts. A phase of "test" means nothing at a
+    // scope, so only set-up and teardown are kept from the throw site.
+    FailurePhase phase = cause == null ? null : PhaseInference.infer(cause);
+    List<Failure> failures =
+        cause == null
+            ? List.of(
+                Failure.of(
+                    Texts.bounded(
+                        "container " + id.getDisplayName() + " failed", Texts.MAX_MESSAGE)))
+            : List.of(JunitMapper.failure(cause, phase == FailurePhase.TEST ? null : phase));
+    session.emit(
+        new ScopeFailed(
+            JunitMapper.scopePath(p, id),
+            Texts.bounded(id.getDisplayName(), Texts.MAX_DISPLAY),
+            result.getStatus().name(),
+            JunitMapper.location(id.getSource().orElse(null)),
+            failures));
   }
 
   public void skipped(TestIdentifier id, String reason) {
@@ -167,6 +177,7 @@ public final class RunReporter {
             ? List.of()
             : List.of(Failure.of(Texts.bounded(reason, Texts.MAX_MESSAGE)));
     if (id.isTest()) {
+      noteSeen(p, id);
       synthesize(p, id, Status.SKIPPED, RAW_SKIPPED, why);
       return;
     }
@@ -174,7 +185,18 @@ public final class RunReporter {
     // skipped so that the count of planned tests stays honest.
     for (TestIdentifier t : p.getDescendants(id)) {
       if (t.isTest()) {
+        noteSeen(p, t);
         synthesize(p, t, Status.SKIPPED, RAW_SKIPPED, why);
+      }
+    }
+  }
+
+  /** Records on every open ancestor that one of its tests started or was skipped. */
+  private void noteSeen(TestPlan p, TestIdentifier test) {
+    for (Optional<TestIdentifier> c = p.getParent(test); c.isPresent(); c = p.getParent(c.get())) {
+      OpenContainer oc = containers.get(c.get().getUniqueId());
+      if (oc != null) {
+        oc.seenTests.incrementAndGet();
       }
     }
   }

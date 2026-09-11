@@ -8,6 +8,7 @@ import io.github.yannisyoussef.qe.report.protocol.AttemptFinished;
 import io.github.yannisyoussef.qe.report.protocol.AttemptStarted;
 import io.github.yannisyoussef.qe.report.protocol.Event;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
+import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.testing.Schemas;
 import io.github.yannisyoussef.qe.report.sdk.SessionFiles;
 import java.io.ByteArrayOutputStream;
@@ -101,6 +102,15 @@ final class LauncherRuns {
         }
       }
       return out;
+    }
+
+    /** Every scope.failed of the run, in emission order. */
+    List<ScopeFailed> scopeFailures() {
+      return events.stream()
+          .map(Event::payload)
+          .filter(ScopeFailed.class::isInstance)
+          .map(ScopeFailed.class::cast)
+          .toList();
     }
 
     Optional<Event> sessionStarted() {

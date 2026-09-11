@@ -82,6 +82,20 @@ final class JunitMapper {
 
   /** The runner's own hierarchy above the test, outermost first, as typed segments. */
   static List<PathSegment> path(TestPlan plan, TestIdentifier id) {
+    return bounded(ancestors(plan, id));
+  }
+
+  /**
+   * The position of a container itself: its ancestors, then the container, so that the result is a
+   * prefix of the path of every test below it.
+   */
+  static List<PathSegment> scopePath(TestPlan plan, TestIdentifier container) {
+    List<PathSegment> path = ancestors(plan, container);
+    path.add(segment(container));
+    return bounded(path);
+  }
+
+  private static List<PathSegment> ancestors(TestPlan plan, TestIdentifier id) {
     Deque<PathSegment> path = new ArrayDeque<>();
     Optional<TestIdentifier> current = plan.getParent(id);
     while (current.isPresent()) {
@@ -89,8 +103,15 @@ final class JunitMapper {
       path.addFirst(segment(c));
       current = plan.getParent(c);
     }
-    List<PathSegment> out = new ArrayList<>(path);
-    return out.size() <= MAX_PATH ? out : out.subList(out.size() - MAX_PATH, out.size());
+    return new ArrayList<>(path);
+  }
+
+  /**
+   * Keeps the outermost segments when the hierarchy is deeper than the protocol allows, so that a
+   * scope path stays a prefix of the paths below it however deep the tree is.
+   */
+  private static List<PathSegment> bounded(List<PathSegment> path) {
+    return path.size() <= MAX_PATH ? path : new ArrayList<>(path.subList(0, MAX_PATH));
   }
 
   private static PathSegment segment(TestIdentifier container) {
@@ -153,7 +174,7 @@ final class JunitMapper {
         Texts.bounded(
             message == null || message.isBlank() ? throwable.getClass().getName() : message,
             Texts.MAX_MESSAGE),
-        Texts.bounded(throwable.getClass().getName(), 512),
+        Texts.bounded(throwable.getClass().getName(), Texts.MAX_TYPE),
         Texts.stackTrace(throwable),
         phase,
         null);
