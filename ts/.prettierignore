@@ -3,3 +3,6 @@ node_modules
 pnpm-lock.yaml
 packages/validator/schema
 packages/equivalence/out
+consumer-fixtures/playwright/tests/global/broken.spec.ts
+**/test-results/
+consumer-fixtures/playwright/qe-report/
