@@ -214,6 +214,10 @@ importers:
       qe-report-protocol:
         specifier: workspace:*
         version: link:../protocol
+    devDependencies:
+      qe-report-validator:
+        specifier: workspace:*
+        version: link:../validator
 
   packages/validator:
     dependencies:

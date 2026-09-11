@@ -26,12 +26,23 @@ import org.jspecify.annotations.Nullable;
  * Writes the events of one session: fills the envelope (protocol version, event id, sequence,
  * timestamp), redacts, enforces the event size limit, and hands the result to a sink.
  *
+ * <p>Lifecycle: {@link State#ACTIVE} accepts every event; {@link State#SESSION_FINISHED} accepts
+ * only {@code run.finished}; {@link State#RUN_FINISHED} and {@link State#CLOSED} accept nothing.
+ *
  * <p>Thread-safe: adapters observing parallel tests may emit from several threads. Nothing thrown
  * by the sink escapes; problems go to the handler.
  */
 public final class ReportSession implements AutoCloseable {
   /** Maximum serialised event size in UTF-8 bytes, including the newline. */
   public static final int MAX_EVENT_BYTES = 1_048_576;
+
+  /** Where the session is in its lifecycle. */
+  public enum State {
+    ACTIVE,
+    SESSION_FINISHED,
+    RUN_FINISHED,
+    CLOSED
+  }
 
   private static final DateTimeFormatter TIMESTAMP =
       DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSXXX");
@@ -47,8 +58,7 @@ public final class ReportSession implements AutoCloseable {
   private long sequence;
   private long written;
   private long dropped;
-  private boolean finished;
-  private boolean closed;
+  private State state = State.ACTIVE;
 
   private ReportSession(Builder b) {
     this.runId = b.runId;
@@ -74,65 +84,36 @@ public final class ReportSession implements AutoCloseable {
     return sessionId;
   }
 
-  /** Emits one event. Returns false if it was dropped; the handler has been told why. */
+  public synchronized State state() {
+    return state;
+  }
+
+  /**
+   * Emits one event. Returns false if it was dropped; the handler has been told why. After {@code
+   * session.finished} only {@code run.finished} is accepted; after {@code run.finished} nothing is.
+   */
   public synchronized boolean emit(Payload payload) {
-    if (finished) {
-      problems.onProblem(
-          new ReportProblem(
-              ReportProblem.Kind.SESSION_FINISHED,
-              "event " + payload.eventType() + " emitted after session.finished; dropped",
-              null));
-      dropped++;
+    if (payload instanceof RunFinished) {
+      return finishRun();
+    }
+    if (!acceptsSessionEvents("event " + payload.eventType())) {
       return false;
     }
-    Event candidate =
-        new Event(
-            ProtocolVersion.CURRENT,
-            ids.get(),
-            payload.eventType(),
-            runId,
-            sessionId,
-            sequence + 1,
-            TIMESTAMP.format(clock.instant().atOffset(ZoneOffset.UTC)),
-            null,
-            payload);
-    Event event = redactor.redactEvent(candidate);
-    int bytes = ProtocolJson.write(event).getBytes(StandardCharsets.UTF_8).length + 1;
-    if (bytes > maxEventBytes) {
-      problems.onProblem(
-          new ReportProblem(
-              ReportProblem.Kind.EVENT_TOO_LARGE,
-              "event "
-                  + payload.eventType()
-                  + " is "
-                  + bytes
-                  + " bytes, limit "
-                  + maxEventBytes
-                  + "; dropped",
-              null));
-      dropped++;
-      return false;
+    boolean ok = write(payload);
+    if (ok && payload instanceof SessionFinished) {
+      state = State.SESSION_FINISHED;
     }
-    try {
-      sink.write(event);
-    } catch (IOException | RuntimeException e) {
-      problems.onProblem(
-          new ReportProblem(
-              ReportProblem.Kind.SINK_FAILURE, "cannot write " + payload.eventType(), e));
-      dropped++;
-      return false;
-    }
-    sequence++;
-    written++;
-    if (payload instanceof SessionFinished) {
-      finished = true;
-    }
-    return true;
+    return ok;
   }
 
   /** Stores bytes as an attachment and emits {@code attachment.added}. Text is redacted first. */
   public boolean attach(
       String attemptId, @Nullable String stepId, String name, String mediaType, byte[] bytes) {
+    synchronized (this) {
+      if (!acceptsSessionEvents("attachment " + name)) {
+        return false;
+      }
+    }
     byte[] content = bytes;
     if (MediaTypes.isTextual(mediaType)) {
       content =
@@ -144,14 +125,34 @@ public final class ReportSession implements AutoCloseable {
   }
 
   /**
-   * Stores a file as an attachment and emits {@code attachment.added}. Binary content is streamed;
-   * text is read fully so it can be redacted.
+   * Stores a file as an attachment and emits {@code attachment.added}. Binary content is streamed.
+   * Text is read into memory so it can be redacted, but never more than the sink's attachment limit
+   * plus one byte: a larger file is reported as too large without being read further.
    */
   public boolean attach(
       String attemptId, @Nullable String stepId, String name, String mediaType, Path file) {
+    synchronized (this) {
+      if (!acceptsSessionEvents("attachment " + name)) {
+        return false;
+      }
+    }
     try {
       if (MediaTypes.isTextual(mediaType)) {
-        return attach(attemptId, stepId, name, mediaType, Files.readAllBytes(file));
+        long limit = sink.maxAttachmentBytes();
+        int cap = (int) Math.min(limit + 1, Integer.MAX_VALUE - 8);
+        byte[] bytes;
+        try (InputStream in = Files.newInputStream(file)) {
+          bytes = in.readNBytes(cap);
+        }
+        if (bytes.length > limit) {
+          problems.onProblem(
+              new ReportProblem(
+                  ReportProblem.Kind.ATTACHMENT_TOO_LARGE,
+                  "attachment " + name,
+                  new ReportSink.AttachmentTooLargeException(limit)));
+          return false;
+        }
+        return attach(attemptId, stepId, name, mediaType, bytes);
       }
       try (InputStream in = Files.newInputStream(file)) {
         return store(attemptId, stepId, name, mediaType, in);
@@ -182,35 +183,46 @@ public final class ReportSession implements AutoCloseable {
             attemptId, stepId, name, mediaType, stored.sizeBytes(), stored.sha256()));
   }
 
-  /** Emits {@code session.finished}. Further events are dropped and reported. */
+  /** Emits {@code session.finished}. Only {@code run.finished} is accepted afterwards. */
   public boolean finish() {
     return emit(new SessionFinished());
   }
 
   /**
-   * Emits {@code run.finished}. Only for a producer that knows every session of the run has
-   * finished; the session itself is finished first if it is not already.
+   * Emits {@code run.finished}, after {@code session.finished} if the session is still active. Only
+   * for a producer that knows every session of the run has finished; a forked worker must not call
+   * it.
    */
   public synchronized boolean finishRun() {
-    if (!finished) {
-      finish();
+    if (state == State.ACTIVE && !finish()) {
+      return false;
     }
-    finished = false;
-    boolean ok = emit(new RunFinished());
-    finished = true;
+    if (state != State.SESSION_FINISHED) {
+      dropped++;
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.RUN_FINISHED,
+              "run.finished emitted after " + describe(state) + "; dropped",
+              null));
+      return false;
+    }
+    boolean ok = write(new RunFinished());
+    if (ok) {
+      state = State.RUN_FINISHED;
+    }
     return ok;
   }
 
-  /** Finishes the session if needed and closes the sink. */
+  /** Finishes the session if it is still active and closes the sink. */
   @Override
   public synchronized void close() {
-    if (closed) {
+    if (state == State.CLOSED) {
       return;
     }
-    closed = true;
-    if (!finished) {
+    if (state == State.ACTIVE) {
       finish();
     }
+    state = State.CLOSED;
     try {
       sink.close();
     } catch (IOException | RuntimeException e) {
@@ -225,6 +237,72 @@ public final class ReportSession implements AutoCloseable {
   }
 
   public record Summary(long eventsWritten, long eventsDropped) {}
+
+  private boolean acceptsSessionEvents(String what) {
+    if (state == State.ACTIVE) {
+      return true;
+    }
+    dropped++;
+    ReportProblem.Kind kind =
+        state == State.RUN_FINISHED
+            ? ReportProblem.Kind.RUN_FINISHED
+            : ReportProblem.Kind.SESSION_FINISHED;
+    problems.onProblem(
+        new ReportProblem(kind, what + " emitted after " + describe(state) + "; dropped", null));
+    return false;
+  }
+
+  private static String describe(State state) {
+    return switch (state) {
+      case ACTIVE -> "start";
+      case SESSION_FINISHED -> "session.finished";
+      case RUN_FINISHED -> "run.finished";
+      case CLOSED -> "close";
+    };
+  }
+
+  private boolean write(Payload payload) {
+    Event candidate =
+        new Event(
+            ProtocolVersion.CURRENT,
+            ids.get(),
+            payload.eventType(),
+            runId,
+            sessionId,
+            sequence + 1,
+            TIMESTAMP.format(clock.instant().atOffset(ZoneOffset.UTC)),
+            null,
+            payload);
+    Event event = redactor.redactEvent(candidate);
+    int bytes = ProtocolJson.write(event).getBytes(StandardCharsets.UTF_8).length + 1;
+    if (bytes > maxEventBytes) {
+      dropped++;
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.EVENT_TOO_LARGE,
+              "event "
+                  + payload.eventType()
+                  + " is "
+                  + bytes
+                  + " bytes, limit "
+                  + maxEventBytes
+                  + "; dropped",
+              null));
+      return false;
+    }
+    try {
+      sink.write(event);
+    } catch (IOException | RuntimeException e) {
+      dropped++;
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.SINK_FAILURE, "cannot write " + payload.eventType(), e));
+      return false;
+    }
+    sequence++;
+    written++;
+    return true;
+  }
 
   /** Configuration for a session. */
   public static final class Builder {

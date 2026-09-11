@@ -1,4 +1,4 @@
-import { createReadStream, readFileSync } from 'node:fs';
+import { closeSync, createReadStream, openSync, readSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   LIMITS,
@@ -19,8 +19,10 @@ export type ReportProblemKind =
   | 'ATTACHMENT_TOO_LARGE'
   /** The sink failed; the event or attachment is lost. */
   | 'SINK_FAILURE'
-  /** An event was emitted after the session finished and was dropped. */
-  | 'SESSION_FINISHED';
+  /** A session-scoped event was emitted after session.finished and was dropped. */
+  | 'SESSION_FINISHED'
+  /** An event was emitted after run.finished and was dropped. */
+  | 'RUN_FINISHED';
 
 /**
  * Something the SDK could not do. Problems never change a test result and never propagate into
@@ -39,6 +41,12 @@ export const standardErrorProblemHandler: ReportProblemHandler = (p) => {
   process.stderr.write(`qe-report: ${p.kind}: ${p.message}\n`);
   if (p.cause !== undefined) process.stderr.write(`qe-report:   cause: ${String(p.cause)}\n`);
 };
+
+/**
+ * Lifecycle of a session: `active` accepts every event; `session-finished` accepts only
+ * `run.finished`; `run-finished` and `closed` accept nothing.
+ */
+export type SessionState = 'active' | 'session-finished' | 'run-finished' | 'closed';
 
 export interface ReportSessionOptions {
   readonly runId: string;
@@ -83,8 +91,7 @@ export class ReportSession {
   private sequence = 0;
   private written = 0;
   private dropped = 0;
-  private finished = false;
-  private closed = false;
+  private lifecycle: SessionState = 'active';
 
   private constructor(options: ReportSessionOptions) {
     this.runId = options.runId;
@@ -108,16 +115,110 @@ export class ReportSession {
     return session;
   }
 
-  /** Emits one event. Returns false if it was dropped; the handler has been told why. */
+  get state(): SessionState {
+    return this.lifecycle;
+  }
+
+  /**
+   * Emits one event. Returns false if it was dropped; the handler has been told why. After
+   * `session.finished` only `run.finished` is accepted; after `run.finished` nothing is.
+   */
   emit(input: EventInput): boolean {
-    if (this.finished) {
+    if (input.eventType === 'run.finished') return this.finishRun();
+    if (!this.acceptsSessionEvents(`event ${input.eventType}`)) return false;
+    const ok = this.write(input);
+    if (ok && input.eventType === 'session.finished') this.lifecycle = 'session-finished';
+    return ok;
+  }
+
+  /** Stores bytes as an attachment and emits `attachment.added`. Text is redacted first. */
+  attach(input: AttachmentInput, bytes: Uint8Array): boolean {
+    if (!this.acceptsSessionEvents(`attachment ${input.name}`)) return false;
+    let content = bytes;
+    if (isTextualMediaType(input.mediaType)) {
+      content = Buffer.from(this.redactor.redactText(Buffer.from(bytes).toString('utf8')), 'utf8');
+    }
+    let stored: StoredAttachment;
+    try {
+      stored = this.sink.storeAttachment(content);
+    } catch (e) {
+      return this.storeFailed(input, e);
+    }
+    return this.emitAttachment(input, stored);
+  }
+
+  /**
+   * Stores a file as an attachment and emits `attachment.added`. Binary content is streamed.
+   * Text is read into memory so it can be redacted, but never more than the sink's attachment
+   * limit plus one byte: a larger file is reported as too large without being read further.
+   */
+  async attachFile(input: AttachmentInput, path: string): Promise<boolean> {
+    if (!this.acceptsSessionEvents(`attachment ${input.name}`)) return false;
+    try {
+      if (isTextualMediaType(input.mediaType)) {
+        const bytes = readBounded(path, this.sink.maxAttachmentBytes);
+        if (bytes === undefined)
+          return this.storeFailed(input, new AttachmentTooLargeError(this.sink.maxAttachmentBytes));
+        return this.attach(input, bytes);
+      }
+      const stored = await this.sink.storeAttachmentStream(createReadStream(path));
+      return this.emitAttachment(input, stored);
+    } catch (e) {
+      return this.storeFailed(input, e);
+    }
+  }
+
+  /** Emits `session.finished`. Only `run.finished` is accepted afterwards. */
+  finish(): boolean {
+    return this.emit({ eventType: 'session.finished', payload: {} });
+  }
+
+  /**
+   * Emits `run.finished`, after `session.finished` if the session is still active. Only for a
+   * producer that knows every session of the run has finished; a forked worker must not call it.
+   */
+  finishRun(): boolean {
+    if (this.lifecycle === 'active' && !this.finish()) return false;
+    if (this.lifecycle !== 'session-finished') {
       this.dropped += 1;
       this.problem(
-        'SESSION_FINISHED',
-        `event ${input.eventType} emitted after session.finished; dropped`,
+        'RUN_FINISHED',
+        `run.finished emitted after ${this.lifecycle.replace('-', '.')}; dropped`,
       );
       return false;
     }
+    const ok = this.write({ eventType: 'run.finished', payload: {} });
+    if (ok) this.lifecycle = 'run-finished';
+    return ok;
+  }
+
+  /** Finishes the session if it is still active and closes the sink. */
+  close(): void {
+    if (this.lifecycle === 'closed') return;
+    if (this.lifecycle === 'active') this.finish();
+    this.lifecycle = 'closed';
+    try {
+      this.sink.close();
+    } catch (e) {
+      this.problem('SINK_FAILURE', 'cannot close sink', e);
+    }
+  }
+
+  summary(): SessionSummary {
+    return { eventsWritten: this.written, eventsDropped: this.dropped };
+  }
+
+  /** False, with a problem reported and counted, when the lifecycle no longer accepts session events. */
+  private acceptsSessionEvents(what: string): boolean {
+    if (this.lifecycle === 'active') return true;
+    this.dropped += 1;
+    const kind: ReportProblemKind =
+      this.lifecycle === 'run-finished' ? 'RUN_FINISHED' : 'SESSION_FINISHED';
+    this.problem(kind, `${what} emitted after ${this.lifecycle.replace('-', '.')}; dropped`);
+    return false;
+  }
+
+  private write(input: EventInput): boolean {
     const candidate = {
       protocolVersion: PROTOCOL_VERSION,
       eventId: this.ids(),
@@ -147,70 +248,7 @@ export class ReportSession {
     }
     this.sequence += 1;
     this.written += 1;
-    if (input.eventType === 'session.finished') this.finished = true;
     return true;
-  }
-
-  /** Stores bytes as an attachment and emits `attachment.added`. Text is redacted first. */
-  attach(input: AttachmentInput, bytes: Uint8Array): boolean {
-    let content = bytes;
-    if (isTextualMediaType(input.mediaType)) {
-      content = Buffer.from(this.redactor.redactText(Buffer.from(bytes).toString('utf8')), 'utf8');
-    }
-    let stored: StoredAttachment;
-    try {
-      stored = this.sink.storeAttachment(content);
-    } catch (e) {
-      return this.storeFailed(input, e);
-    }
-    return this.emitAttachment(input, stored);
-  }
-
-  /**
-   * Stores a file as an attachment and emits `attachment.added`. Binary content is streamed; text
-   * is read fully so it can be redacted.
-   */
-  async attachFile(input: AttachmentInput, path: string): Promise<boolean> {
-    try {
-      if (isTextualMediaType(input.mediaType)) return this.attach(input, readFileSync(path));
-      const stored = await this.sink.storeAttachmentStream(createReadStream(path));
-      return this.emitAttachment(input, stored);
-    } catch (e) {
-      return this.storeFailed(input, e);
-    }
-  }
-
-  /** Emits `session.finished`. Further events are dropped and reported. */
-  finish(): boolean {
-    return this.emit({ eventType: 'session.finished', payload: {} });
-  }
-
-  /**
-   * Emits `run.finished`. Only for a producer that knows every session of the run has finished;
-   * the session itself is finished first if it is not already.
-   */
-  finishRun(): boolean {
-    if (!this.finished) this.finish();
-    this.finished = false;
-    const ok = this.emit({ eventType: 'run.finished', payload: {} });
-    this.finished = true;
-    return ok;
-  }
-
-  /** Finishes the session if needed and closes the sink. */
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    if (!this.finished) this.finish();
-    try {
-      this.sink.close();
-    } catch (e) {
-      this.problem('SINK_FAILURE', 'cannot close sink', e);
-    }
-  }
-
-  summary(): SessionSummary {
-    return { eventsWritten: this.written, eventsDropped: this.dropped };
   }
 
   private emitAttachment(input: AttachmentInput, stored: StoredAttachment): boolean {
@@ -236,5 +274,25 @@ export class ReportSession {
 
   private problem(kind: ReportProblemKind, message: string, cause?: unknown): void {
     this.onProblem(cause === undefined ? { kind, message } : { kind, message, cause });
+  }
+}
+
+/** Reads at most `limit` bytes; returns undefined as soon as the file proves larger. */
+function readBounded(path: string, limit: number): Buffer | undefined {
+  const fd = openSync(path, 'r');
+  try {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const chunk = Buffer.alloc(64 * 1024);
+    for (;;) {
+      const n = readSync(fd, chunk, 0, chunk.length, null);
+      if (n === 0) break;
+      total += n;
+      if (total > limit) return undefined;
+      chunks.push(Buffer.from(chunk.subarray(0, n)));
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    closeSync(fd);
   }
 }

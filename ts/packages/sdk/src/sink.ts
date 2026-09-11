@@ -17,6 +17,8 @@ export class AttachmentTooLargeError extends Error {
 
 /** Where a session writes events and attachment bytes. */
 export interface ReportSink {
+  /** The largest attachment the sink stores, in bytes. Text is bounded to this before it is read. */
+  readonly maxAttachmentBytes: number;
   /** Writes one event. The event is already redacted and within the size limit. */
   write(event: Event | UnknownEvent): void;
   /** Stores bytes and returns their digest and size. */

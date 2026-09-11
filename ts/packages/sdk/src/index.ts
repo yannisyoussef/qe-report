@@ -11,10 +11,11 @@ export { AttachmentTooLargeError, type ReportSink, type StoredAttachment } from 
 export {
   FileSink,
   DEFAULT_MAX_ATTACHMENT_BYTES,
-  EVENTS_FILE,
+  EVENTS_DIR,
   ATTACHMENTS_DIR,
   type FileSinkOptions,
 } from './file-sink.js';
+export { sessionFileName } from './session-file.js';
 export {
   ReportSession,
   standardErrorProblemHandler,
@@ -23,5 +24,6 @@ export {
   type ReportProblemHandler,
   type ReportProblemKind,
   type ReportSessionOptions,
+  type SessionState,
   type SessionSummary,
 } from './session.js';

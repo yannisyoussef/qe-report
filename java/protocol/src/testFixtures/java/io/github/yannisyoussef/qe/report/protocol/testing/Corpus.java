@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Stream;
 
 /** Access to the protocol fixture corpus and a test-only canonical JSON form. */
 public final class Corpus {
@@ -55,12 +56,20 @@ public final class Corpus {
     }
   }
 
-  /** Non-blank lines of a run's {@code events.ndjson}. */
-  public static List<String> runLines(Path runDir) {
+  /** Session files of a run directory, in name order. */
+  public static List<Path> sessionFiles(Path runDir) {
+    try (Stream<Path> files = Files.list(runDir.resolve("events"))) {
+      return files.filter(p -> p.getFileName().toString().endsWith(".ndjson")).sorted().toList();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+  /** Non-blank lines of one event file. */
+  public static List<String> lines(Path file) {
     try {
       List<String> out = new ArrayList<>();
-      for (String line :
-          Files.readAllLines(runDir.resolve("events.ndjson"), StandardCharsets.UTF_8)) {
+      for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
         if (!line.isBlank()) {
           out.add(line);
         }
@@ -69,6 +78,15 @@ public final class Corpus {
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
+  }
+
+  /** Non-blank lines of every session file of a run, file by file. */
+  public static List<String> runLines(Path runDir) {
+    List<String> out = new ArrayList<>();
+    for (Path f : sessionFiles(runDir)) {
+      out.addAll(lines(f));
+    }
+    return out;
   }
 
   /**

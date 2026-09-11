@@ -14,55 +14,78 @@ import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Writes a run to a directory: {@code events.ndjson} plus {@code attachments/<sha256>}.
+ * Writes one session of a run to a run directory:
  *
- * <p>Every event is flushed as it is written, so a partial file is inspectable after a crash.
- * Attachment bytes are streamed to a temporary file while hashed, then moved to their final name
- * atomically; the producer's display name never influences the path. Nothing is buffered beyond one
- * event.
+ * <pre>
+ * &lt;run&gt;/events/&lt;session file&gt;.ndjson   this session's events, created exclusively
+ * &lt;run&gt;/attachments/&lt;sha256&gt;           bytes shared by every session of the run
+ * </pre>
+ *
+ * <p>Several processes may write to the same run directory at once: each owns its event file, and
+ * attachment bytes are written to a uniquely named temporary file, hashed, and published under the
+ * hash by an atomic move. Two writers publishing the same bytes both succeed. Every event is
+ * flushed as it is written, so a partial file is inspectable after a crash.
  */
 public final class FileSink implements ReportSink {
   /** Default per-attachment limit: 64 MiB. */
   public static final long DEFAULT_MAX_ATTACHMENT_BYTES = 64L * 1024 * 1024;
 
-  public static final String EVENTS_FILE = "events.ndjson";
+  public static final String EVENTS_DIR = "events";
   public static final String ATTACHMENTS_DIR = "attachments";
 
+  private final Path eventFile;
   private final Path attachmentsDir;
   private final BufferedWriter events;
   private final long maxAttachmentBytes;
-  private final AtomicLong tempCounter = new AtomicLong();
   private boolean closed;
 
-  private FileSink(Path attachmentsDir, BufferedWriter events, long maxAttachmentBytes) {
+  private FileSink(
+      Path eventFile, Path attachmentsDir, BufferedWriter events, long maxAttachmentBytes) {
+    this.eventFile = eventFile;
     this.attachmentsDir = attachmentsDir;
     this.events = events;
     this.maxAttachmentBytes = maxAttachmentBytes;
   }
 
-  /** Opens (creating if needed) a run directory with the default attachment limit. */
-  public static FileSink open(Path directory) throws IOException {
-    return open(directory, DEFAULT_MAX_ATTACHMENT_BYTES);
+  /** Opens the sink for one session with the default attachment limit. */
+  public static FileSink open(Path runDirectory, String sessionId) throws IOException {
+    return open(runDirectory, sessionId, DEFAULT_MAX_ATTACHMENT_BYTES);
   }
 
-  /** Opens (creating if needed) a run directory. Events are appended if the file exists. */
-  public static FileSink open(Path directory, long maxAttachmentBytes) throws IOException {
+  /**
+   * Opens the sink for one session. The event file is created exclusively and must not exist: a
+   * second process using the same sessionId is a producer error, reported here rather than silently
+   * interleaved. A restarted producer uses a new sessionId.
+   */
+  public static FileSink open(Path runDirectory, String sessionId, long maxAttachmentBytes)
+      throws IOException {
     if (maxAttachmentBytes < 0) {
       throw new IllegalArgumentException("maxAttachmentBytes must be >= 0");
     }
-    Path attachments = directory.resolve(ATTACHMENTS_DIR);
+    Path eventsDir = runDirectory.resolve(EVENTS_DIR);
+    Path attachments = runDirectory.resolve(ATTACHMENTS_DIR);
+    Files.createDirectories(eventsDir);
     Files.createDirectories(attachments);
+    Path eventFile = eventsDir.resolve(SessionFiles.fileName(sessionId));
     BufferedWriter writer =
         Files.newBufferedWriter(
-            directory.resolve(EVENTS_FILE),
+            eventFile,
             StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-            StandardOpenOption.APPEND);
-    return new FileSink(attachments, writer, maxAttachmentBytes);
+            StandardOpenOption.CREATE_NEW,
+            StandardOpenOption.WRITE);
+    return new FileSink(eventFile, attachments, writer, maxAttachmentBytes);
+  }
+
+  /** This session's event file. */
+  public Path eventFile() {
+    return eventFile;
+  }
+
+  @Override
+  public long maxAttachmentBytes() {
+    return maxAttachmentBytes;
   }
 
   @Override
@@ -76,32 +99,46 @@ public final class FileSink implements ReportSink {
   @Override
   public StoredAttachment storeAttachment(InputStream bytes) throws IOException {
     ensureOpen();
-    Path temp = attachmentsDir.resolve(".tmp-" + tempCounter.incrementAndGet());
+    // A name no other process or sink can produce; created atomically by the filesystem.
+    Path temp = Files.createTempFile(attachmentsDir, ".tmp-", "");
     MessageDigest digest = sha256();
     long size = 0;
-    try (OutputStream out = Files.newOutputStream(temp)) {
-      byte[] buffer = new byte[8192];
-      int n;
-      while ((n = bytes.read(buffer)) > 0) {
-        size += n;
-        if (size > maxAttachmentBytes) {
-          throw new AttachmentTooLargeException(maxAttachmentBytes);
+    try {
+      try (OutputStream out = Files.newOutputStream(temp)) {
+        byte[] buffer = new byte[8192];
+        int n;
+        while ((n = bytes.read(buffer)) > 0) {
+          size += n;
+          if (size > maxAttachmentBytes) {
+            throw new AttachmentTooLargeException(maxAttachmentBytes);
+          }
+          digest.update(buffer, 0, n);
+          out.write(buffer, 0, n);
         }
-        digest.update(buffer, 0, n);
-        out.write(buffer, 0, n);
       }
-    } catch (IOException e) {
+      String hex = HexFormat.of().formatHex(digest.digest());
+      publish(temp, attachmentsDir.resolve(hex), size);
+      return new StoredAttachment(hex, size);
+    } finally {
       Files.deleteIfExists(temp);
+    }
+  }
+
+  /**
+   * Publishes a fully written temporary file under its hash. An atomic move replaces an existing
+   * target on POSIX, so concurrent identical publications both succeed. Where the filesystem
+   * refuses to replace an existing target, the existing file is accepted when its size matches: it
+   * can only have been published by this same procedure from bytes with the same hash.
+   */
+  private static void publish(Path temp, Path target, long size) throws IOException {
+    try {
+      Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE);
+    } catch (IOException e) {
+      if (Files.exists(target) && Files.size(target) == size) {
+        return;
+      }
       throw e;
     }
-    String hex = HexFormat.of().formatHex(digest.digest());
-    Path target = attachmentsDir.resolve(hex);
-    if (Files.exists(target)) {
-      Files.deleteIfExists(temp);
-    } else {
-      Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE);
-    }
-    return new StoredAttachment(hex, size);
   }
 
   @Override

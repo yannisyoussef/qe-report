@@ -35,5 +35,8 @@
   },
   "dependencies": {
     "qe-report-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "qe-report-validator": "workspace:*"
   }
 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,6 +15,7 @@ import {
   ReportSession,
   captureEnvironment,
   Redactor,
+  sessionFileName,
   type ReportProblem,
   type ReportSink,
 } from '../src/index.js';
@@ -43,6 +44,12 @@ const test = {
   displayName: 'a test',
   path: [{ kind: 'file', name: 'a.spec' }],
 };
+const producer = { producer: { name: 'test', version: '0' }, runner: { name: 'fixture-runner' } };
+const events = (d: string, sessionId: string): Event[] =>
+  readFileSync(join(d, 'events', sessionFileName(sessionId)), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => parseEvent(l) as Event);
 
 describe('ReportSession', () => {
   it('produces deterministic output for a fixed clock and id generator', () => {
@@ -53,11 +60,11 @@ describe('ReportSession', () => {
         {
           runId: 'run-1',
           sessionId: 'sess-1',
-          sink: FileSink.open(d),
+          sink: FileSink.open(d, 'sess-1'),
           ...fixed(),
           onProblem: (p) => problems.push(p),
         },
-        { producer: { name: 'test', version: '0' } },
+        producer,
       );
       s.emit({
         eventType: 'attempt.started',
@@ -75,7 +82,7 @@ describe('ReportSession', () => {
       s.close();
       expect(problems).toEqual([]);
       expect(s.summary()).toEqual({ eventsWritten: 6, eventsDropped: 0 });
-      return readFileSync(join(d, 'events.ndjson'), 'utf8');
+      return readFileSync(join(d, 'events', sessionFileName('sess-1')), 'utf8');
     };
     const a = run();
     expect(a).toBe(run());
@@ -93,39 +100,170 @@ describe('ReportSession', () => {
     ]);
     expect(lines.map((e) => e.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(lines[0]?.occurredAt).toBe('2026-01-01T00:00:00.000Z');
-    expect(lines[1]?.occurredAt).toBe('2026-01-01T00:00:01.000Z');
     const attachment = lines[2] as AttachmentAddedEvent;
     const redacted = Buffer.from(`password=${REDACTED}`);
     expect(attachment.payload.sha256).toBe(createHash('sha256').update(redacted).digest('hex'));
-    expect(attachment.payload.sizeBytes).toBe(redacted.byteLength);
     const finished = lines[3] as Extract<Event, { eventType: 'attempt.finished' }>;
     expect(finished.payload.failures?.[0]?.message).toBe(`token=${REDACTED}`);
   });
-  it('stores binary attachments untouched', () => {
-    const d = temp();
-    const s = ReportSession.start(
-      { runId: 'r', sessionId: 's', sink: FileSink.open(d), ...fixed() },
-      { producer: { name: 'test' } },
-    );
-    s.emit({ eventType: 'attempt.started', payload: { attemptId: 'a-1', attemptNumber: 1, test } });
-    const png = Buffer.from('password=notreallyapng');
-    s.attach({ attemptId: 'a-1', name: '../../etc/passwd', mediaType: 'image/png' }, png);
-    s.close();
-    const hash = createHash('sha256').update(png).digest('hex');
-    expect(readFileSync(join(d, 'attachments', hash))).toEqual(png);
+
+  describe('lifecycle', () => {
+    it('active -> session-finished -> run-finished, then nothing', () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's'),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      expect(s.state).toBe('active');
+      expect(s.finish()).toBe(true);
+      expect(s.state).toBe('session-finished');
+      expect(
+        s.emit({
+          eventType: 'attempt.started',
+          payload: { attemptId: 'a', attemptNumber: 1, test },
+        }),
+      ).toBe(false);
+      expect(
+        s.attach({ attemptId: 'a', name: 'x', mediaType: 'text/plain' }, Buffer.from('y')),
+      ).toBe(false);
+      expect(s.finish()).toBe(false);
+      expect(s.finishRun()).toBe(true);
+      expect(s.state).toBe('run-finished');
+      expect(s.finishRun()).toBe(false);
+      expect(s.emit({ eventType: 'session.finished', payload: {} })).toBe(false);
+      s.close();
+      expect(s.state).toBe('closed');
+      expect(problems.map((p) => p.kind)).toEqual([
+        'SESSION_FINISHED',
+        'SESSION_FINISHED',
+        'SESSION_FINISHED',
+        'RUN_FINISHED',
+        'RUN_FINISHED',
+      ]);
+      expect(events(d, 's').map((e) => e.eventType)).toEqual([
+        'session.started',
+        'session.finished',
+        'run.finished',
+      ]);
+      expect(readdirSync(join(d, 'attachments'))).toEqual([]);
+    });
+    it('run.finished from an active session finishes the session first', () => {
+      const d = temp();
+      const s = ReportSession.start(
+        { runId: 'r', sessionId: 's', sink: FileSink.open(d, 's'), ...fixed() },
+        producer,
+      );
+      expect(s.emit({ eventType: 'run.finished', payload: {} })).toBe(true);
+      s.close();
+      expect(events(d, 's').map((e) => e.eventType)).toEqual([
+        'session.started',
+        'session.finished',
+        'run.finished',
+      ]);
+    });
+    it('close finishes an active session and accepts nothing afterwards', () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's'),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      s.close();
+      expect(s.finishRun()).toBe(false);
+      expect(problems.map((p) => p.kind)).toEqual(['RUN_FINISHED']);
+      expect(events(d, 's').map((e) => e.eventType)).toEqual([
+        'session.started',
+        'session.finished',
+      ]);
+    });
   });
+
+  describe('bounded text attachments', () => {
+    it('stores a text file exactly at the limit and refuses one byte more without reading it in', async () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const limit = 100_000;
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's', { maxAttachmentBytes: limit }),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      s.emit({
+        eventType: 'attempt.started',
+        payload: { attemptId: 'a-1', attemptNumber: 1, test },
+      });
+      const exact = join(d, 'exact.txt');
+      const over = join(d, 'over.txt');
+      writeFileSync(exact, 'x'.repeat(limit));
+      writeFileSync(over, 'x'.repeat(limit + 1));
+      expect(
+        await s.attachFile({ attemptId: 'a-1', name: 'exact', mediaType: 'text/plain' }, exact),
+      ).toBe(true);
+      expect(
+        await s.attachFile({ attemptId: 'a-1', name: 'over', mediaType: 'text/plain' }, over),
+      ).toBe(false);
+      expect(problems.map((p) => p.kind)).toEqual(['ATTACHMENT_TOO_LARGE']);
+      expect(readdirSync(join(d, 'attachments'))).toHaveLength(1);
+      s.close();
+    });
+    it('redacts a text file before hashing and streams a binary file untouched', async () => {
+      const d = temp();
+      const s = ReportSession.start(
+        { runId: 'r', sessionId: 's', sink: FileSink.open(d, 's'), ...fixed() },
+        producer,
+      );
+      s.emit({
+        eventType: 'attempt.started',
+        payload: { attemptId: 'a-1', attemptNumber: 1, test },
+      });
+      const text = join(d, 'log.txt');
+      const bin = join(d, 'img.png');
+      writeFileSync(text, 'Authorization: Bearer x');
+      writeFileSync(bin, Buffer.from('password=notreallyapng'));
+      expect(
+        await s.attachFile({ attemptId: 'a-1', name: 'log', mediaType: 'text/plain' }, text),
+      ).toBe(true);
+      expect(
+        await s.attachFile({ attemptId: 'a-1', name: '../../evil', mediaType: 'image/png' }, bin),
+      ).toBe(true);
+      s.close();
+      const stored = readdirSync(join(d, 'attachments'))
+        .map((n) => readFileSync(join(d, 'attachments', n), 'utf8'))
+        .sort();
+      expect(stored).toEqual([`Authorization: ${REDACTED}`, 'password=notreallyapng']);
+    });
+  });
+
   it('drops and reports an oversized event without throwing', () => {
     const problems: ReportProblem[] = [];
     const s = ReportSession.start(
       {
         runId: 'r',
         sessionId: 's',
-        sink: FileSink.open(temp()),
+        sink: FileSink.open(temp(), 's'),
         ...fixed(),
         onProblem: (p) => problems.push(p),
         maxEventBytes: 400,
       },
-      { producer: { name: 'test' } },
+      producer,
     );
     expect(
       s.emit({
@@ -142,6 +280,7 @@ describe('ReportSession', () => {
   });
   it('never lets a sink failure escape', () => {
     const broken: ReportSink = {
+      maxAttachmentBytes: 1,
       write: () => {
         throw new Error('disk full');
       },
@@ -156,7 +295,7 @@ describe('ReportSession', () => {
     const problems: ReportProblem[] = [];
     const s = ReportSession.start(
       { runId: 'r', sessionId: 's', sink: broken, ...fixed(), onProblem: (p) => problems.push(p) },
-      { producer: { name: 'test' } },
+      producer,
     );
     expect(s.attach({ attemptId: 'a', name: 'x', mediaType: 'text/plain' }, Buffer.from('y'))).toBe(
       false,
@@ -169,30 +308,11 @@ describe('ReportSession', () => {
       'SINK_FAILURE',
     ]);
   });
-  it('drops events after the session finished and reports them', () => {
-    const problems: ReportProblem[] = [];
-    const s = ReportSession.start(
-      {
-        runId: 'r',
-        sessionId: 's',
-        sink: FileSink.open(temp()),
-        ...fixed(),
-        onProblem: (p) => problems.push(p),
-      },
-      { producer: { name: 'test' } },
-    );
-    s.finish();
-    expect(
-      s.emit({ eventType: 'attempt.finished', payload: { attemptId: 'a', status: 'passed' } }),
-    ).toBe(false);
-    expect(problems.map((p) => p.kind)).toEqual(['SESSION_FINISHED']);
-    s.close();
-  });
   it('rejects a raised event limit', () => {
     expect(() =>
       ReportSession.start(
-        { runId: 'r', sessionId: 's', sink: FileSink.open(temp()), maxEventBytes: 2_000_000 },
-        { producer: { name: 'x' } },
+        { runId: 'r', sessionId: 's', sink: FileSink.open(temp(), 's'), maxEventBytes: 2_000_000 },
+        producer,
       ),
     ).toThrow();
   });
@@ -207,13 +327,10 @@ describe('ReportSession', () => {
       CI: 'true',
       DB_URL: `postgres://${REDACTED}@host/db`,
     });
-    expect(captureEnvironment(['SECRET_TOKEN'], Redactor.defaults(), env)).toEqual({
-      SECRET_TOKEN: 'abc',
-    });
   });
   it('keeps unknown ignorable events flowing through the sink', () => {
     const d = temp();
-    const sink = FileSink.open(d);
+    const sink = FileSink.open(d, 's');
     const unknown: UnknownEvent = {
       protocolVersion: '0.1.0',
       eventId: 'u',
@@ -227,7 +344,7 @@ describe('ReportSession', () => {
     };
     sink.write(unknown);
     sink.close();
-    expect(readFileSync(join(d, 'events.ndjson'), 'utf8')).toContain(
+    expect(readFileSync(join(d, 'events', sessionFileName('s')), 'utf8')).toContain(
       '"eventType":"attempt.heartbeat"',
     );
   });

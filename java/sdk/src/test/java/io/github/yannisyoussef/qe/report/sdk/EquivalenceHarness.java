@@ -43,20 +43,33 @@ public final class EquivalenceHarness {
     Path out = Path.of(args[0]);
     Path fixtures = Path.of(args[1]);
     deleteRecursively(out);
-    for (String name : List.of("junit", "playwright", "karate")) {
+    for (String name : List.of("junit", "playwright", "karate", "forked")) {
       replay(fixtures.resolve("runs").resolve(name), out.resolve("replay").resolve(name));
     }
     scripted(out.resolve("scripted"));
   }
 
-  /** Parse every fixture line with the binding and write it back through the sink. */
+  /**
+   * Parse every session file of a run with the binding and write it back through a sink of its own.
+   */
   static void replay(Path runDir, Path out) throws IOException {
-    try (FileSink sink = FileSink.open(out)) {
-      for (String line : Corpus.runLines(runDir)) {
-        Event event = ProtocolJson.read(line);
+    FileSink last = null;
+    for (Path file : Corpus.sessionFiles(runDir)) {
+      List<Event> events = Corpus.lines(file).stream().map(ProtocolJson::read).toList();
+      FileSink sink =
+          FileSink.open(
+              out, events.isEmpty() ? file.getFileName().toString() : events.get(0).sessionId());
+      for (Event event : events) {
         sink.write(event);
       }
-      Path attachments = runDir.resolve("attachments");
+      if (last != null) {
+        last.close();
+      }
+      last = sink;
+    }
+    FileSink sink = last != null ? last : FileSink.open(out, "attachments-only");
+    Path attachments = runDir.resolve("attachments");
+    if (Files.isDirectory(attachments)) {
       try (Stream<Path> files = Files.list(attachments)) {
         for (Path f : files.sorted().toList()) {
           try (InputStream in = Files.newInputStream(f)) {
@@ -65,6 +78,7 @@ public final class EquivalenceHarness {
         }
       }
     }
+    sink.close();
   }
 
   /** The same program as ts/packages/equivalence/src/scripted.ts. */
@@ -77,7 +91,7 @@ public final class EquivalenceHarness {
     fakeEnv.put("HOME", "/home/nobody");
     AtomicInteger ids = new AtomicInteger();
     try (ReportSession s =
-        ReportSession.builder("run-eq-0001", "session-eq-1", FileSink.open(out))
+        ReportSession.builder("run-eq-0001", "session-eq-1", FileSink.open(out, "session-eq-1"))
             .clock(new ReportSessionTest.TickingClock())
             .ids(() -> String.format("evt-%04d", ids.incrementAndGet()))
             .redactor(redactor)

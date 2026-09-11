@@ -15,7 +15,9 @@ public record ReportProblem(Kind kind, String message, @Nullable Throwable cause
     ATTACHMENT_TOO_LARGE,
     /** The sink failed to write; the event or attachment is lost. */
     SINK_FAILURE,
-    /** An event was emitted after the session finished and was dropped. */
-    SESSION_FINISHED
+    /** A session-scoped event was emitted after session.finished and was dropped. */
+    SESSION_FINISHED,
+    /** An event was emitted after run.finished and was dropped. */
+    RUN_FINISHED
   }
 }

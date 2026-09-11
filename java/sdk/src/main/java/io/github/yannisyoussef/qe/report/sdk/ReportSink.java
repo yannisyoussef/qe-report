@@ -7,6 +7,11 @@ import java.io.InputStream;
 /** Where a session writes events and attachment bytes. */
 public interface ReportSink extends AutoCloseable {
 
+  /**
+   * The largest attachment the sink stores, in bytes. Text is bounded to this before it is read.
+   */
+  long maxAttachmentBytes();
+
   /** Writes one event. The event is already redacted and within the size limit. */
   void write(Event event) throws IOException;
 
