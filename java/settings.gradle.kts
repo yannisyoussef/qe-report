@@ -18,4 +18,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "qe-report-java"
 
-include("protocol", "sdk")
+include("protocol", "sdk", "junit-platform")
