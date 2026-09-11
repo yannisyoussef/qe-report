@@ -1,0 +1,16 @@
+{
+  "name": "qe-report-equivalence",
+  "version": "0.1.0",
+  "description": "Test-only harness: produces the TypeScript reference output and compares it with the Java output",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "equivalence": "vitest run"
+  },
+  "dependencies": {
+    "qe-report-protocol": "workspace:*",
+    "qe-report-sdk": "workspace:*",
+    "qe-report-validator": "workspace:*"
+  }
+}
