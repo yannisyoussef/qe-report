@@ -83,7 +83,7 @@ export interface Report {
 }
 
 export interface ValidateOptions {
-  /** Directory holding attachment bytes named by SHA-256. Absent means attachments are not checked. */
+  /** Directory holding attachment bytes named by SHA-256. When absent, declared attachments are not checked. */
   readonly attachmentsDir?: string;
   /** Report an incomplete run as an error instead of an info. */
   readonly requireComplete?: boolean;
@@ -476,14 +476,15 @@ export async function validateLines(
   };
 }
 
-/** Validates an `events.ndjson` file. Attachments default to the sibling `attachments` directory. */
+/**
+ * Validates an `events.ndjson` file. Attachment bytes are looked up in the sibling `attachments`
+ * directory unless another is given; a declared attachment whose file is not there is missing,
+ * whether or not the directory exists.
+ */
 export async function validateFile(path: string, options: ValidateOptions = {}): Promise<Report> {
   const text = readFileSync(path, 'utf8');
-  const sibling = join(path, '..', 'attachments');
-  const attachmentsDir = options.attachmentsDir ?? (existsSync(sibling) ? sibling : undefined);
-  const merged: ValidateOptions =
-    attachmentsDir === undefined ? options : { ...options, attachmentsDir };
-  return validateLines(text.split('\n'), merged);
+  const attachmentsDir = options.attachmentsDir ?? join(path, '..', 'attachments');
+  return validateLines(text.split('\n'), { ...options, attachmentsDir });
 }
 
 function sha256File(path: string): Promise<string> {

@@ -244,7 +244,9 @@ checked against the same corpus with an independent validator.
 qe-report-validate events.ndjson [--attachments <dir>] [--require-complete] [--json]
 ```
 
-Diagnostics name the line, the event id when known, a code, and for
+Attachment bytes are looked up next to the file in `attachments/` unless
+`--attachments` names another directory; a declared attachment that is not
+there is reported as missing. Diagnostics name the line, the event id when known, a code, and for
 schema problems a JSON pointer. Codes: `MALFORMED_JSON`, `SCHEMA_INVALID`,
 `UNSUPPORTED_PROTOCOL_VERSION`, `UNSUPPORTED_EVENT_TYPE`, `EVENT_TOO_LARGE`,
 `LIFECYCLE_INVALID` (with a detail such as `DUPLICATE_ATTEMPT_FINISHED` or
