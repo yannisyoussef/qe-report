@@ -64,13 +64,15 @@ public final class Redactor {
   private static final Pattern PRIVATE_KEY_BLOCK =
       Pattern.compile(
           "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----");
+  // Anchored and length-capped: an unanchored scheme would rescan every long run of letters.
   private static final Pattern URL_USERINFO =
-      Pattern.compile("(?i)([a-z][a-z0-9+.-]*://)[^/\\s:@]+:[^/\\s@]+@");
+      Pattern.compile(
+          "(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}://)[^/\\s:@]{1,256}:[^/\\s@]{1,256}@");
   private static final Pattern BEARER =
       Pattern.compile("(?i)(?<![A-Za-z0-9_])bearer[ \\t]+[A-Za-z0-9\\-._~+/]+=*");
   private static final Pattern JWT =
       Pattern.compile(
-          "(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}");
+          "(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,4096}\\.[A-Za-z0-9_-]{8,4096}\\.[A-Za-z0-9_-]{8,4096}");
   private static final List<Pattern> WELL_KNOWN_TOKENS =
       List.of(
           Pattern.compile("(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_])"),
