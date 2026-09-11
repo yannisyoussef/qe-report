@@ -38,9 +38,12 @@ const SENSITIVE_KEYS: readonly string[] = [
 
 const PRIVATE_KEY_BLOCK =
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
-const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi;
+// Anchored and length-capped: an unanchored scheme would rescan every long run of letters.
+const URL_USERINFO =
+  /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi;
 const BEARER = /(?<![A-Za-z0-9_])bearer[ \t]+[A-Za-z0-9\-._~+/]+=*/gi;
-const JWT = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+const JWT =
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}/g;
 const WELL_KNOWN_TOKENS: readonly RegExp[] = [
   /(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_])/g,
   /(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36,}(?![A-Za-z0-9_])/g,

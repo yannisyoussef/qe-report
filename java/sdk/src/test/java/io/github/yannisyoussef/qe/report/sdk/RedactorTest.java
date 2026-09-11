@@ -78,4 +78,14 @@ class RedactorTest {
     assertEquals("Authorization: [REDACTED]", p.failures().get(0).message());
     assertEquals("password=[REDACTED]\n\tat a.b(C.java:1)", p.failures().get(0).stackTrace());
   }
+
+  @Test
+  void staysLinearOnLongText() {
+    String letters = "x".repeat(1024 * 1024);
+    String log = "GET /items 200 12ms user=bob token=abc\n".repeat(20000);
+    long start = System.nanoTime();
+    R.redactText(letters);
+    R.redactText(log);
+    assertTrue((System.nanoTime() - start) / 1_000_000 < 3000, "redaction must not be quadratic");
+  }
 }

@@ -70,3 +70,14 @@ describe('event redaction', () => {
     expect(e.payload.failures?.[0]?.stackTrace).toBe(`password=${REDACTED}\n\tat a.b(C.java:1)`);
   });
 });
+
+describe('cost', () => {
+  it('stays linear on long text', () => {
+    const letters = 'x'.repeat(1024 * 1024);
+    const log = 'GET /items 200 12ms user=bob token=abc\n'.repeat(20000);
+    const start = Date.now();
+    r.redactText(letters);
+    r.redactText(log);
+    expect(Date.now() - start).toBeLessThan(3000);
+  });
+});
