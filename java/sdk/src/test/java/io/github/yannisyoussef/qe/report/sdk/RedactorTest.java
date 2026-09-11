@@ -2,6 +2,7 @@ package io.github.yannisyoussef.qe.report.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.DynamicTest.dynamicTest;
 
@@ -10,6 +11,7 @@ import io.github.yannisyoussef.qe.report.protocol.AttemptFinished;
 import io.github.yannisyoussef.qe.report.protocol.Event;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
 import io.github.yannisyoussef.qe.report.protocol.testing.Corpus;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -80,14 +82,24 @@ class RedactorTest {
     assertEquals("password=[REDACTED]\n\tat a.b(C.java:1)", p.failures().get(0).stackTrace());
   }
 
+  /**
+   * The URL user-info rule once rescanned a run of letters from every position, which is quadratic:
+   * 128 KiB of letters took about 18 seconds and a mebibyte takes minutes. The bound below is a
+   * coarse ceiling that only that regression can reach, not a latency target, so a loaded runner or
+   * a cold JVM stays far inside it.
+   */
   @Test
   void staysLinearOnLongText() {
+    R.redactText("warm-up token=abc https://u:p@h/ Authorization: Bearer x.y.z");
     String letters = "x".repeat(1024 * 1024);
     String log = "GET /items 200 12ms user=bob token=abc\n".repeat(20000);
-    long start = System.nanoTime();
-    R.redactText(letters);
-    R.redactText(log);
-    assertTrue((System.nanoTime() - start) / 1_000_000 < 3000, "redaction must not be quadratic");
+    assertTimeoutPreemptively(
+        Duration.ofSeconds(60),
+        () -> {
+          assertEquals(letters, R.redactText(letters), "nothing to redact in plain letters");
+          assertTrue(R.redactText(log).contains("token=[REDACTED]"));
+        },
+        "redaction must not be quadratic");
   }
 
   @Test
