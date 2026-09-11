@@ -1,0 +1,23 @@
+{
+  "protocolVersion": "0.2.0",
+  "eventId": "sess-1-0022",
+  "eventType": "scope.failed",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 22,
+  "occurredAt": "2026-09-11T10:00:21.000+00:00",
+  "payload": {
+    "path": [
+      {
+        "kind": "file",
+        "name": "tests/test_orders.py"
+      }
+    ],
+    "failures": [
+      {
+        "message": "module setup failed",
+        "phase": "setup"
+      }
+    ]
+  }
+}

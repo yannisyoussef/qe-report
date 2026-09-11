@@ -1,0 +1,2 @@
+{"protocolVersion":"0.2.0","eventId":"s-1-0002","eventType":"scope.failed","runId":"run-inv-0021","sessionId":"s-1","sequence":2,"occurredAt":"2026-09-11T10:00:01.000+00:00","payload":{"path":[{"kind":"file","name":"suite.spec"}],"failures":[{"message":"early"}]}}
+{"protocolVersion":"0.2.0","eventId":"s-1-0003","eventType":"session.finished","runId":"run-inv-0021","sessionId":"s-1","sequence":3,"occurredAt":"2026-09-11T10:00:02.000+00:00","payload":{}}

@@ -1,11 +1,11 @@
 {
-  "protocolVersion": "0.1.0",
-  "eventId": "sess-1-0021",
+  "protocolVersion": "0.2.0",
+  "eventId": "sess-1-0024",
   "eventType": "attempt.heartbeat",
   "runId": "run-ev-0001",
   "sessionId": "sess-1",
-  "sequence": 21,
-  "occurredAt": "2026-09-11T10:00:20.000+00:00",
+  "sequence": 24,
+  "occurredAt": "2026-09-11T10:00:23.000+00:00",
   "payload": {
     "attemptId": "a-1"
   }

@@ -1,7 +1,7 @@
 # qe-report protocol
 
 A language-neutral description of a test run as a sequence of events, for
-reporting from any runner. Compatibility line 0.1; the schema in
+reporting from any runner. Compatibility line 0.2; the schema in
 [`schema/event.schema.json`](schema/event.schema.json) is the source of
 truth, and the fixtures in [`fixtures/`](fixtures/) are its executable
 specification. Both the Java and TypeScript bindings in this repository are
@@ -9,7 +9,9 @@ checked against them.
 
 The design was derived from the observed behaviour of three runners: JUnit
 Platform 6 (`TestExecutionListener`), Playwright 1.63 (`Reporter`), and
-Karate 1.5 (`RuntimeHook`). Where a concept exists because of what those
+Karate 1.5 (`RuntimeHook`), and line 0.2 from the first real adapter (the
+JUnit Platform adapter, in review), which met a failure that line 0.1 could
+not represent. Where a concept exists because of what those
 runners do, this document says so. The ecosystem-level boundary this
 protocol implements is in the
 [qe-ecosystem architecture](https://github.com/yannisyoussef/qe-ecosystem/blob/develop/docs/architecture.md)
@@ -39,7 +41,7 @@ Every event carries:
 
 | Field | Meaning |
 |---|---|
-| `protocolVersion` | Full Semantic Version written by the producer, for example `0.1.0`. |
+| `protocolVersion` | Full Semantic Version written by the producer, for example `0.2.0`. |
 | `eventId` | Unique within the run. A second occurrence with identical content is a harmless duplicate; with different content it is invalid. |
 | `eventType` | Discriminator for `payload`, dotted lower case. |
 | `runId`, `sessionId` | Identity of the run and of the producer process. |
@@ -64,12 +66,96 @@ carried as `durationMs` on the finishing events.
 | `step.started` | A named unit inside an attempt begins. | `stepId`, `attemptId`, `parentStepId`, `name`, `kind`, `location`. |
 | `step.finished` | It ends. | `stepId`, `attemptId`, `status`, `rawStatus`, `durationMs`, `failures`. |
 | `attachment.added` | Bytes were stored for an attempt or step. | `attemptId`, `stepId`, `name`, `mediaType`, `sizeBytes`, `sha256`. |
+| `scope.failed` | A non-test scope of the hierarchy failed. | `path`, `failures`, `displayName`, `rawStatus`, `location`. |
 
 There is no `run.started`: run-level facts (environment, CI context, source
 revision) live on `session.started`, because a forked JVM or a shard knows
 them and no coordinator has to. Failures are embedded in the finishing
 events rather than emitted separately, because every runner observed
 delivers the error together with the end of the test or step.
+
+### Scope failures
+
+A scope is a non-test node of the runner's hierarchy: a class, a suite, a
+file, a module, or whatever a runner groups tests in. Runners can fail a
+scope on its own, after or before its tests, and the tests keep their own
+verdicts: a JUnit class whose `@AfterAll` throws after every test passed, a
+pytest module or class whose teardown fixture errors, a Cypress spec whose
+`after` hook fails. Attributing such a failure to a child test would be
+false, and inventing a test to carry it would distort counts and history.
+`scope.failed` records it where it belongs, and it is why line 0.2 exists:
+a consumer that ignored it would derive a passed run from a failed one, so
+it could not be an ignorable addition to line 0.1.
+
+```json
+{
+  "protocolVersion": "0.2.0",
+  "eventId": "jvm-1-0033",
+  "eventType": "scope.failed",
+  "runId": "run-junit-0001",
+  "sessionId": "jvm-1",
+  "sequence": 33,
+  "occurredAt": "2026-09-11T10:00:30.000+00:00",
+  "payload": {
+    "path": [
+      { "kind": "engine", "name": "junit-jupiter" },
+      { "kind": "class", "name": "com.example.CustomerTest" }
+    ],
+    "displayName": "CustomerTest",
+    "rawStatus": "FAILED",
+    "failures": [
+      { "message": "cleanup failed", "type": "java.lang.IllegalStateException", "phase": "teardown" }
+    ]
+  }
+}
+```
+
+- `path` identifies the failing scope itself, outermost first, in the same
+  segments a test path uses; the last segment is the scope that failed. It
+  is required and never empty. When the same adapter emits the scope's
+  tests, the scope path is a prefix of each of their paths, so a consumer
+  can place the failure in the tree by prefix matching; prefix matching is
+  for display, never for verdicts. Scopes have no identity of their own
+  beyond the event's `eventId`, and no historical identity.
+- `failures` reuses the failure definition and is never empty. Several
+  failures observed at once belong in one event. `failures[].phase`, when
+  present, is `setup` or `teardown`; a consumer treats any other value as
+  absent.
+- `displayName`, `rawStatus`, and `location` are optional and mean what
+  they mean on a test.
+
+The event is session-scoped: valid after `session.started` and before
+`session.finished`, before or after the child attempts, without any
+attempt association. Each `scope.failed` is a distinct failure: events are
+never merged by path, a nested scope and its parent may each fail, and a
+session may carry several. A scope failure with no attempt under its path
+is valid and means that nothing ran there. There is no `scope.started`,
+`scope.finished`, or `scope.passed`: only the observed failure is recorded.
+
+A prevented set of tests has one representation, not two: when the runner
+reports per-test setup errors, or the adapter can honestly synthesise them
+for planned tests (the JUnit `@BeforeAll` mapping), those are failed
+attempts with `phase: setup`; otherwise a single `scope.failed` with
+`phase: setup`. Consumers never infer one from the other.
+
+A run's verdict is derived, never persisted. A test case's outcome is that
+of its final attempt (the highest `attemptNumber`), read against
+`expectedStatus`: failed where passing was expected, or passed where
+failure was expected, is an unexpected outcome. The run is `incomplete`
+while any session, attempt, or step is still open; otherwise `failed` when
+any test case's outcome is unexpected or the run carries at least one
+`scope.failed`; otherwise `passed`. A `scope.failed` never rewrites a
+completed attempt. For
+
+```
+class FooTest
+  testA PASSED
+  testB PASSED
+  @AfterAll FAILED
+```
+
+the read model keeps `testA = passed`, `testB = passed`, one teardown scope
+failure, and a run verdict of `failed`.
 
 ### Session lifecycle
 
@@ -254,9 +340,11 @@ responsible for what it contains.
 
 ## Compatibility
 
-The compatibility unit before 1.0 is `0.minor`: a consumer of line 0.1
-reads any `0.1.x` and rejects everything else as an unsupported protocol
-version. From 1.0 the unit is the major.
+The compatibility unit before 1.0 is `0.minor`: a consumer of line 0.2
+reads any `0.2.x` and rejects everything else, including the unpublished
+line 0.1, as an unsupported protocol version. From 1.0 the unit is the
+major. Line 0.1 exists in the repository history only; nothing was ever
+published from it, so there is no migration path to maintain.
 
 Within a supported line:
 
@@ -272,7 +360,7 @@ Within a supported line:
   ignorable.
 
 The schema `$id` is
-`https://yannisyoussef.github.io/qe-report/schema/0.1/event.schema.json`.
+`https://yannisyoussef.github.io/qe-report/schema/0.2/event.schema.json`.
 It identifies the compatibility line; consumers ship the schema and do not
 fetch it, and the URL is not yet served.
 
@@ -328,6 +416,11 @@ and the informational `IGNORED_EVENT_TYPE`, `DUPLICATE_EVENT`, and
 `INCOMPLETE_RUN`. Exit status is 0 for a valid run, 1 for an invalid one,
 2 for usage or I/O errors.
 
+The summary reports the derived run verdict as defined above, together
+with the counts it rests on: attempts, attempts that finished `failed`,
+and scope failures. Scope failures are counted on their own and never
+become failed attempts.
+
 ## Fixture corpus
 
 [`fixtures/manifest.json`](fixtures/manifest.json) lists every fixture and
@@ -336,9 +429,11 @@ round-trip, invalid events with the expected reason and pointer, and whole
 runs with their expected outcome, completeness, and counts. Three runs are
 derived from the JUnit, Playwright, and Karate probes, with values
 sanitised and timestamps fixed. Others cover forked producers without a
-coordinator, a coordinator that closes the run, a crashed producer, an
-identical duplicate, an ignorable unknown event, a newer patch version, and
-each lifecycle, session-file, and attachment violation.
+coordinator, a coordinator that closes the run, scope failures after all
+tests passed, after a test failed, and several in one session, a crashed
+producer, an identical duplicate, an ignorable unknown event, a newer patch
+version, the unpublished 0.1 line, and each lifecycle, session-file, and
+attachment violation.
 
 ## Conceptual mappings (not executed)
 
@@ -353,9 +448,11 @@ with `historicalIdStability: "uncertain"` when ids are auto-generated and
 `stable` when the author gave explicit ids. `nodeid` serves as
 `executionId`. Outcomes map directly: `passed`, `failed`, `skipped`;
 `xfail` is `failed` with `expectedStatus: "failed"`, `xpass` is `passed`
-with `expectedStatus: "failed"`. A fixture error in setup is
+with `expectedStatus: "failed"`. A function-scoped fixture error in setup is
 `failures[].phase: "setup"`; a teardown error is `"teardown"` on an
-attempt that may otherwise have passed, which is how pytest reports it.
+attempt that may otherwise have passed, which is how pytest reports it. A
+module- or class-scoped fixture that errors in teardown after its tests
+ran is a `scope.failed` with the module or class as its path.
 `pytest-rerunfailures` retries are further attempts. Captured stdout and
 log records become text attachments.
 
@@ -367,8 +464,9 @@ has no stable test id, so `historicalId` is the joined title path with
 per-attempt screenshots and the spec video are attachments. `it.skip`
 and `this.skip()` are `skipped`; a `beforeEach` failure marks the test
 and, by Cypress semantics, the remaining tests of the suite, each with
-`phase: "setup"`. Command log entries could be steps with `kind`
+`phase: "setup"`; an `after` hook failure of a suite or spec is a
+`scope.failed` for that suite or spec. Command log entries could be steps with `kind`
 `"command"`; that is a choice for an adapter, not a protocol change.
 
-Neither mapping needed a new event, status, or field, which is the check
+Neither mapping needs anything beyond the 0.2 event set, which is the check
 the exercise was for.

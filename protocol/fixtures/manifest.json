@@ -1,5 +1,5 @@
 {
-  "protocolVersion": "0.1.0",
+  "protocolVersion": "0.2.0",
   "schema": "../schema/event.schema.json",
   "events": {
     "valid": [
@@ -88,6 +88,18 @@
         "roundTrip": "exact"
       },
       {
+        "file": "events/valid/scope-failed-teardown-full.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/scope-failed-setup-minimal.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/scope-failed-boundary-max.json",
+        "roundTrip": "exact"
+      },
+      {
         "file": "events/valid/unknown-type-ignorable.json",
         "roundTrip": "exact"
       },
@@ -123,6 +135,84 @@
         "file": "events/invalid/unsupported-minor.json",
         "reason": "UNSUPPORTED_PROTOCOL_VERSION",
         "pointer": "/protocolVersion",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/unsupported-previous-line.json",
+        "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+        "pointer": "/protocolVersion",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-missing-path.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-empty-path.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/path",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-missing-failures.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-empty-failures.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-path-too-deep.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/path",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/scope-failed-failure-without-message.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures/0",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-failures-too-many.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/scope-failed-raw-status-too-long.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/rawStatus",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/scope-failed-raw-status-multiline.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/rawStatus",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/scope-failed-display-name-empty.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/displayName",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/scope-failed-location-without-file.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/location",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/scope-failed-path-segment-without-name.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/path/0",
         "codec": "reject"
       },
       {
@@ -182,7 +272,7 @@
       {
         "file": "events/invalid/status-unknown-value.json",
         "reason": "SCHEMA_INVALID",
-        "pointer": "/payload",
+        "pointer": "/payload/status",
         "codec": "reject"
       },
       {
@@ -242,7 +332,7 @@
       {
         "file": "events/invalid/historical-id-present-when-unavailable.json",
         "reason": "SCHEMA_INVALID",
-        "pointer": "/payload/test",
+        "pointer": "/payload/test/historicalId",
         "codec": "reject"
       },
       {
@@ -380,7 +470,10 @@
       "complete": true,
       "closed": true,
       "sessions": 1,
-      "attempts": 14
+      "attempts": 15,
+      "scopeFailures": 1,
+      "failedAttempts": 7,
+      "verdict": "failed"
     },
     {
       "dir": "runs/playwright",
@@ -389,7 +482,9 @@
       "closed": false,
       "sessions": 2,
       "attempts": 12,
-      "attachments": 4
+      "attachments": 4,
+      "failedAttempts": 5,
+      "verdict": "failed"
     },
     {
       "dir": "runs/karate",
@@ -397,7 +492,9 @@
       "complete": true,
       "closed": true,
       "sessions": 1,
-      "attempts": 7
+      "attempts": 7,
+      "failedAttempts": 3,
+      "verdict": "failed"
     },
     {
       "dir": "runs/crashed",
@@ -405,7 +502,10 @@
       "complete": false,
       "closed": false,
       "sessions": 1,
-      "attempts": 2
+      "attempts": 2,
+      "scopeFailures": 1,
+      "failedAttempts": 0,
+      "verdict": "incomplete"
     },
     {
       "dir": "runs/duplicate-event-identical",
@@ -414,7 +514,9 @@
       "closed": false,
       "sessions": 1,
       "attempts": 1,
-      "duplicates": 1
+      "duplicates": 1,
+      "failedAttempts": 0,
+      "verdict": "passed"
     },
     {
       "dir": "runs/compat/unknown-event-ignorable",
@@ -423,7 +525,9 @@
       "closed": true,
       "sessions": 1,
       "attempts": 1,
-      "ignored": 1
+      "ignored": 1,
+      "failedAttempts": 0,
+      "verdict": "passed"
     },
     {
       "dir": "runs/compat/newer-patch-version",
@@ -432,7 +536,9 @@
       "closed": false,
       "sessions": 1,
       "attempts": 1,
-      "roundTrip": "idempotent"
+      "roundTrip": "idempotent",
+      "failedAttempts": 0,
+      "verdict": "passed"
     },
     {
       "dir": "runs/compat/unsupported-event",
@@ -453,12 +559,85 @@
       "line": 2
     },
     {
+      "dir": "runs/scope-failure-all-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": true,
+      "sessions": 1,
+      "attempts": 2,
+      "scopeFailures": 1,
+      "failedAttempts": 0,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/scope-failure-after-child-failed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "scopeFailures": 1,
+      "failedAttempts": 1,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/scope-failures-multiple",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 1,
+      "scopeFailures": 2,
+      "failedAttempts": 0,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/scope-failure-during-open-attempt",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 1,
+      "scopeFailures": 1,
+      "failedAttempts": 0,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/invalid/scope-failed-after-session-finished",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_ALREADY_FINISHED",
+      "line": 5
+    },
+    {
+      "dir": "runs/invalid/scope-failed-before-session-started",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_NOT_STARTED",
+      "line": 1
+    },
+    {
+      "dir": "runs/invalid/scope-failed-after-run-finished",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "EVENT_AFTER_RUN_FINISHED",
+      "line": 4
+    },
+    {
+      "dir": "runs/compat/previous-line-0.1",
+      "outcome": "INVALID",
+      "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+      "line": 2
+    },
+    {
       "dir": "runs/forked",
       "outcome": "VALID",
       "complete": true,
       "closed": false,
       "sessions": 3,
-      "attempts": 3
+      "attempts": 3,
+      "failedAttempts": 0,
+      "verdict": "passed"
     },
     {
       "dir": "runs/coordinator",
@@ -466,7 +645,10 @@
       "complete": true,
       "closed": true,
       "sessions": 2,
-      "attempts": 2
+      "attempts": 2,
+      "scopeFailures": 1,
+      "failedAttempts": 1,
+      "verdict": "failed"
     },
     {
       "dir": "runs/invalid/event-after-session-finished",
