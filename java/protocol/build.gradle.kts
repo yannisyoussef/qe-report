@@ -9,5 +9,6 @@ dependencies {
     implementation(libs.jackson.databind)
     testFixturesImplementation(platform(libs.jackson.bom))
     testFixturesImplementation(libs.jackson.databind)
+    testFixturesImplementation(libs.json.schema.validator)
     testImplementation(libs.json.schema.validator)
 }

@@ -12,8 +12,27 @@ allprojects {
 
 subprojects {
     apply(plugin = "java-library")
+    apply(plugin = "maven-publish")
     apply(plugin = "net.ltgt.errorprone")
     apply(plugin = "com.diffplug.spotless")
+
+    // Artifact coordinates follow the ecosystem naming rules (qe-report-<module>). The only
+    // repository configured is a build-local directory that the consumer fixtures resolve from;
+    // nothing is published anywhere else.
+    extensions.configure<PublishingExtension> {
+        publications {
+            create<MavenPublication>("maven") {
+                from(components["java"])
+                artifactId = "qe-report-${project.name}"
+            }
+        }
+        repositories {
+            maven {
+                name = "buildLocal"
+                url = uri(rootProject.layout.buildDirectory.dir("local-repo"))
+            }
+        }
+    }
 
     extensions.configure<JavaPluginExtension> {
         toolchain { languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -54,6 +73,12 @@ subprojects {
     }
 }
 
+tasks.register("publishToBuildLocal") {
+    description = "Publishes every module to build/local-repo for the consumer fixtures"
+    group = "verification"
+    dependsOn(subprojects.map { "${it.path}:publishMavenPublicationToBuildLocalRepository" })
+}
+
 // Published libraries target Java 17 bytecode. With -PtestJavaVersions=17,21 the test suites also
 // run on those runtimes (toolchains are provisioned by the foojay resolver); CI always passes it.
 val extraTestJavaVersions =
@@ -77,7 +102,8 @@ subprojects {
                 javaLauncher.set(
                     toolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(version)) },
                 )
-                useJUnitPlatform()
+                // Consumer fixtures spawn whole builds; they run once, in the default test task.
+                useJUnitPlatform { excludeTags("consumer") }
                 systemProperty("qe.protocolDir", protocolDir)
             }
         tasks.named("check") { dependsOn(task) }

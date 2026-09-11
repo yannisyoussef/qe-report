@@ -1,4 +1,7 @@
 [versions]
+# Lowest JUnit Platform line the adapter compiles against; later lines are tested in a matrix.
+junit-platform-min = "1.10.5"
+junit-jupiter-min = "5.10.5"
 jackson = "2.22.2"
 jspecify = "1.0.1"
 junit = "6.1.3"
@@ -9,6 +12,7 @@ spotless = "8.10.2"
 google-java-format = "1.36.1"
 
 [libraries]
+junit-platform-launcher-min = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-platform-min" }
 jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }

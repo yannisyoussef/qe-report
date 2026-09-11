@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.DynamicTest.dynamicTest;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.yannisyoussef.qe.report.protocol.testing.Corpus;
+import io.github.yannisyoussef.qe.report.protocol.testing.Schemas;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -42,15 +43,12 @@ class CorpusTest {
                 if (event.payload() instanceof UnknownPayload) {
                   assertTrue(event.isIgnorable(), "unknown type must be ignorable");
                 } else {
-                  assertTrue(
-                      SchemaValidation.isValid(text),
-                      () -> SchemaValidation.describe(SchemaValidation.errors(text)));
+                  assertTrue(Schemas.isValid(text), () -> Schemas.describe(Schemas.errors(text)));
                 }
                 String written = ProtocolJson.write(event);
                 if (!(event.payload() instanceof UnknownPayload)) {
                   assertTrue(
-                      SchemaValidation.isValid(written),
-                      () -> SchemaValidation.describe(SchemaValidation.errors(written)));
+                      Schemas.isValid(written), () -> Schemas.describe(Schemas.errors(written)));
                 }
                 if (exact) {
                   assertEquals(Corpus.canonical(text), Corpus.canonical(written));
@@ -77,21 +75,18 @@ class CorpusTest {
               () -> {
                 String text = Corpus.readText(Corpus.fixtures().resolve(file));
                 if (reason.equals("SCHEMA_INVALID")) {
-                  assertFalse(SchemaValidation.errors(text).isEmpty(), "schema must reject");
+                  assertFalse(Schemas.errors(text).isEmpty(), "schema must reject");
                   String type = TYPE_MAPPER.readTree(text).path("eventType").asText();
                   var typed =
                       EventTypes.isKnown(type)
-                          ? SchemaValidation.errorsForType(text, type)
-                          : SchemaValidation.errors(text);
+                          ? Schemas.errorsForType(text, type)
+                          : Schemas.errors(text);
                   assertFalse(typed.isEmpty(), "typed schema must reject");
                   if (pointer != null) {
                     assertTrue(
-                        typed.stream().map(SchemaValidation::pointer).anyMatch(pointer::equals),
+                        typed.stream().map(Schemas::pointer).anyMatch(pointer::equals),
                         () ->
-                            "expected exact pointer "
-                                + pointer
-                                + " in "
-                                + SchemaValidation.describe(typed));
+                            "expected exact pointer " + pointer + " in " + Schemas.describe(typed));
                   }
                 }
                 if (reject) {
@@ -141,13 +136,8 @@ class CorpusTest {
                   Event event = ProtocolJson.read(line);
                   if (!(event.payload() instanceof UnknownPayload)) {
                     assertTrue(
-                        SchemaValidation.isValid(line),
-                        () ->
-                            dir
-                                + ":"
-                                + number
-                                + " "
-                                + SchemaValidation.describe(SchemaValidation.errors(line)));
+                        Schemas.isValid(line),
+                        () -> dir + ":" + number + " " + Schemas.describe(Schemas.errors(line)));
                   }
                   String written = ProtocolJson.write(event);
                   if (!idempotentOnly) {
@@ -171,14 +161,14 @@ class CorpusTest {
         dynamicTest(
             "message at 65536 accepted, 65537 rejected",
             () -> {
-              assertTrue(SchemaValidation.isValid(withMessage(event, payload, "m".repeat(65536))));
-              assertFalse(SchemaValidation.isValid(withMessage(event, payload, "m".repeat(65537))));
+              assertTrue(Schemas.isValid(withMessage(event, payload, "m".repeat(65536))));
+              assertFalse(Schemas.isValid(withMessage(event, payload, "m".repeat(65537))));
             }),
         dynamicTest(
             "stack trace at 262144 accepted, 262145 rejected",
             () -> {
-              assertTrue(SchemaValidation.isValid(withStack(event, payload, "s".repeat(262144))));
-              assertFalse(SchemaValidation.isValid(withStack(event, payload, "s".repeat(262145))));
+              assertTrue(Schemas.isValid(withStack(event, payload, "s".repeat(262144))));
+              assertFalse(Schemas.isValid(withStack(event, payload, "s".repeat(262145))));
             }));
   }
 

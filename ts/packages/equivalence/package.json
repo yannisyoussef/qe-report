@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "equivalence": "vitest run"
+    "equivalence": "vitest run test/equivalence.test.ts",
+    "consumer-runs": "vitest run test/consumer-runs.test.ts"
   },
   "dependencies": {
     "qe-report-protocol": "workspace:*",
