@@ -20,7 +20,7 @@ the ignored `local/` directory).
   never commit raw runner output.
 - Redaction rules change in both SDKs together, and
   `protocol/fixtures/redaction/cases.json` is updated in the same change.
-- Within compatibility line 0.1 a change may add optional properties or
+- Within compatibility line 0.2 a change may add optional properties or
   ignorable event types. Anything a consumer must understand to derive
   existing state starts a new line.
 - Public API is what is not under an `internal` package (Java) or not
