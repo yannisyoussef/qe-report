@@ -24,6 +24,7 @@ import io.github.yannisyoussef.qe.report.protocol.ProtocolException;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolException.Reason;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolVersion;
 import io.github.yannisyoussef.qe.report.protocol.RunFinished;
+import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.SessionFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
 import io.github.yannisyoussef.qe.report.protocol.Source;
@@ -76,7 +77,7 @@ public final class JsonCodec {
     if (!ProtocolVersion.isSupported(parsed)) {
       throw new ProtocolException(
           Reason.UNSUPPORTED_PROTOCOL_VERSION,
-          "protocol version " + protocolVersion + " is outside the supported line 0.1",
+          "protocol version " + protocolVersion + " is outside the supported line 0.2",
           "/protocolVersion");
     }
     String eventType = requiredString(root, "eventType", "");
@@ -174,6 +175,22 @@ public final class JsonCodec {
               requiredString(p, "mediaType", at),
               integral(p, "sizeBytes", at),
               requiredString(p, "sha256", at));
+      case EventTypes.SCOPE_FAILED -> {
+        List<PathSegment> path = pathSegments(required(p, "path", at), at + "/path");
+        if (path.isEmpty()) {
+          throw invalid(at + "/path", "must identify the failing scope");
+        }
+        List<Failure> failures = failures(p, at);
+        if (failures.isEmpty()) {
+          throw invalid(at + "/failures", "a scope failure carries at least one failure");
+        }
+        yield new ScopeFailed(
+            path,
+            optionalString(p, "displayName", at),
+            optionalString(p, "rawStatus", at),
+            optionalObject(p, "location", at, n -> location(n, at + "/location")),
+            failures);
+      }
       default -> {
         if (!ignorable) {
           throw new ProtocolException(
@@ -193,29 +210,17 @@ public final class JsonCodec {
     String stabilityRaw = requiredString(n, "historicalIdStability", at);
     HistoricalIdStability stability = HistoricalIdStability.fromWireName(stabilityRaw);
     if (stability == null) {
-      throw invalid(at + "/historicalIdStability", "unknown value " + stabilityRaw);
+      throw invalid(at + "/historicalIdStability", "unknown value " + shown(stabilityRaw));
     }
     String historicalId = optionalString(n, "historicalId", at);
     if (stability == HistoricalIdStability.UNAVAILABLE && historicalId != null) {
-      throw invalid(at, "historicalId must be absent when historicalIdStability is unavailable");
+      throw invalid(
+          at + "/historicalId", "must be absent when historicalIdStability is unavailable");
     }
     if (stability != HistoricalIdStability.UNAVAILABLE && historicalId == null) {
       throw invalid(at, "historicalId is required unless historicalIdStability is unavailable");
     }
-    JsonNode pathNode = required(n, "path", at);
-    if (!pathNode.isArray()) {
-      throw invalid(at + "/path", "must be an array");
-    }
-    List<PathSegment> path = new ArrayList<>();
-    int i = 0;
-    for (JsonNode seg : pathNode) {
-      String segAt = at + "/path/" + i++;
-      if (!seg.isObject()) {
-        throw invalid(segAt, "must be an object");
-      }
-      path.add(
-          new PathSegment(requiredString(seg, "kind", segAt), requiredString(seg, "name", segAt)));
-    }
+    List<PathSegment> path = pathSegments(required(n, "path", at), at + "/path");
     return new TestCase(
         identifier(n, "executionId", at),
         historicalId,
@@ -225,6 +230,23 @@ public final class JsonCodec {
         optionalObject(n, "location", at, l -> location(l, at + "/location")),
         stringList(n, "tags", at),
         stringMap(n, "labels", at));
+  }
+
+  private static List<PathSegment> pathSegments(JsonNode pathNode, String at) {
+    if (!pathNode.isArray()) {
+      throw invalid(at, "must be an array");
+    }
+    List<PathSegment> path = new ArrayList<>();
+    int i = 0;
+    for (JsonNode seg : pathNode) {
+      String segAt = at + "/" + i++;
+      if (!seg.isObject()) {
+        throw invalid(segAt, "must be an object");
+      }
+      path.add(
+          new PathSegment(requiredString(seg, "kind", segAt), requiredString(seg, "name", segAt)));
+    }
+    return path;
   }
 
   private static List<Failure> failures(JsonNode p, String at) {
@@ -247,7 +269,7 @@ public final class JsonCodec {
       if (phaseRaw != null) {
         phase = FailurePhase.fromWireName(phaseRaw);
         if (phase == null) {
-          throw invalid(fAt + "/phase", "unknown value " + phaseRaw);
+          throw invalid(fAt + "/phase", "unknown value " + shown(phaseRaw));
         }
       }
       out.add(
@@ -265,7 +287,7 @@ public final class JsonCodec {
     String raw = requiredString(p, "status", at);
     Status s = Status.fromWireName(raw);
     if (s == null) {
-      throw invalid(at + "/status", "unknown value " + raw);
+      throw invalid(at + "/status", "unknown value " + shown(raw));
     }
     return s;
   }
@@ -277,7 +299,7 @@ public final class JsonCodec {
     }
     ExpectedStatus s = ExpectedStatus.fromWireName(raw);
     if (s == null) {
-      throw invalid(at + "/expectedStatus", "unknown value " + raw);
+      throw invalid(at + "/expectedStatus", "unknown value " + shown(raw));
     }
     return s;
   }
@@ -313,12 +335,10 @@ public final class JsonCodec {
     if (!n.isObject()) {
       throw invalid(at, "must be an object");
     }
-    Long line = optionalIntegral(n, "line", at);
-    Long column = optionalIntegral(n, "column", at);
     return new Location(
         requiredString(n, "file", at),
-        line == null ? null : Math.toIntExact(line),
-        column == null ? null : Math.toIntExact(column));
+        optionalIntegral(n, "line", at),
+        optionalIntegral(n, "column", at));
   }
 
   private static Map<String, String> stringMap(JsonNode p, String field, String at) {
@@ -437,6 +457,23 @@ public final class JsonCodec {
     return n.longValue();
   }
 
+  /** A producer-supplied value quoted for a diagnostic: bounded and without control characters. */
+  private static String shown(String value) {
+    StringBuilder sb = new StringBuilder("\"");
+    int limit = Math.min(value.length(), 64);
+    for (int i = 0; i < limit; i++) {
+      char c = value.charAt(i);
+      if (c < 0x20 || c == 0x7F) {
+        sb.append(String.format("\\u%04x", (int) c));
+      } else if (c == '"' || c == '\\') {
+        sb.append('\\').append(c);
+      } else {
+        sb.append(c);
+      }
+    }
+    return sb.append(value.length() > limit ? "\"..." : "\"").toString();
+  }
+
   private static ProtocolException invalid(String pointer, String message) {
     return new ProtocolException(Reason.SCHEMA_INVALID, pointer + ": " + message, pointer);
   }
@@ -534,6 +571,14 @@ public final class JsonCodec {
       p.put("mediaType", a.mediaType());
       p.put("sizeBytes", a.sizeBytes());
       p.put("sha256", a.sha256());
+    } else if (payload instanceof ScopeFailed s) {
+      p.set("path", pathSegments(s.path()));
+      putIfPresent(p, "displayName", s.displayName());
+      putIfPresent(p, "rawStatus", s.rawStatus());
+      if (s.location() != null) {
+        p.set("location", location(s.location()));
+      }
+      p.set("failures", failures(s.failures()));
     } else if (payload instanceof UnknownPayload u) {
       try {
         JsonNode raw = MAPPER.readTree(u.payloadJson());
@@ -555,14 +600,7 @@ public final class JsonCodec {
     putIfPresent(n, "historicalId", t.historicalId());
     n.put("historicalIdStability", t.historicalIdStability().wireName());
     n.put("displayName", t.displayName());
-    ArrayNode path = F.arrayNode();
-    for (PathSegment seg : t.path()) {
-      ObjectNode s = F.objectNode();
-      s.put("kind", seg.kind());
-      s.put("name", seg.name());
-      path.add(s);
-    }
-    n.set("path", path);
+    n.set("path", pathSegments(t.path()));
     if (t.location() != null) {
       n.set("location", location(t.location()));
     }
@@ -575,6 +613,17 @@ public final class JsonCodec {
       n.set("labels", stringMap(t.labels()));
     }
     return n;
+  }
+
+  private static ArrayNode pathSegments(List<PathSegment> segments) {
+    ArrayNode path = F.arrayNode();
+    for (PathSegment seg : segments) {
+      ObjectNode s = F.objectNode();
+      s.put("kind", seg.kind());
+      s.put("name", seg.name());
+      path.add(s);
+    }
+    return path;
   }
 
   private static ArrayNode failures(List<Failure> failures) {

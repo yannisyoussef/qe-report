@@ -10,6 +10,7 @@ public sealed interface Payload
         StepStarted,
         StepFinished,
         AttachmentAdded,
+        ScopeFailed,
         UnknownPayload {
 
   /** The event type this payload belongs to. */

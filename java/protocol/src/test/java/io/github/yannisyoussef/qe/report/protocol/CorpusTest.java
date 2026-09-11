@@ -18,6 +18,8 @@ import org.junit.jupiter.api.TestFactory;
 
 /** The fixture corpus is the executable specification; every entry of the manifest is a test. */
 class CorpusTest {
+  private static final com.fasterxml.jackson.databind.json.JsonMapper TYPE_MAPPER =
+      com.fasterxml.jackson.databind.json.JsonMapper.builder().build();
   private static final Set<String> CODEC_REASONS =
       Set.of(
           "MALFORMED_JSON",
@@ -75,24 +77,32 @@ class CorpusTest {
               () -> {
                 String text = Corpus.readText(Corpus.fixtures().resolve(file));
                 if (reason.equals("SCHEMA_INVALID")) {
-                  var errors = SchemaValidation.errors(text);
-                  assertFalse(errors.isEmpty(), "schema must reject");
-                  if (pointer != null && !pointer.isEmpty()) {
+                  assertFalse(SchemaValidation.errors(text).isEmpty(), "schema must reject");
+                  String type = TYPE_MAPPER.readTree(text).path("eventType").asText();
+                  var typed =
+                      EventTypes.isKnown(type)
+                          ? SchemaValidation.errorsForType(text, type)
+                          : SchemaValidation.errors(text);
+                  assertFalse(typed.isEmpty(), "typed schema must reject");
+                  if (pointer != null) {
                     assertTrue(
-                        errors.stream()
-                            .map(SchemaValidation::pointer)
-                            .anyMatch(p -> p.startsWith(pointer) || pointer.startsWith(p)),
+                        typed.stream().map(SchemaValidation::pointer).anyMatch(pointer::equals),
                         () ->
-                            "expected pointer "
+                            "expected exact pointer "
                                 + pointer
                                 + " in "
-                                + SchemaValidation.describe(errors));
+                                + SchemaValidation.describe(typed));
                   }
                 }
                 if (reject) {
                   ProtocolException ex =
                       assertThrows(ProtocolException.class, () -> ProtocolJson.read(text));
                   assertEquals(reason, ex.reason().name());
+                  if (pointer != null && ex.pointer() != null) {
+                    assertTrue(
+                        ex.pointer().startsWith(pointer),
+                        () -> "codec pointer " + ex.pointer() + " must refine " + pointer);
+                  }
                 } else {
                   ProtocolJson.read(text);
                 }
