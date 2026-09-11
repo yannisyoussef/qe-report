@@ -54,7 +54,7 @@ Java:
 
 ```java
 try (ReportSession session =
-    ReportSession.builder("run-42", "jvm-1", FileSink.open(Path.of("build/qe-report")))
+    ReportSession.builder("run-42", "jvm-1", FileSink.open(Path.of("build/qe-report"), "jvm-1"))
         .start(SessionStarted.of(new Component("my-adapter", "0.1.0")))) {
   session.emit(new AttemptStarted("a-1", 1, testCase));
   session.attach("a-1", null, "log", "text/plain", logBytes);
@@ -66,7 +66,7 @@ TypeScript:
 
 ```ts
 const session = ReportSession.start(
-  { runId: 'run-42', sessionId: 'worker-1', sink: FileSink.open('qe-report') },
+  { runId: 'run-42', sessionId: 'worker-1', sink: FileSink.open('qe-report', 'worker-1') },
   { producer: { name: 'my-adapter', version: '0.1.0' } },
 );
 session.emit({ eventType: 'attempt.started', payload: { attemptId: 'a-1', attemptNumber: 1, test } });
@@ -77,12 +77,14 @@ session.close();
 
 Both fill the envelope, redact free text and textual attachments before
 anything is written, drop and report an oversized event, and never throw
-into the test being reported.
+into the test being reported. Each session writes its own file under
+`events/` in the run directory, so forked or parallel producers share one
+run without sharing a file; attachments are stored once under their hash.
 
 Validate what was written:
 
 ```bash
-node ts/packages/validator/dist/cli.js build/qe-report/events.ndjson --require-complete
+node ts/packages/validator/dist/cli.js build/qe-report --require-complete
 ```
 
 ## Contributing and security
