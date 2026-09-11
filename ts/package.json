@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm build && pnpm test",
+    "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
     "test:equivalence": "pnpm --filter qe-report-equivalence run equivalence"
   },
   "devDependencies": {
