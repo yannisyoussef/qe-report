@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,10 +24,12 @@ export interface Manifest {
     reason?: string;
     detail?: string;
     line?: number;
+    file?: string;
     complete?: boolean;
     closed?: boolean;
     sessions?: number;
     attempts?: number;
+    attachments?: number;
     ignored?: number;
     duplicates?: number;
     roundTrip?: 'idempotent';
@@ -42,10 +44,21 @@ export function fixtureText(relative: string): string {
   return readFileSync(join(FIXTURES_DIR, relative), 'utf8');
 }
 
+/** Every session file of a run directory, relative to the fixtures directory, in name order. */
+export function sessionFiles(dir: string): string[] {
+  return readdirSync(join(FIXTURES_DIR, dir, 'events'))
+    .filter((f) => f.endsWith('.ndjson'))
+    .sort()
+    .map((f) => join(dir, 'events', f));
+}
+
+/** Non-blank lines of every session file of a run, file by file. */
 export function runLines(dir: string): string[] {
-  return fixtureText(join(dir, 'events.ndjson'))
-    .split('\n')
-    .filter((l) => l.trim() !== '');
+  return sessionFiles(dir).flatMap((f) =>
+    fixtureText(f)
+      .split('\n')
+      .filter((l) => l.trim() !== ''),
+  );
 }
 
 /** Test-only canonical form: keys sorted recursively, then JSON. Not a wire-format guarantee. */

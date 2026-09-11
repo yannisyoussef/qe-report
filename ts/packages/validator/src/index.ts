@@ -1,6 +1,8 @@
 export {
+  RunValidator,
   validateFile,
   validateLines,
+  validateRunDirectory,
   formatDiagnostic,
   type Diagnostic,
   type DiagnosticCode,

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-import { formatDiagnostic, validateFile } from './validator.js';
+import { statSync } from 'node:fs';
+import { formatDiagnostic, validateFile, validateRunDirectory, type Report } from './validator.js';
 
-const USAGE = `usage: qe-report-validate <events.ndjson> [--attachments <dir>] [--require-complete] [--json]
+const USAGE = `usage: qe-report-validate <run directory | events file> [--attachments <dir>] [--require-complete] [--json]
 
-Validates a qe-report protocol event file (compatibility line 0.1).
-Exit status: 0 valid, 1 invalid, 2 usage or I/O error.`;
+Validates a qe-report run directory (events/*.ndjson plus attachments/) or one event file
+(compatibility line 0.1). Exit status: 0 valid, 1 invalid, 2 usage or I/O error.`;
 
 function main(argv: string[]): Promise<number> {
-  let file: string | undefined;
+  let target: string | undefined;
   let attachmentsDir: string | undefined;
   let requireComplete = false;
   let json = false;
@@ -22,11 +23,11 @@ function main(argv: string[]): Promise<number> {
       process.stdout.write(USAGE + '\n');
       return Promise.resolve(0);
     } else if (a !== undefined && a.startsWith('-')) return usage(`unknown option ${a}`);
-    else if (file === undefined) file = a;
-    else return usage('only one file is accepted');
+    else if (target === undefined) target = a;
+    else return usage('only one run directory or file is accepted');
   }
-  if (file === undefined) return usage();
-  return run(file, attachmentsDir, requireComplete, json);
+  if (target === undefined) return usage();
+  return run(target, attachmentsDir, requireComplete, json);
 }
 
 function usage(message?: string): Promise<number> {
@@ -36,28 +37,31 @@ function usage(message?: string): Promise<number> {
 }
 
 async function run(
-  file: string,
+  target: string,
   attachmentsDir: string | undefined,
   requireComplete: boolean,
   json: boolean,
 ): Promise<number> {
-  let report;
+  let report: Report;
   try {
-    report = await validateFile(file, {
+    const options = {
       ...(attachmentsDir !== undefined ? { attachmentsDir } : {}),
       requireComplete,
-    });
+    };
+    report = statSync(target).isDirectory()
+      ? await validateRunDirectory(target, options)
+      : await validateFile(target, options);
   } catch (e) {
-    process.stderr.write(`error: cannot read ${file}: ${(e as Error).message}\n`);
+    process.stderr.write(`error: cannot read ${target}: ${(e as Error).message}\n`);
     return 2;
   }
   if (json) {
     process.stdout.write(JSON.stringify(report, null, 2) + '\n');
   } else {
-    for (const d of report.diagnostics) process.stdout.write(formatDiagnostic(file, d) + '\n');
+    for (const d of report.diagnostics) process.stdout.write(formatDiagnostic(d) + '\n');
     const s = report.summary;
     process.stdout.write(
-      `${report.valid ? 'valid' : 'invalid'}: ${s.events} events, ${s.sessions} sessions, ${s.attempts} attempts, ${s.steps} steps, ${s.attachments} attachments` +
+      `${report.valid ? 'valid' : 'invalid'}: ${s.files} files, ${s.events} events, ${s.sessions} sessions, ${s.attempts} attempts, ${s.steps} steps, ${s.attachments} attachments` +
         `${s.ignored ? `, ${s.ignored} ignored` : ''}${s.duplicates ? `, ${s.duplicates} duplicates` : ''}` +
         `, ${s.complete ? 'complete' : 'incomplete'}${s.closed ? ', closed' : ''}\n`,
     );
