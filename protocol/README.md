@@ -267,13 +267,11 @@ represent the planned tests it prevented as failed attempts with
 before relying on it. Karate background failures are step failures with
 `phase: "setup"`.
 
-An attempt represents a test case. A failure that belongs to no test, such
-as a JUnit `@AfterAll` failure reported on the class container after its
-tests have passed, has no representation in this compatibility line, and
-inventing a test to carry it would distort counts and history. Whether
-such a failure can be honestly associated with existing tests, or needs
-the smallest possible protocol addition, is an open question for the first
-JUnit adapter.
+An attempt represents a test case. A failure that belongs to a non-test
+scope of the hierarchy, such as a JUnit `@AfterAll` failure reported on the
+class container after its tests have passed, is represented by
+`scope.failed` (see Scope failures): it fails the run without altering the
+verdict of any child attempt, and no test is invented to carry it.
 
 ## Attachments
 
