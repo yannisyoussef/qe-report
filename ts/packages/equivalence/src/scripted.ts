@@ -28,7 +28,7 @@ export function scripted(out: string): void {
     {
       runId: 'run-eq-0001',
       sessionId: 'session-eq-1',
-      sink: FileSink.open(out),
+      sink: FileSink.open(out, 'session-eq-1'),
       clock: tickingClock(),
       ids: counter(),
       redactor,
