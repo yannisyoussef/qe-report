@@ -80,7 +80,15 @@ describe('Java and TypeScript outputs are semantically equivalent', () => {
     const text = readdirSync(dir)
       .map((f) => readFileSync(join(dir, f), 'utf8'))
       .join('');
-    for (const secret of ['abc.def.ghi', 'user:pw@', 'hunter2', 'token=abc', 'otp=1234'])
+    for (const secret of [
+      'abc.def.ghi',
+      'user:pw@',
+      'hunter2',
+      'token=abc',
+      'otp=1234',
+      'password=secret',
+      'token=xyz',
+    ])
       expect(text).not.toContain(secret);
     expect(text).toContain('password=[REDACTED]');
   });

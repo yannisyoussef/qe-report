@@ -134,6 +134,23 @@ export interface AttachmentAddedPayload {
   readonly sha256: string;
 }
 
+/**
+ * A failure at a non-test scope of the runner hierarchy (a class, suite, file, module, or
+ * analogous node). It contributes to the execution's failed outcome without changing any child
+ * attempt's verdict. Session-scoped: valid between `session.started` and `session.finished`,
+ * before or after the child attempts.
+ */
+export interface ScopeFailedPayload {
+  /** The failing scope itself, outermost first, in the same segments a test path uses. */
+  readonly path: readonly PathSegment[];
+  readonly displayName?: string;
+  /** The runner's own status word for the scope. */
+  readonly rawStatus?: string;
+  readonly location?: Location;
+  /** Never empty. */
+  readonly failures: readonly Failure[];
+}
+
 /** Fields common to every event. */
 export interface Envelope {
   /** Full Semantic Version written by the producer. */
@@ -183,6 +200,10 @@ export interface AttachmentAddedEvent extends Envelope {
   readonly eventType: 'attachment.added';
   readonly payload: AttachmentAddedPayload;
 }
+export interface ScopeFailedEvent extends Envelope {
+  readonly eventType: 'scope.failed';
+  readonly payload: ScopeFailedPayload;
+}
 
 /** An event whose type this binding knows. */
 export type Event =
@@ -193,7 +214,8 @@ export type Event =
   | AttemptFinishedEvent
   | StepStartedEvent
   | StepFinishedEvent
-  | AttachmentAddedEvent;
+  | AttachmentAddedEvent
+  | ScopeFailedEvent;
 
 export type EventType = Event['eventType'];
 
@@ -223,6 +245,7 @@ export const EVENT_TYPES: readonly EventType[] = [
   'step.started',
   'step.finished',
   'attachment.added',
+  'scope.failed',
 ];
 
 export function isKnownEventType(eventType: string): eventType is EventType {

@@ -15,6 +15,7 @@ import {
   type Failure,
   type Location,
   type PathSegment,
+  type ScopeFailedPayload,
   type SessionStartedPayload,
   type Source,
   type StepFinishedPayload,
@@ -33,6 +34,12 @@ type Obj = Record<string, unknown>;
 
 function invalid(pointer: string, message: string): ProtocolError {
   return new ProtocolError('SCHEMA_INVALID', `${pointer}: ${message}`, pointer);
+}
+
+/** A producer-supplied value quoted for a diagnostic: bounded and without control characters. */
+function shown(value: string): string {
+  const cut = value.length > 64;
+  return JSON.stringify(cut ? value.slice(0, 64) : value) + (cut ? '...' : '');
 }
 
 function isObject(v: unknown): v is Obj {
@@ -91,7 +98,8 @@ function optionalIntegral(o: Obj, field: string, at: string): number | undefined
 }
 
 function oneOf<T extends string>(value: string, allowed: readonly T[], at: string): T {
-  if (!(allowed as readonly string[]).includes(value)) throw invalid(at, `unknown value ${value}`);
+  if (!(allowed as readonly string[]).includes(value))
+    throw invalid(at, `unknown value ${shown(value)}`);
   return value as T;
 }
 
@@ -194,6 +202,15 @@ function failures(o: Obj, at: string): Failure[] | undefined {
   });
 }
 
+function pathSegments(raw: unknown, at: string): PathSegment[] {
+  if (!Array.isArray(raw)) throw invalid(at, 'must be an array');
+  return raw.map((seg, i) => {
+    const segAt = `${at}/${i}`;
+    if (!isObject(seg)) throw invalid(segAt, 'must be an object');
+    return { kind: requiredString(seg, 'kind', segAt), name: requiredString(seg, 'name', segAt) };
+  });
+}
+
 function testCase(o: Obj, at: string): TestCase {
   const stability = oneOf(
     requiredString(o, 'historicalIdStability', at),
@@ -202,18 +219,12 @@ function testCase(o: Obj, at: string): TestCase {
   );
   const historicalId = optionalString(o, 'historicalId', at);
   if (stability === 'unavailable' && historicalId !== undefined) {
-    throw invalid(at, 'historicalId must be absent when historicalIdStability is unavailable');
+    throw invalid(`${at}/historicalId`, 'must be absent when historicalIdStability is unavailable');
   }
   if (stability !== 'unavailable' && historicalId === undefined) {
     throw invalid(at, 'historicalId is required unless historicalIdStability is unavailable');
   }
-  const pathRaw = required(o, 'path', at);
-  if (!Array.isArray(pathRaw)) throw invalid(`${at}/path`, 'must be an array');
-  const path: PathSegment[] = pathRaw.map((seg, i) => {
-    const segAt = `${at}/path/${i}`;
-    if (!isObject(seg)) throw invalid(segAt, 'must be an object');
-    return { kind: requiredString(seg, 'kind', segAt), name: requiredString(seg, 'name', segAt) };
-  });
+  const path = pathSegments(required(o, 'path', at), `${at}/path`);
   return withOptional(
     {
       executionId: identifier(o, 'executionId', at),
@@ -325,6 +336,22 @@ function readPayload(eventType: string, p: Obj, ignorable: boolean): Event['payl
       );
       return payload;
     }
+    case 'scope.failed': {
+      const path = pathSegments(required(p, 'path', at), `${at}/path`);
+      if (path.length === 0) throw invalid(`${at}/path`, 'must identify the failing scope');
+      const fs = failures(p, at);
+      if (fs === undefined || fs.length === 0)
+        throw invalid(`${at}/failures`, 'a scope failure carries at least one failure');
+      const payload: ScopeFailedPayload = withOptional(
+        { path, failures: fs },
+        {
+          displayName: optionalString(p, 'displayName', at),
+          rawStatus: optionalString(p, 'rawStatus', at),
+          location: optionalObject(p, 'location', at, location),
+        },
+      );
+      return payload;
+    }
     default:
       if (!ignorable) {
         throw new ProtocolError(
@@ -363,7 +390,7 @@ export function eventFromObject(root: unknown): Event | UnknownEvent {
   if (!isSupportedProtocolVersion(parsed)) {
     throw new ProtocolError(
       'UNSUPPORTED_PROTOCOL_VERSION',
-      `protocol version ${protocolVersion} is outside the supported line 0.1`,
+      `protocol version ${protocolVersion} is outside the supported line 0.2`,
       '/protocolVersion',
     );
   }
@@ -537,6 +564,16 @@ function writePayload(e: Event): Obj {
         mediaType: p.mediaType,
         sizeBytes: p.sizeBytes,
         sha256: p.sha256,
+      });
+    }
+    case 'scope.failed': {
+      const p = e.payload;
+      return omitUndefined({
+        path: p.path.map((s) => ({ kind: s.kind, name: s.name })),
+        displayName: p.displayName,
+        rawStatus: p.rawStatus,
+        location: p.location ? writeLocation(p.location) : undefined,
+        failures: writeFailures(p.failures),
       });
     }
   }

@@ -3,7 +3,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { validateFile, validateLines, validateRunDirectory } from '../src/index.js';
+import {
+  formatDiagnostic,
+  validateFile,
+  validateLines,
+  validateRunDirectory,
+} from '../src/index.js';
 import { FIXTURES_DIR, manifest, sessionFiles } from '../../protocol/test/helpers.js';
 
 const m = manifest();
@@ -24,6 +29,10 @@ describe('run directory fixtures', () => {
         expect(report.summary.ignored).toBe(run.ignored ?? 0);
         expect(report.summary.duplicates).toBe(run.duplicates ?? 0);
         if (run.attachments !== undefined) expect(report.summary.attachments).toBe(run.attachments);
+        expect(report.summary.scopeFailures).toBe(run.scopeFailures ?? 0);
+        if (run.failedAttempts !== undefined)
+          expect(report.summary.failedAttempts).toBe(run.failedAttempts);
+        if (run.verdict !== undefined) expect(report.summary.verdict).toBe(run.verdict);
       } else {
         expect(report.valid).toBe(false);
         const match = errors.find(
@@ -56,6 +65,86 @@ describe('single files as streams', () => {
   });
 });
 
+describe('scope failures in the derived verdict', () => {
+  it('fails a run whose attempts all passed', async () => {
+    const report = await validateRunDirectory(join(FIXTURES_DIR, 'runs/scope-failure-all-passed'));
+    expect(report.valid).toBe(true);
+    expect(report.summary).toMatchObject({
+      attempts: 2,
+      failedAttempts: 0,
+      scopeFailures: 1,
+      verdict: 'failed',
+      complete: true,
+    });
+  });
+  it('does not count a scope failure as a failed attempt, and a retried test counts by its final attempt', async () => {
+    const line = (seq: number, type: string, payload: unknown): string =>
+      JSON.stringify({
+        protocolVersion: '0.2.0',
+        eventId: `e-${seq}`,
+        eventType: type,
+        runId: 'r',
+        sessionId: 's',
+        sequence: seq,
+        occurredAt: '2026-01-01T00:00:00Z',
+        payload,
+      });
+    const test = {
+      executionId: 't',
+      historicalId: 'h',
+      historicalIdStability: 'stable',
+      displayName: 't',
+      path: [],
+    };
+    const report = await validateLines([
+      line(1, 'session.started', { producer: { name: 'x' }, runner: { name: 'y' } }),
+      line(2, 'attempt.started', { attemptId: 'a1', attemptNumber: 1, test }),
+      line(3, 'attempt.finished', { attemptId: 'a1', status: 'failed' }),
+      line(4, 'attempt.started', { attemptId: 'a2', attemptNumber: 2, test }),
+      line(5, 'attempt.finished', { attemptId: 'a2', status: 'passed' }),
+      line(6, 'session.finished', {}),
+    ]);
+    expect(report.summary).toMatchObject({
+      failedAttempts: 1,
+      scopeFailures: 0,
+      verdict: 'passed',
+    });
+    const withScope = await validateLines([
+      line(1, 'session.started', { producer: { name: 'x' } }),
+      line(2, 'scope.failed', {
+        path: [{ kind: 'file', name: 'f' }],
+        failures: [{ message: 'm' }],
+      }),
+      line(3, 'session.finished', {}),
+    ]);
+    expect(withScope.summary).toMatchObject({
+      attempts: 0,
+      failedAttempts: 0,
+      scopeFailures: 1,
+      verdict: 'failed',
+    });
+  });
+  it('keeps diagnostics on one line whatever the producer wrote', async () => {
+    const bad = JSON.stringify({
+      protocolVersion: '0.2.0',
+      eventId: 'e',
+      eventType: 'scope.failed',
+      runId: 'r',
+      sessionId: 's',
+      sequence: 1,
+      occurredAt: '2026-01-01T00:00:00Z',
+      payload: {
+        path: [{ kind: 'file', name: 'f' }],
+        failures: [{ message: 'm', phase: 'setup\nforged: line' }],
+      },
+    });
+    const report = await validateLines([bad]);
+    const text = report.diagnostics.map((d) => formatDiagnostic(d)).join('\n');
+    expect(text.split('\n')).toHaveLength(report.diagnostics.length);
+    expect(text).not.toContain('forged: line\n');
+  });
+});
+
 describe('options', () => {
   it('reports an incomplete run as an error only when required', async () => {
     const dir = join(FIXTURES_DIR, 'runs/crashed');
@@ -66,7 +155,7 @@ describe('options', () => {
   });
   it('flags an event over the size limit', async () => {
     const big = JSON.stringify({
-      protocolVersion: '0.1.0',
+      protocolVersion: '0.2.0',
       eventId: 'e',
       eventType: 'session.started',
       runId: 'r',
@@ -81,7 +170,7 @@ describe('options', () => {
   it('reports a reused event id with different content', async () => {
     const line = (seq: number, id: string): string =>
       JSON.stringify({
-        protocolVersion: '0.1.0',
+        protocolVersion: '0.2.0',
         eventId: id,
         eventType: seq === 1 ? 'session.started' : 'session.finished',
         runId: 'r',

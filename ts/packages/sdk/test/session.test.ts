@@ -154,6 +154,41 @@ describe('ReportSession', () => {
       ]);
       expect(readdirSync(join(d, 'attachments'))).toEqual([]);
     });
+    it('accepts scope failures while active and drops them after session.finished', () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's'),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      const failure = {
+        eventType: 'scope.failed' as const,
+        payload: {
+          path: [{ kind: 'file', name: 'suite.spec' }],
+          failures: [{ message: 'teardown token=abc' }],
+        },
+      };
+      expect(s.emit(failure)).toBe(true);
+      expect(s.finish()).toBe(true);
+      expect(s.emit(failure)).toBe(false);
+      s.close();
+      expect(problems.map((p) => p.kind)).toEqual(['SESSION_FINISHED']);
+      const written = events(d, 's');
+      expect(written.map((e) => e.eventType)).toEqual([
+        'session.started',
+        'scope.failed',
+        'session.finished',
+      ]);
+      const scope = written[1] as Extract<Event, { eventType: 'scope.failed' }>;
+      expect(scope.payload.failures[0]?.message).toBe(`teardown token=${REDACTED}`);
+    });
+
     it('run.finished from an active session finishes the session first', () => {
       const d = temp();
       const s = ReportSession.start(
@@ -332,7 +367,7 @@ describe('ReportSession', () => {
     const d = temp();
     const sink = FileSink.open(d, 's');
     const unknown: UnknownEvent = {
-      protocolVersion: '0.1.0',
+      protocolVersion: '0.2.0',
       eventId: 'u',
       eventType: 'attempt.heartbeat',
       runId: 'r',

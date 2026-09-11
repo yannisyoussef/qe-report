@@ -1,7 +1,7 @@
 {
   "name": "qe-report-protocol",
   "version": "0.1.0",
-  "description": "qe-report protocol types and JSON codec (compatibility line 0.1)",
+  "description": "qe-report protocol types and JSON codec (compatibility line 0.2)",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",

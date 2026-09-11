@@ -3,7 +3,14 @@ import addFormats from 'ajv-formats';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ProtocolError, isKnownEvent, parseEvent, stringifyEvent } from '../src/index.js';
+import {
+  EVENT_TYPES,
+  ProtocolError,
+  isKnownEvent,
+  isKnownEventType,
+  parseEvent,
+  stringifyEvent,
+} from '../src/index.js';
 import { PROTOCOL_DIR, canonical, fixtureText, manifest, runLines } from './helpers.js';
 
 const schema = JSON.parse(
@@ -12,6 +19,13 @@ const schema = JSON.parse(
 const ajv = new Ajv2020({ allErrors: true });
 addFormats.default(ajv);
 const validate = ajv.compile(schema);
+const { $id: _id, oneOf: _oneOf, ...base } = schema as Record<string, unknown>;
+void _id;
+void _oneOf;
+/** The branch for one event type yields exact pointers instead of the oneOf's root error. */
+const byType = new Map(
+  EVENT_TYPES.map((t) => [t, ajv.compile({ ...base, allOf: [{ $ref: `#/$defs/event.${t}` }] })]),
+);
 const m = manifest();
 const CODEC_REASONS = new Set([
   'MALFORMED_JSON',
@@ -44,13 +58,17 @@ describe('invalid event fixtures', () => {
     it(`${file} is rejected for ${reason}`, () => {
       const text = fixtureText(file);
       if (reason === 'SCHEMA_INVALID') {
-        expect(validate(JSON.parse(text))).toBe(false);
-        if (pointer !== null && pointer !== '') {
-          const paths = (validate.errors ?? []).map((e) => e.instancePath);
-          expect(
-            paths.some((p) => p.startsWith(pointer) || pointer.startsWith(p)),
-            paths.join(','),
-          ).toBe(true);
+        const parsed = JSON.parse(text) as { eventType?: string };
+        expect(validate(parsed)).toBe(false);
+        const typed =
+          parsed.eventType !== undefined && isKnownEventType(parsed.eventType)
+            ? byType.get(parsed.eventType)
+            : undefined;
+        const v = typed ?? validate;
+        expect(v(parsed)).toBe(false);
+        if (pointer !== null) {
+          const paths = (v.errors ?? []).map((e) => e.instancePath);
+          expect(paths, paths.join(',')).toContain(pointer);
         }
       }
       if (codec === 'reject') {
@@ -59,6 +77,12 @@ describe('invalid event fixtures', () => {
           parseEvent(text);
         } catch (e) {
           expect((e as ProtocolError).code).toBe(reason);
+          const codecPointer = (e as ProtocolError).pointer;
+          if (pointer !== null && codecPointer !== undefined)
+            expect(
+              codecPointer.startsWith(pointer),
+              `codec pointer ${codecPointer} must refine ${pointer}`,
+            ).toBe(true);
         }
       } else {
         expect(() => parseEvent(text)).not.toThrow();

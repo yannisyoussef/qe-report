@@ -5,7 +5,7 @@ import { formatDiagnostic, validateFile, validateRunDirectory, type Report } fro
 const USAGE = `usage: qe-report-validate <run directory | events file> [--attachments <dir>] [--require-complete] [--json]
 
 Validates a qe-report run directory (events/*.ndjson plus attachments/) or one event file
-(compatibility line 0.1). Exit status: 0 valid, 1 invalid, 2 usage or I/O error.`;
+(compatibility line 0.2). Exit status: 0 valid, 1 invalid, 2 usage or I/O error.`;
 
 function main(argv: string[]): Promise<number> {
   let target: string | undefined;
@@ -61,9 +61,10 @@ async function run(
     for (const d of report.diagnostics) process.stdout.write(formatDiagnostic(d) + '\n');
     const s = report.summary;
     process.stdout.write(
-      `${report.valid ? 'valid' : 'invalid'}: ${s.files} files, ${s.events} events, ${s.sessions} sessions, ${s.attempts} attempts, ${s.steps} steps, ${s.attachments} attachments` +
+      `${report.valid ? 'valid' : 'invalid'}: ${s.files} files, ${s.events} events, ${s.sessions} sessions, ${s.attempts} attempts, ${s.steps} steps, ${s.attachments} attachments${s.scopeFailures ? `, ${s.scopeFailures} scope failures` : ''}` +
         `${s.ignored ? `, ${s.ignored} ignored` : ''}${s.duplicates ? `, ${s.duplicates} duplicates` : ''}` +
-        `, ${s.complete ? 'complete' : 'incomplete'}${s.closed ? ', closed' : ''}\n`,
+        `, ${s.complete ? 'complete' : 'incomplete'}${s.closed ? ', closed' : ''}, verdict ${s.verdict}
+`,
     );
   }
   return report.valid ? 0 : 1;
