@@ -1,0 +1,2 @@
+{"protocolVersion":"0.1.0","eventId":"s-1-0001","eventType":"session.started","runId":"run-inv-0010","sessionId":"s-1","sequence":1,"occurredAt":"2026-09-11T10:00:00.000+00:00","payload":{"producer":{"name":"fixture","version":"0.1.0"},"runner":{"name":"fixture-runner","version":"1"}}}
+{"protocolVersion": "0.1.0", "eventId": 

@@ -10,6 +10,10 @@
     "producer": {
       "name": "",
       "version": "0.1.0"
+    },
+    "runner": {
+      "name": "fixture-runner",
+      "version": "1"
     }
   }
 }

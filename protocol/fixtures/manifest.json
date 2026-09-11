@@ -388,7 +388,8 @@
       "complete": true,
       "closed": false,
       "sessions": 2,
-      "attempts": 12
+      "attempts": 12,
+      "attachments": 4
     },
     {
       "dir": "runs/karate",
@@ -450,6 +451,67 @@
       "outcome": "INVALID",
       "reason": "UNSUPPORTED_PROTOCOL_VERSION",
       "line": 2
+    },
+    {
+      "dir": "runs/forked",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 3,
+      "attempts": 3
+    },
+    {
+      "dir": "runs/coordinator",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": true,
+      "sessions": 2,
+      "attempts": 2
+    },
+    {
+      "dir": "runs/invalid/event-after-session-finished",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_ALREADY_FINISHED",
+      "line": 3
+    },
+    {
+      "dir": "runs/invalid/duplicate-run-finished",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "DUPLICATE_RUN_FINISHED",
+      "line": 3,
+      "file": "s-2-450222bcc347.ndjson"
+    },
+    {
+      "dir": "runs/invalid/run-finished-with-open-session",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_NOT_FINISHED_AT_RUN_END",
+      "line": 3,
+      "file": "s-1-6a840baf5d8c.ndjson"
+    },
+    {
+      "dir": "runs/invalid/historical-id-without-runner",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "HISTORICAL_ID_WITHOUT_RUNNER",
+      "line": 2
+    },
+    {
+      "dir": "runs/invalid/mixed-sessions-in-file",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_FILE_MIXED",
+      "line": 2
+    },
+    {
+      "dir": "runs/invalid/session-in-two-files",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "SESSION_ALREADY_STARTED",
+      "line": 1,
+      "file": "s-1-6a840baf5d8c.ndjson"
     },
     {
       "dir": "runs/invalid/duplicate-completion",

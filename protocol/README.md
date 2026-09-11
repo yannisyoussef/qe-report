@@ -26,10 +26,12 @@ run          one logical execution, identified by a producer-generated runId
          └─ attachment  metadata for bytes stored outside the stream
 ```
 
-A run is a newline-delimited sequence of JSON events. A file of events and
-a live stream are the same format. Several sessions can contribute to one
-run: Playwright shards, forked JVMs, and parallel CI jobs each open a
-session against a shared `runId`.
+A run is a set of newline-delimited event streams, one per session. A
+session file and a live stream are the same format. Several sessions can
+contribute to one run: Playwright shards, forked JVMs, and parallel CI jobs
+each open a session against a shared `runId`, and each owns its own event
+stream. Ordering is defined only inside a session; nothing orders sessions
+against each other.
 
 ## Envelope
 
@@ -55,8 +57,8 @@ carried as `durationMs` on the finishing events.
 | Event | Emitted when | Payload |
 |---|---|---|
 | `session.started` | A producer process begins. | `producer` (required), `runner`, `environment`, `executor`, `source`, `labels`. |
-| `session.finished` | The process will emit nothing further. | empty |
-| `run.finished` | Only from a producer that knows every session has finished. Nothing for the run is valid after it. | empty |
+| `session.finished` | The session emits no further session-scoped event. | empty |
+| `run.finished` | Only from a producer that knows every session has finished. | empty |
 | `attempt.started` | A test case execution begins. | `attemptId`, `attemptNumber` (1 for the first execution, 2 for the first retry), `test`. |
 | `attempt.finished` | It ends. | `attemptId`, `status`, `rawStatus`, `expectedStatus`, `durationMs`, `failures`. |
 | `step.started` | A named unit inside an attempt begins. | `stepId`, `attemptId`, `parentStepId`, `name`, `kind`, `location`. |
@@ -69,6 +71,23 @@ them and no coordinator has to. Failures are embedded in the finishing
 events rather than emitted separately, because every runner observed
 delivers the error together with the end of the test or step.
 
+### Session lifecycle
+
+```
+ACTIVE ──session.finished──▶ SESSION FINISHED ──run.finished──▶ RUN FINISHED
+```
+
+- While active, a session emits any event.
+- After `session.finished`, no attempt, step, attachment, or other
+  session-scoped event is valid for that session. The only event a
+  finished session may still emit is `run.finished`.
+- `run.finished` is optional and is emitted only by a producer that knows
+  every session of the run has finished: a single-process reporter, or a
+  coordinator. A forked worker cannot know this and must not emit it. A run
+  has at most one `run.finished`; after it, no event for the run is valid.
+- Both SDKs hold this state explicitly and drop anything else with a
+  reported problem; the validator rejects the same transitions.
+
 ### Ordering and completeness
 
 - Within a session, `session.started` comes first and `sequence` increases
@@ -78,7 +97,7 @@ delivers the error together with the end of the test or step.
   precede `attempt.finished`: all three runners have every attachment
   available when they report the end of a test, so nothing arrives late.
 - `session.finished` requires every attempt of the session to be finished.
-  `run.finished` requires every session in the same stream to be finished.
+  `run.finished` requires every session of the run to be finished.
 - A producer that crashes leaves a session, an attempt, or a step without
   its finishing event. Such a run is valid but incomplete. A consumer must
   represent the open items as having no verdict; it must not invent one.
@@ -107,7 +126,15 @@ Two identities, because the runners give two different things:
 - `executionId` correlates the attempts of one logical test within a run.
   Every retry carries the same value. JUnit's `UniqueId`, Playwright's
   `test.id`, and Karate's scenario `uniqueId` all serve here.
-- `historicalId` links the same logical test across runs. The adapter
+- `historicalId` links the same logical test across runs. Its collision
+  domain is the runner: consumers key history by the pair `(runner.name
+  from session.started, historicalId)`, so two runner families that happen
+  to emit the same string never merge into one test, and renaming or
+  replacing the adapter (`producer`) does not break history. A session
+  whose tests carry a `historicalId` must therefore declare `runner`, with
+  a lower-case family name such as `junit-platform`, `playwright`, `karate`,
+  `pytest`, or `cypress`; the validator rejects a historical id without a
+  runner. Adapters do not namespace the id themselves. The adapter
   derives it and says how far to trust it in `historicalIdStability`:
   `stable` (survives unrelated edits), `uncertain` (built from indexes or
   line numbers, as Karate outline examples and JUnit parameterized
@@ -147,10 +174,20 @@ reported because the runner never invokes the hook for it.
 
 `failures[].phase` says where a failure originated when the runner can
 tell: `setup`, `test`, or `teardown`. A Playwright `beforeAll` failure is
-attributed to every test in the file; JUnit reports a failed `@BeforeAll`
-only on the class container and never starts the tests, so an adapter
-synthesises a failed attempt with `phase: "setup"` for each planned test.
-Karate background failures are step failures with `phase: "setup"`.
+attributed to every test in the file. JUnit reports a failed `@BeforeAll`
+only on the class container and never starts the tests; an adapter may
+represent the planned tests it prevented as failed attempts with
+`phase: "setup"`, a mapping the JUnit adapter must test and document
+before relying on it. Karate background failures are step failures with
+`phase: "setup"`.
+
+An attempt represents a test case. A failure that belongs to no test, such
+as a JUnit `@AfterAll` failure reported on the class container after its
+tests have passed, has no representation in this compatibility line, and
+inventing a test to carry it would distort counts and history. Whether
+such a failure can be honestly associated with existing tests, or needs
+the smallest possible protocol addition, is an open question for the first
+JUnit adapter.
 
 ## Attachments
 
@@ -161,15 +198,43 @@ metadata: a file sink names the sidecar file by it, and a consumer verifies
 it. Deduplication is per run in the file layout and per project on any
 server; the hash is never a global lookup key.
 
-The file layout of a run is:
+### Run directory
 
 ```
 <run directory>/
-  events.ndjson
-  attachments/<sha256>
+  events/<session file>.ndjson    one file per session, created exclusively by its producer
+  attachments/<sha256>            bytes, shared by every session of the run
 ```
 
-No archives are accepted as attachments in this compatibility line.
+A session file is named from its `sessionId`: the id reduced to
+`[A-Za-z0-9._-]` (a leading dot becomes an underscore), at most 48
+characters, then `-` and the first 12 hex digits of the SHA-256 of the
+original id. The suffix keeps names unique when sanitisation collides, the
+sanitiser leaves nothing a path could use, and the file name is never
+authoritative: the events inside it carry the `sessionId`. A file holds
+exactly one session. Producers create their file exclusively, so a second
+process reusing a sessionId fails at open instead of interleaving; a
+restarted producer uses a new sessionId. No process ever appends to a file
+it did not create, and no adapter has to merge files afterwards: a
+consumer reads the directory as it is.
+
+Attachment bytes are written to a uniquely named temporary file, hashed,
+and published under the hash by rename. Two producers, in threads or in
+processes, publishing the same bytes at the same time both succeed; a
+publication that finds the hash already present with the same size is
+complete. A failed publication leaves no file behind.
+
+### Archives
+
+An archive is just bytes to this protocol. Events never inline archive
+contents, and no consumer unpacks an archive or treats it as files and
+directories: a Playwright trace is stored, hashed, sized, and downloaded
+unchanged, exactly like a screenshot, subject to the same media-type
+policy an ingestion point applies to any binary attachment. Whether such
+an attachment is ever viewed rather than downloaded is a decision for an
+isolated viewer that does not exist yet. The prohibition in the ecosystem
+security baseline is on archive extraction and on accepting archives as
+transport containers, not on storing opaque bytes.
 
 ## Redaction
 
@@ -227,12 +292,12 @@ Enforced by the schema unless noted:
 | `failures[].stackTrace` | 262144 characters |
 | `attemptNumber` | 1 to 1000 |
 | Serialised event (SDK and validator, not schema) | 1 MiB including the newline |
-| Attachment bytes (file sink default) | 64 MiB |
+| Attachment bytes (file sink default; a text file is read no further than this before being refused) | 64 MiB |
 
 Producers drop an oversized event and report the problem; they never
 truncate silently.
 
-## Validating a file
+## Validating a run
 
 The validator is the TypeScript package
 [`../ts/packages/validator`](../ts/packages/validator): Node starts fast,
@@ -241,19 +306,27 @@ implementation as the TypeScript binding's tests. The Java binding is
 checked against the same corpus with an independent validator.
 
 ```
-qe-report-validate events.ndjson [--attachments <dir>] [--require-complete] [--json]
+qe-report-validate <run directory | events file> [--attachments <dir>] [--require-complete] [--json]
 ```
 
-Attachment bytes are looked up next to the file in `attachments/` unless
-`--attachments` names another directory; a declared attachment that is not
-there is reported as missing. Diagnostics name the line, the event id when known, a code, and for
-schema problems a JSON pointer. Codes: `MALFORMED_JSON`, `SCHEMA_INVALID`,
-`UNSUPPORTED_PROTOCOL_VERSION`, `UNSUPPORTED_EVENT_TYPE`, `EVENT_TOO_LARGE`,
-`LIFECYCLE_INVALID` (with a detail such as `DUPLICATE_ATTEMPT_FINISHED` or
-`SEQUENCE_GAP`), `ATTACHMENT_MISSING`, `ATTACHMENT_SIZE_MISMATCH`,
-`ATTACHMENT_HASH_MISMATCH`; and the informational `IGNORED_EVENT_TYPE`,
-`DUPLICATE_EVENT`, and `INCOMPLETE_RUN`. Exit status is 0 for a valid
-file, 1 for an invalid one, 2 for usage or I/O errors.
+A run directory is validated as a whole: every `events/*.ndjson` file as
+one session, then the run-level rules (one `runId`, unique event and
+session ids, at most one `run.finished`, every session finished when the
+run is closed) and the bytes under `attachments/`. A single session file
+can be validated on its own; attachment bytes are then looked up in the
+`attachments` directory of its run unless `--attachments` names another. A
+declared attachment that is not there is reported as missing.
+
+Diagnostics name the file and line, the event id when known, a code, and
+for schema problems a JSON pointer. Codes: `MALFORMED_JSON`,
+`SCHEMA_INVALID`, `UNSUPPORTED_PROTOCOL_VERSION`, `UNSUPPORTED_EVENT_TYPE`,
+`EVENT_TOO_LARGE`, `LIFECYCLE_INVALID` (with a detail such as
+`DUPLICATE_ATTEMPT_FINISHED`, `SESSION_ALREADY_FINISHED`,
+`DUPLICATE_RUN_FINISHED`, `SESSION_FILE_MIXED`, or `SEQUENCE_GAP`),
+`ATTACHMENT_MISSING`, `ATTACHMENT_SIZE_MISMATCH`, `ATTACHMENT_HASH_MISMATCH`;
+and the informational `IGNORED_EVENT_TYPE`, `DUPLICATE_EVENT`, and
+`INCOMPLETE_RUN`. Exit status is 0 for a valid run, 1 for an invalid one,
+2 for usage or I/O errors.
 
 ## Fixture corpus
 
@@ -262,9 +335,10 @@ what a conforming implementation must do with it: valid events that must
 round-trip, invalid events with the expected reason and pointer, and whole
 runs with their expected outcome, completeness, and counts. Three runs are
 derived from the JUnit, Playwright, and Karate probes, with values
-sanitised and timestamps fixed. Others cover a crashed producer, an
+sanitised and timestamps fixed. Others cover forked producers without a
+coordinator, a coordinator that closes the run, a crashed producer, an
 identical duplicate, an ignorable unknown event, a newer patch version, and
-each lifecycle and attachment violation.
+each lifecycle, session-file, and attachment violation.
 
 ## Conceptual mappings (not executed)
 
