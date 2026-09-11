@@ -24,6 +24,9 @@ const RUNS = join(
 interface Expectations {
   sessions: number;
   attempts: number;
+  failedAttempts: number;
+  scopeFailures: number;
+  verdict: 'passed' | 'failed' | 'incomplete';
   closed: boolean;
 }
 
@@ -36,7 +39,7 @@ describe('consumer fixture runs', () => {
     expect(names.sort()).toEqual(['gradle', 'maven']);
   });
   for (const name of names) {
-    it(`${name} validates as a complete, open run with the observed counts`, async () => {
+    it(`${name} validates as a complete, open run with the observed counts and verdict`, async () => {
       const dir = join(RUNS, name);
       const expected = JSON.parse(
         readFileSync(join(dir, 'expectations.json'), 'utf8'),
@@ -46,6 +49,9 @@ describe('consumer fixture runs', () => {
       expect(report.summary).toMatchObject({
         sessions: expected.sessions,
         attempts: expected.attempts,
+        failedAttempts: expected.failedAttempts,
+        scopeFailures: expected.scopeFailures,
+        verdict: expected.verdict,
         closed: expected.closed,
         complete: true,
         files: expected.sessions,

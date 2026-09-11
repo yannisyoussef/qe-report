@@ -3,8 +3,11 @@ package io.github.yannisyoussef.qe.report.junitplatform;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.yannisyoussef.qe.report.protocol.AttemptFinished;
 import io.github.yannisyoussef.qe.report.protocol.Event;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
+import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
+import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.testing.Corpus;
 import io.github.yannisyoussef.qe.report.protocol.testing.Schemas;
 import java.io.IOException;
@@ -33,6 +36,18 @@ class ConsumerFixturesTest {
   private static final int CLASSES = 6;
   private static final int ATTEMPTS_PER_CLASS = 5;
 
+  /** Six classes over three forks, two each, so {@code forkEvery} never restarts a fork. */
+  private static final int GRADLE_FORKS = 3;
+
+  /** CharlieTest fails one test on purpose; FoxtrotTest fails in {@code @AfterAll}. */
+  private static final int FAILED_ATTEMPTS = 1;
+
+  private static final int SCOPE_FAILURES = 1;
+
+  /**
+   * Gradle reads a file repository in place and does not cache it, so the adapter published by this
+   * checkout is the one resolved; the Maven build below needs a repository of its own for that.
+   */
   @Test
   void gradleForksShareOneRunDirectory() throws Exception {
     Path run = fresh("gradle");
@@ -51,18 +66,24 @@ class ConsumerFixturesTest {
             "-Pqe.report.dir=" + run,
             "-Pqe.report.runId=run-gradle-consumer");
     execute(command, FIXTURES.resolve("gradle"));
-    assertRun(run, 3, "run-gradle-consumer");
+    assertRun(run, GRADLE_FORKS, "run-gradle-consumer");
   }
 
   @Test
   void surefireForksShareOneRunDirectory() throws Exception {
     Path run = fresh("maven");
+    // Maven never fetches a release version it already holds, so the build gets a repository of
+    // its own under the build directory, and the adapter published by this checkout is removed
+    // from it before every run. Nothing outside the build directory is touched.
+    Path repository = RUNS.resolveSibling("consumer-maven-repository");
+    delete(repository.resolve("io").resolve("github").resolve("yannisyoussef"));
     List<String> command =
         List.of(
             FIXTURES.resolve("maven").resolve("mvnw").toString(),
             "-q",
             "-B",
             "test",
+            "-Dmaven.repo.local=" + repository,
             "-Dqe.localRepo=file://" + LOCAL_REPO,
             "-Dqe.report.dir=" + run,
             "-Dqe.report.runId=run-maven-consumer");
@@ -73,13 +94,17 @@ class ConsumerFixturesTest {
 
   private static Path fresh(String name) throws IOException {
     Path run = RUNS.resolve(name);
-    if (Files.exists(run)) {
-      try (Stream<Path> s = Files.walk(run)) {
+    delete(run);
+    Files.createDirectories(RUNS);
+    return run;
+  }
+
+  private static void delete(Path directory) throws IOException {
+    if (Files.exists(directory)) {
+      try (Stream<Path> s = Files.walk(directory)) {
         s.sorted((a, b) -> b.compareTo(a)).forEach(p -> p.toFile().delete());
       }
     }
-    Files.createDirectories(RUNS);
-    return run;
   }
 
   private static String execute(List<String> command, Path directory) throws Exception {
@@ -97,6 +122,8 @@ class ConsumerFixturesTest {
     assertEquals(expectedSessions, files.size(), "one session file per fork: " + files);
     Set<String> sessions = new HashSet<>();
     int attempts = 0;
+    int failedAttempts = 0;
+    int scopeFailures = 0;
     for (Path file : files) {
       long expectedSequence = 1;
       Set<String> inFile = new HashSet<>();
@@ -117,19 +144,35 @@ class ConsumerFixturesTest {
           events.get(events.size() - 1).eventType(),
           "a fork finishes its session and never the run");
       assertTrue(events.stream().noneMatch(e -> e.eventType().equals("run.finished")));
-      attempts +=
-          (int) events.stream().filter(e -> e.eventType().equals("attempt.finished")).count();
+      for (Event e : events) {
+        if (e.payload() instanceof AttemptFinished f) {
+          attempts++;
+          if (f.status() == Status.FAILED) {
+            failedAttempts++;
+          }
+        } else if (e.payload() instanceof ScopeFailed) {
+          scopeFailures++;
+        }
+      }
       sessions.addAll(inFile);
     }
     assertEquals(expectedSessions, sessions.size());
-    assertEquals(CLASSES * ATTEMPTS_PER_CLASS, attempts);
+    assertEquals(CLASSES * ATTEMPTS_PER_CLASS, attempts, "a scope failure invents no attempt");
+    assertEquals(FAILED_ATTEMPTS, failedAttempts);
+    assertEquals(SCOPE_FAILURES, scopeFailures);
     Files.writeString(
         run.resolve("expectations.json"),
         "{\"sessions\": "
             + expectedSessions
             + ", \"attempts\": "
             + attempts
-            + ", \"closed\": false}\n",
+            + ", \"failedAttempts\": "
+            + failedAttempts
+            + ", \"scopeFailures\": "
+            + scopeFailures
+            + ", \"verdict\": \""
+            + (failedAttempts > 0 || scopeFailures > 0 ? "failed" : "passed")
+            + "\", \"closed\": false}\n",
         StandardCharsets.UTF_8);
   }
 }

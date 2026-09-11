@@ -2,6 +2,7 @@ package consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 @Tag("consumer")
 class FoxtrotTest {
+  @AfterAll
+  static void tearDownFails() {
+    throw new IllegalStateException("Foxtrot teardown");
+  }
+
   @Test
   void passes() throws InterruptedException {
     Thread.sleep(20);

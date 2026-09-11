@@ -5,7 +5,10 @@ rootProject.name = "qe-report-gradle-consumer"
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        maven { url = uri(providers.gradleProperty("qe.localRepo").get()) }
+        exclusiveContent {
+            forRepository { maven { url = uri(providers.gradleProperty("qe.localRepo").get()) } }
+            filter { includeGroup("io.github.yannisyoussef") }
+        }
         mavenCentral()
     }
 }
