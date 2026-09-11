@@ -2,7 +2,7 @@ package io.github.yannisyoussef.qe.report.protocol;
 
 import java.util.Set;
 
-/** The event type names of compatibility line 0.1. */
+/** The event type names of compatibility line 0.2. */
 public final class EventTypes {
   public static final String SESSION_STARTED = "session.started";
   public static final String SESSION_FINISHED = "session.finished";
@@ -12,6 +12,7 @@ public final class EventTypes {
   public static final String STEP_STARTED = "step.started";
   public static final String STEP_FINISHED = "step.finished";
   public static final String ATTACHMENT_ADDED = "attachment.added";
+  public static final String SCOPE_FAILED = "scope.failed";
 
   private static final Set<String> KNOWN =
       Set.of(
@@ -22,7 +23,8 @@ public final class EventTypes {
           ATTEMPT_FINISHED,
           STEP_STARTED,
           STEP_FINISHED,
-          ATTACHMENT_ADDED);
+          ATTACHMENT_ADDED,
+          SCOPE_FAILED);
 
   private EventTypes() {}
 

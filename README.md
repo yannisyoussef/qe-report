@@ -5,9 +5,10 @@ binding, producer SDKs, and a validator. Part of the
 [QE ecosystem](https://github.com/yannisyoussef/qe-ecosystem); the
 ecosystem architecture and decision records apply here.
 
-Status: protocol compatibility line 0.1 is defined and implemented in both
-languages. No adapter for a real runner, no HTTP transport, and no
-reporting server exist yet. Nothing is published.
+Status: protocol compatibility line 0.2 is defined and implemented in both
+languages. The first adapter, for the JUnit Platform, is in review on its
+own branch. No HTTP transport and no reporting server exist yet. Nothing is
+published.
 
 ## What is here
 

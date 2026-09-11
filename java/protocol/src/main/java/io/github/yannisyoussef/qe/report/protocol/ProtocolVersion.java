@@ -6,15 +6,15 @@ import java.util.regex.Pattern;
 /**
  * The protocol version this binding writes and the range it reads.
  *
- * <p>Before 1.0 the compatibility unit is {@code 0.minor}: a consumer of line 0.1 reads any 0.1.x
+ * <p>Before 1.0 the compatibility unit is {@code 0.minor}: a consumer of line 0.2 reads any 0.2.x
  * event and rejects every other version. From 1.0 the unit becomes the major.
  */
 public final class ProtocolVersion {
   /** The version written by this binding. */
-  public static final String CURRENT = "0.1.0";
+  public static final String CURRENT = "0.2.0";
 
   private static final int SUPPORTED_MAJOR = 0;
-  private static final int SUPPORTED_MINOR = 1;
+  private static final int SUPPORTED_MINOR = 2;
   private static final Pattern SEMVER =
       Pattern.compile("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$");
 

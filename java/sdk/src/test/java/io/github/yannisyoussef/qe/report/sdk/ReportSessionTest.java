@@ -178,6 +178,31 @@ class ReportSessionTest {
     }
 
     @Test
+    void scopeFailuresAreSessionScoped(@TempDir Path dir) throws IOException {
+      List<ReportProblem> problems = new ArrayList<>();
+      ReportSession s = session(dir, problems).start(PRODUCER);
+      io.github.yannisyoussef.qe.report.protocol.ScopeFailed failure =
+          io.github.yannisyoussef.qe.report.protocol.ScopeFailed.of(
+              List.of(new PathSegment("file", "suite.spec")), Failure.of("teardown token=abc"));
+      assertTrue(s.emit(failure));
+      assertTrue(s.finish());
+      assertFalse(s.emit(failure), "no scope failure after session.finished");
+      s.close();
+      assertEquals(
+          List.of(ReportProblem.Kind.SESSION_FINISHED),
+          problems.stream().map(ReportProblem::kind).toList());
+      List<Event> written = events(dir);
+      assertEquals(
+          List.of("session.started", "scope.failed", "session.finished"),
+          written.stream().map(Event::eventType).toList());
+      io.github.yannisyoussef.qe.report.protocol.ScopeFailed p =
+          assertInstanceOf(
+              io.github.yannisyoussef.qe.report.protocol.ScopeFailed.class,
+              written.get(1).payload());
+      assertEquals("teardown token=[REDACTED]", p.failures().get(0).message());
+    }
+
+    @Test
     void runFinishedFromAnActiveSessionFinishesTheSessionFirst(@TempDir Path dir)
         throws IOException {
       ReportSession s = session(dir, new ArrayList<>()).start(PRODUCER);

@@ -29,7 +29,7 @@ import org.junit.jupiter.api.io.TempDir;
 class FileSinkTest {
   private static final Event EVENT =
       ProtocolJson.read(
-          "{\"protocolVersion\":\"0.1.0\",\"eventId\":\"e-1\",\"eventType\":\"session.finished\","
+          "{\"protocolVersion\":\"0.2.0\",\"eventId\":\"e-1\",\"eventType\":\"session.finished\","
               + "\"runId\":\"r\",\"sessionId\":\"s\",\"sequence\":1,\"occurredAt\":\"2026-01-01T00:00:00.000Z\",\"payload\":{}}");
 
   static String sha(byte[] b) {

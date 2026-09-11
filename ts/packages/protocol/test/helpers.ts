@@ -30,6 +30,9 @@ export interface Manifest {
     sessions?: number;
     attempts?: number;
     attachments?: number;
+    scopeFailures?: number;
+    failedAttempts?: number;
+    verdict?: 'passed' | 'failed' | 'incomplete';
     ignored?: number;
     duplicates?: number;
     roundTrip?: 'idempotent';

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseEvent, type AttemptFinishedEvent } from 'qe-report-protocol';
+import { parseEvent, type AttemptFinishedEvent, type ScopeFailedEvent } from 'qe-report-protocol';
 import { REDACTED, Redactor } from '../src/index.js';
 import { FIXTURES_DIR } from '../../protocol/test/helpers.js';
 
@@ -39,9 +39,48 @@ describe('configuration', () => {
   });
 });
 
+describe('scope failure redaction', () => {
+  it('redacts every free-text field and leaves kind, rawStatus, and phase alone', () => {
+    const line = JSON.stringify({
+      protocolVersion: '0.2.0',
+      eventId: 'e-2',
+      eventType: 'scope.failed',
+      runId: 'r',
+      sessionId: 's',
+      sequence: 2,
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      payload: {
+        path: [{ kind: 'class', name: 'Suite password=inname' }],
+        displayName: 'token=display',
+        rawStatus: 'token=raw',
+        location: { file: 'secret=file.java', line: 3 },
+        failures: [
+          {
+            message: 'Authorization: Bearer abc',
+            type: 'password=type',
+            stackTrace: 'password=hunter2',
+            phase: 'teardown',
+          },
+        ],
+      },
+    });
+    const e = r.redactEvent(parseEvent(line)) as ScopeFailedEvent;
+    expect(e.payload.path[0]).toEqual({ kind: 'class', name: `Suite password=${REDACTED}` });
+    expect(e.payload.displayName).toBe(`token=${REDACTED}`);
+    expect(e.payload.rawStatus).toBe('token=raw');
+    expect(e.payload.location?.file).toBe(`secret=${REDACTED}`);
+    expect(e.payload.failures[0]).toEqual({
+      message: `Authorization: ${REDACTED}`,
+      type: `password=${REDACTED}`,
+      stackTrace: `password=${REDACTED}`,
+      phase: 'teardown',
+    });
+  });
+});
+
 describe('event redaction', () => {
   const line = JSON.stringify({
-    protocolVersion: '0.1.0',
+    protocolVersion: '0.2.0',
     eventId: 'e-1',
     eventType: 'attempt.finished',
     runId: 'r',

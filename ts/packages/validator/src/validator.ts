@@ -73,12 +73,22 @@ export interface Summary {
   readonly attempts: number;
   readonly steps: number;
   readonly attachments: number;
+  /** Attempts that finished with status `failed`, whatever was expected. Scope failures are never counted here. */
+  readonly failedAttempts: number;
+  /** scope.failed events: failures of non-test scopes that fail the run without touching attempt verdicts. */
+  readonly scopeFailures: number;
   readonly ignored: number;
   readonly duplicates: number;
   /** Every session, attempt, and step that started also finished. */
   readonly complete: boolean;
   /** A run.finished event was seen. */
   readonly closed: boolean;
+  /**
+   * The derived run verdict: `incomplete` while anything is still open; otherwise `failed` when
+   * any test case's final attempt is unexpected (failed when passing was expected, or passed when
+   * failure was expected) or when any scope failed; otherwise `passed`.
+   */
+  readonly verdict: 'passed' | 'failed' | 'incomplete';
 }
 
 export interface Report {
@@ -155,7 +165,10 @@ interface SessionState {
 }
 interface AttemptState {
   session: string;
+  executionId: string;
+  attemptNumber: number;
   finished: boolean;
+  unexpected: boolean;
   steps: Map<string, boolean>;
 }
 interface Location {
@@ -184,6 +197,8 @@ export class RunValidator {
   private ignored = 0;
   private duplicates = 0;
   private steps = 0;
+  private scopeFailures = 0;
+  private failedAttempts = 0;
 
   constructor(options: ValidateOptions = {}) {
     this.options = options;
@@ -389,7 +404,14 @@ export class RunValidator {
           if (this.attempts.has(id))
             lifecycle('DUPLICATE_ATTEMPT_ID', `attempt ${id} started twice`, event.eventId);
           else
-            this.attempts.set(id, { session: event.sessionId, finished: false, steps: new Map() });
+            this.attempts.set(id, {
+              session: event.sessionId,
+              executionId: event.payload.test.executionId,
+              attemptNumber: event.payload.attemptNumber,
+              finished: false,
+              unexpected: false,
+              steps: new Map(),
+            });
           break;
         }
         case 'attempt.finished': {
@@ -408,6 +430,12 @@ export class RunValidator {
             );
           else {
             a.finished = true;
+            const status = event.payload.status;
+            const expected = event.payload.expectedStatus ?? 'passed';
+            if (status === 'failed') this.failedAttempts += 1;
+            a.unexpected =
+              (status === 'failed' && expected !== 'failed') ||
+              (status === 'passed' && expected === 'failed');
             for (const [sid, done] of a.steps) {
               if (!done)
                 lifecycle(
@@ -458,6 +486,10 @@ export class RunValidator {
               event.eventId,
             );
           else a.steps.set(event.payload.stepId, true);
+          break;
+        }
+        case 'scope.failed': {
+          this.scopeFailures += 1;
           break;
         }
         case 'attachment.added': {
@@ -561,6 +593,18 @@ export class RunValidator {
       });
     }
     const valid = !this.diagnostics.some((d) => d.severity === 'error');
+    // A test case's outcome is that of its final attempt (highest attemptNumber).
+    const finalAttempts = new Map<string, AttemptState>();
+    for (const a of this.attempts.values()) {
+      const current = finalAttempts.get(a.executionId);
+      if (!current || a.attemptNumber > current.attemptNumber) finalAttempts.set(a.executionId, a);
+    }
+    const anyUnexpected = [...finalAttempts.values()].some((a) => a.unexpected);
+    const verdict = !complete
+      ? 'incomplete'
+      : anyUnexpected || this.scopeFailures > 0
+        ? 'failed'
+        : 'passed';
     return {
       valid,
       diagnostics: this.diagnostics,
@@ -571,10 +615,13 @@ export class RunValidator {
         attempts: this.attempts.size,
         steps: this.steps,
         attachments: this.attachments.length,
+        failedAttempts: this.failedAttempts,
+        scopeFailures: this.scopeFailures,
         ignored: this.ignored,
         duplicates: this.duplicates,
         complete,
         closed: this.runFinished !== undefined,
+        verdict,
       },
     };
   }
@@ -641,5 +688,6 @@ export function formatDiagnostic(d: Diagnostic): string {
   const detail = d.detail !== undefined ? `(${d.detail})` : '';
   const pointer = d.pointer !== undefined && d.pointer !== '' ? ` at ${d.pointer}` : '';
   const where = d.file !== '' ? `${d.file}:${d.line}` : 'run';
-  return `${where}${id} ${d.severity.toUpperCase()} ${d.code}${detail}: ${d.message}${pointer}`;
+  const message = d.message.replace(/[\r\n]/g, ' ');
+  return `${where}${id} ${d.severity.toUpperCase()} ${d.code}${detail}: ${message}${pointer}`;
 }

@@ -1,5 +1,5 @@
 {
-  "protocolVersion": "0.1.99",
+  "protocolVersion": "0.2.99",
   "eventId": "sess-1-0008",
   "eventType": "attempt.finished",
   "runId": "run-ev-0001",

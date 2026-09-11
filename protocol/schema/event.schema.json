@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://yannisyoussef.github.io/qe-report/schema/0.1/event.schema.json",
+  "$id": "https://yannisyoussef.github.io/qe-report/schema/0.2/event.schema.json",
   "title": "qe-report protocol event",
-  "description": "One event of the qe-report test reporting protocol, compatibility line 0.1. A run is a sequence of these events, one JSON object per line in a newline-delimited file or stream. Unknown properties are permitted everywhere so that a later minor version can add optional fields; consumers ignore them.",
+  "description": "One event of the qe-report test reporting protocol, compatibility line 0.2. A run is a sequence of these events, one JSON object per line in a newline-delimited file or stream. Unknown properties are permitted everywhere so that a later minor version can add optional fields; consumers ignore them.",
   "type": "object",
   "required": [
     "protocolVersion",
@@ -16,9 +16,9 @@
   ],
   "properties": {
     "protocolVersion": {
-      "description": "Full Semantic Version of the protocol the producer wrote. Compatibility line 0.1 accepts any 0.1.x.",
+      "description": "Full Semantic Version of the protocol the producer wrote. Compatibility line 0.2 accepts any 0.2.x.",
       "type": "string",
-      "pattern": "^0\\.1\\.(0|[1-9][0-9]*)$"
+      "pattern": "^0\\.2\\.(0|[1-9][0-9]*)$"
     },
     "eventId": {
       "description": "Unique within the run. A consumer that sees the same eventId twice treats the second occurrence as a harmless duplicate only if the content is identical.",
@@ -81,6 +81,9 @@
     },
     {
       "$ref": "#/$defs/event.attachment.added"
+    },
+    {
+      "$ref": "#/$defs/event.scope.failed"
     }
   ],
   "$defs": {
@@ -452,9 +455,7 @@
               "$ref": "#/$defs/status"
             },
             "rawStatus": {
-              "description": "The runner's own status word, preserved for display and for mappings that lose information.",
-              "type": "string",
-              "maxLength": 64
+              "$ref": "#/$defs/rawStatus"
             },
             "expectedStatus": {
               "$ref": "#/$defs/expectedStatus"
@@ -532,8 +533,7 @@
               "$ref": "#/$defs/status"
             },
             "rawStatus": {
-              "type": "string",
-              "maxLength": 64
+              "$ref": "#/$defs/rawStatus"
             },
             "durationMs": {
               "$ref": "#/$defs/durationMs"
@@ -590,6 +590,51 @@
           }
         }
       }
+    },
+    "event.scope.failed": {
+      "type": "object",
+      "description": "A failure at a non-test scope of the runner hierarchy (a class, suite, file, module, or analogous node) that contributes to the execution's failed outcome without changing any child attempt's verdict. Session-scoped: valid after session.started and before session.finished, before or after the child attempts. Not ignorable: a consumer that skipped it would derive a passed execution from a failed one.",
+      "properties": {
+        "eventType": {
+          "const": "scope.failed"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "path",
+            "failures"
+          ],
+          "properties": {
+            "path": {
+              "description": "The failing scope itself, outermost first, in the same segments a test path uses. The last segment is the scope that failed.",
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/pathSegment"
+              }
+            },
+            "displayName": {
+              "$ref": "#/$defs/displayText"
+            },
+            "rawStatus": {
+              "$ref": "#/$defs/rawStatus"
+            },
+            "location": {
+              "$ref": "#/$defs/location"
+            },
+            "failures": {
+              "$ref": "#/$defs/failures"
+            }
+          }
+        }
+      }
+    },
+    "rawStatus": {
+      "description": "The runner's own status word, preserved for display and for mappings that lose information.",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[^\\r\\n]{1,64}$"
     }
   }
 }

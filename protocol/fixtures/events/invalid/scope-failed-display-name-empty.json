@@ -1,0 +1,35 @@
+{
+  "protocolVersion": "0.2.0",
+  "eventId": "sess-1-0021",
+  "eventType": "scope.failed",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 21,
+  "occurredAt": "2026-09-11T10:00:20.000+00:00",
+  "payload": {
+    "path": [
+      {
+        "kind": "engine",
+        "name": "junit-jupiter"
+      },
+      {
+        "kind": "class",
+        "name": "com.example.CustomerTest"
+      }
+    ],
+    "displayName": "",
+    "rawStatus": "FAILED",
+    "location": {
+      "file": "CustomerTest.java",
+      "line": 12
+    },
+    "failures": [
+      {
+        "message": "cleanup failed",
+        "type": "java.lang.IllegalStateException",
+        "stackTrace": "java.lang.IllegalStateException: cleanup failed\n\tat com.example.CustomerTest.tearDown(CustomerTest.java:12)\n",
+        "phase": "teardown"
+      }
+    ]
+  }
+}

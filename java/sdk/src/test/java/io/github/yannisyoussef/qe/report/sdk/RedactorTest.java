@@ -66,7 +66,7 @@ class RedactorTest {
   @Test
   void eventRedactionLeavesStructureAndEnvelopeAlone() {
     String line =
-        "{\"protocolVersion\":\"0.1.0\",\"eventId\":\"e-1\",\"eventType\":\"attempt.finished\","
+        "{\"protocolVersion\":\"0.2.0\",\"eventId\":\"e-1\",\"eventType\":\"attempt.finished\","
             + "\"runId\":\"r\",\"sessionId\":\"s\",\"sequence\":1,\"occurredAt\":\"2026-01-01T00:00:00.000Z\","
             + "\"payload\":{\"attemptId\":\"password=keep-me\",\"status\":\"failed\",\"rawStatus\":\"token=raw\","
             + "\"failures\":[{\"message\":\"Authorization: Bearer abc\",\"type\":\"x\","
@@ -88,5 +88,31 @@ class RedactorTest {
     R.redactText(letters);
     R.redactText(log);
     assertTrue((System.nanoTime() - start) / 1_000_000 < 3000, "redaction must not be quadratic");
+  }
+
+  @Test
+  void scopeFailureFreeTextIsRedactedAndStructureIsNot() {
+    String line =
+        "{\"protocolVersion\":\"0.2.0\",\"eventId\":\"e-2\",\"eventType\":\"scope.failed\","
+            + "\"runId\":\"r\",\"sessionId\":\"s\",\"sequence\":2,\"occurredAt\":\"2026-01-01T00:00:00.000Z\","
+            + "\"payload\":{\"path\":[{\"kind\":\"class\",\"name\":\"Suite password=inname\"}],"
+            + "\"displayName\":\"token=display\",\"rawStatus\":\"token=raw\","
+            + "\"location\":{\"file\":\"secret=file.java\",\"line\":3},"
+            + "\"failures\":[{\"message\":\"Authorization: Bearer abc\",\"type\":\"password=type\","
+            + "\"stackTrace\":\"password=hunter2\",\"phase\":\"teardown\"}]}}";
+    Event e = R.redactEvent(ProtocolJson.read(line));
+    io.github.yannisyoussef.qe.report.protocol.ScopeFailed p =
+        assertInstanceOf(io.github.yannisyoussef.qe.report.protocol.ScopeFailed.class, e.payload());
+    assertEquals("Suite password=[REDACTED]", p.path().get(0).name());
+    assertEquals("class", p.path().get(0).kind());
+    assertEquals("token=[REDACTED]", p.displayName());
+    assertEquals("token=raw", p.rawStatus());
+    assertEquals("secret=[REDACTED]", p.location().file());
+    assertEquals("Authorization: [REDACTED]", p.failures().get(0).message());
+    assertEquals("password=[REDACTED]", p.failures().get(0).type());
+    assertEquals("password=[REDACTED]", p.failures().get(0).stackTrace());
+    assertEquals(
+        io.github.yannisyoussef.qe.report.protocol.FailurePhase.TEARDOWN,
+        p.failures().get(0).phase());
   }
 }

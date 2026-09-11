@@ -165,6 +165,26 @@ export function scripted(out: string): void {
       failures: [{ message: 'assumption' }],
     },
   });
+  s.emit({
+    eventType: 'scope.failed',
+    payload: {
+      path: [
+        { kind: 'project', name: 'desktop' },
+        { kind: 'file', name: 'spec.ts' },
+      ],
+      displayName: 'spec.ts',
+      rawStatus: 'failed',
+      location: { file: 'spec.ts', line: 1 },
+      failures: [
+        {
+          message: 'after hook failed password=secret',
+          type: 'Error',
+          stackTrace: 'at spec.ts:1 token=xyz',
+          phase: 'teardown',
+        },
+      ],
+    },
+  });
   s.finishRun();
   s.close();
 }

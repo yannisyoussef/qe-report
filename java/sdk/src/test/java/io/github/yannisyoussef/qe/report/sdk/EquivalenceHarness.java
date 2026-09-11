@@ -12,6 +12,7 @@ import io.github.yannisyoussef.qe.report.protocol.HistoricalIdStability;
 import io.github.yannisyoussef.qe.report.protocol.Location;
 import io.github.yannisyoussef.qe.report.protocol.PathSegment;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
+import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
 import io.github.yannisyoussef.qe.report.protocol.Source;
 import io.github.yannisyoussef.qe.report.protocol.Status;
@@ -114,7 +115,7 @@ public final class EquivalenceHarness {
                   new PathSegment("project", "desktop"),
                   new PathSegment("file", "spec.ts"),
                   new PathSegment("group", "group")),
-              new Location("spec.ts", 3, 1),
+              new Location("spec.ts", 3L, 1L),
               List.of("@smoke", "token=tag"),
               Map.of("issue", "QE-1"));
       s.emit(new AttemptStarted("a-1", 1, t1));
@@ -125,7 +126,7 @@ public final class EquivalenceHarness {
               null,
               "outer secret: value",
               "test.step",
-              new Location("spec.ts", 4, null)));
+              new Location("spec.ts", 4L, null)));
       s.emit(new StepStarted("st-2", "a-1", "st-1", "inner", "expect", null));
       s.attach(
           "a-1",
@@ -167,7 +168,7 @@ public final class EquivalenceHarness {
                       "AssertionError",
                       "at spec.ts:5 password=x",
                       FailurePhase.TEST,
-                      new Location("spec.ts", 5, 9)))));
+                      new Location("spec.ts", 5L, 9L)))));
       s.emit(new AttemptStarted("a-2", 2, t1));
       s.emit(
           new AttemptFinished(
@@ -186,6 +187,19 @@ public final class EquivalenceHarness {
       s.emit(
           new AttemptFinished(
               "a-3", Status.SKIPPED, "aborted", null, null, List.of(Failure.of("assumption"))));
+      s.emit(
+          new ScopeFailed(
+              List.of(new PathSegment("project", "desktop"), new PathSegment("file", "spec.ts")),
+              "spec.ts",
+              "failed",
+              new Location("spec.ts", 1L, null),
+              List.of(
+                  new Failure(
+                      "after hook failed password=secret",
+                      "Error",
+                      "at spec.ts:1 token=xyz",
+                      FailurePhase.TEARDOWN,
+                      null))));
       s.finishRun();
     }
   }
