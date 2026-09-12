@@ -17,7 +17,7 @@ afterEach(() => dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force
 const sha = (b: Uint8Array): string => createHash('sha256').update(b).digest('hex');
 const event = parseEvent(
   JSON.stringify({
-    protocolVersion: '0.2.0',
+    protocolVersion: '0.3.0',
     eventId: 'e-1',
     eventType: 'session.finished',
     runId: 'r',

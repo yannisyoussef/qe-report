@@ -185,6 +185,18 @@ export function scripted(out: string): void {
       ],
     },
   });
+  s.finish({
+    status: 'failed',
+    rawStatus: 'timedout',
+    failures: [
+      {
+        message: 'global teardown failed password=secret',
+        type: 'Error',
+        stackTrace: 'at global-teardown.ts:2 token=xyz',
+        phase: 'teardown',
+      },
+    ],
+  });
   s.finishRun();
   s.close();
 }

@@ -20,7 +20,7 @@ import java.util.stream.Collectors;
  */
 public final class Schemas {
   private static final String SCHEMA_ID =
-      "https://yannisyoussef.github.io/qe-report/schema/0.2/event.schema.json";
+      "https://yannisyoussef.github.io/qe-report/schema/0.3/event.schema.json";
   private static final JsonMapper MAPPER = JsonMapper.builder().build();
   private static final Map<String, Schema> BY_TYPE = new ConcurrentHashMap<>();
   private static final Schema SCHEMA =
@@ -70,7 +70,7 @@ public final class Schemas {
       return SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12)
           .getSchema(
               SchemaLocation.of(
-                  "https://yannisyoussef.github.io/qe-report/schema/0.2/typed/"
+                  "https://yannisyoussef.github.io/qe-report/schema/0.3/typed/"
                       + eventType
                       + ".schema.json"),
               MAPPER.writeValueAsString(base),

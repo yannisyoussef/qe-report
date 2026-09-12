@@ -42,7 +42,7 @@ describe('configuration', () => {
 describe('scope failure redaction', () => {
   it('redacts every free-text field and leaves kind, rawStatus, and phase alone', () => {
     const line = JSON.stringify({
-      protocolVersion: '0.2.0',
+      protocolVersion: '0.3.0',
       eventId: 'e-2',
       eventType: 'scope.failed',
       runId: 'r',
@@ -80,7 +80,7 @@ describe('scope failure redaction', () => {
 
 describe('event redaction', () => {
   const line = JSON.stringify({
-    protocolVersion: '0.2.0',
+    protocolVersion: '0.3.0',
     eventId: 'e-1',
     eventType: 'attempt.finished',
     runId: 'r',

@@ -13,12 +13,15 @@ import io.github.yannisyoussef.qe.report.protocol.AttemptStarted;
 import io.github.yannisyoussef.qe.report.protocol.Component;
 import io.github.yannisyoussef.qe.report.protocol.Event;
 import io.github.yannisyoussef.qe.report.protocol.Failure;
+import io.github.yannisyoussef.qe.report.protocol.FailurePhase;
 import io.github.yannisyoussef.qe.report.protocol.HistoricalIdStability;
 import io.github.yannisyoussef.qe.report.protocol.PathSegment;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
+import io.github.yannisyoussef.qe.report.protocol.ProtocolVersion;
 import io.github.yannisyoussef.qe.report.protocol.RunFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
+import io.github.yannisyoussef.qe.report.protocol.SessionStatus;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.TestCase;
 import java.io.IOException;
@@ -362,5 +365,228 @@ class ReportSessionTest {
     assertEquals(
         Map.of("CI", "true", "DB_URL", "postgres://[REDACTED]@host/db"),
         EnvironmentCapture.fromMap(env, List.of("CI", "DB_URL", "MISSING"), Redactor.defaults()));
+  }
+
+  @Nested
+  class SessionOutcome {
+    @Test
+    void finishWithOutcomeWritesItRedactedAndClosesTheSession(@TempDir Path dir)
+        throws IOException {
+      ReportSession s =
+          ReportSession.builder("run-1", "s-1", FileSink.open(dir, "s-1"))
+              .clock(new TickingClock())
+              .start(SessionStarted.of(new Component("p", "1")));
+      assertTrue(
+          s.finish(
+              new SessionFinished(
+                  SessionStatus.FAILED,
+                  "timedout",
+                  List.of(
+                      new Failure(
+                          "global setup broke Authorization: Bearer abc.def.ghi",
+                          "Error",
+                          "at global-setup.ts:3 password=hunter2",
+                          FailurePhase.SETUP,
+                          null)))));
+      assertFalse(s.finish(), "a second session.finished is dropped");
+      List<Event> events = readEventsOf(dir, "s-1");
+      SessionFinished p = assertInstanceOf(SessionFinished.class, events.get(1).payload());
+      assertEquals(SessionStatus.FAILED, p.status());
+      assertEquals("timedout", p.rawStatus());
+      assertEquals("global setup broke Authorization: [REDACTED]", p.failures().get(0).message());
+      assertEquals("at global-setup.ts:3 password=[REDACTED]", p.failures().get(0).stackTrace());
+      assertEquals(FailurePhase.SETUP, p.failures().get(0).phase());
+      s.close();
+    }
+
+    @Test
+    void plainFinishStaysEmpty(@TempDir Path dir) throws IOException {
+      ReportSession s =
+          ReportSession.builder("run-1", "s-1", FileSink.open(dir, "s-1"))
+              .clock(new TickingClock())
+              .start(SessionStarted.of(new Component("p", "1")));
+      assertTrue(s.finish());
+      SessionFinished p =
+          assertInstanceOf(SessionFinished.class, readEventsOf(dir, "s-1").get(1).payload());
+      assertEquals(SessionFinished.empty(), p);
+      s.close();
+    }
+
+    private static final String RAW = "r".repeat(64);
+    private static final List<Failure> BIG = List.of(Failure.of("x".repeat(400)));
+
+    /** The exact size of a terminal event as this session would write it as its second event. */
+    private static int bytesOf(SessionFinished payload) {
+      Event e =
+          new Event(
+              ProtocolVersion.CURRENT,
+              "evt-0002",
+              "session.finished",
+              "r",
+              "s",
+              2,
+              "2026-01-01T00:00:01.000Z",
+              null,
+              payload);
+      return ProtocolJson.write(e).getBytes(StandardCharsets.UTF_8).length + 1;
+    }
+
+    private static SessionFinished withFailures(SessionStatus status) {
+      return new SessionFinished(status, RAW, status == SessionStatus.PASSED ? List.of() : BIG);
+    }
+
+    private static List<Event> terminalEvents(Path dir) throws IOException {
+      return readEventsOf(dir, "s").stream()
+          .filter(e -> e.eventType().equals("session.finished"))
+          .toList();
+    }
+
+    @Test
+    void fullOutcomeThatFitsIsWrittenWhole(@TempDir Path dir) throws IOException {
+      SessionFinished full = withFailures(SessionStatus.FAILED);
+      List<ReportProblem> problems = new ArrayList<>();
+      ReportSession s = session(dir, problems).maxEventBytes(bytesOf(full)).start(PRODUCER);
+      assertTrue(s.finish(full));
+      assertEquals(ReportSession.State.SESSION_FINISHED, s.state());
+      s.close();
+      assertEquals(List.of(), problems);
+      assertEquals(full, terminalEvents(dir).get(0).payload());
+    }
+
+    @Test
+    void failuresTooLargeKeepStatusAndRawStatus(@TempDir Path dir) throws IOException {
+      SessionFinished reduced = new SessionFinished(SessionStatus.FAILED, RAW, List.of());
+      List<ReportProblem> problems = new ArrayList<>();
+      ReportSession s = session(dir, problems).maxEventBytes(bytesOf(reduced)).start(PRODUCER);
+      assertTrue(s.finish(withFailures(SessionStatus.FAILED)));
+      s.close();
+      assertEquals(
+          List.of(ReportProblem.Kind.EVENT_TOO_LARGE),
+          problems.stream().map(ReportProblem::kind).toList());
+      assertTrue(problems.get(0).message().contains("retried without them"));
+      assertEquals(reduced, terminalEvents(dir).get(0).payload());
+    }
+
+    @Test
+    void rawStatusTooLargeKeepsTheStatusAlone(@TempDir Path dir) throws IOException {
+      SessionFinished statusOnly = SessionFinished.of(SessionStatus.FAILED);
+      List<ReportProblem> problems = new ArrayList<>();
+      // A limit this small also drops session.started, which is reported first.
+      ReportSession s = session(dir, problems).maxEventBytes(bytesOf(statusOnly)).start(PRODUCER);
+      assertTrue(s.finish(withFailures(SessionStatus.FAILED)));
+      s.close();
+      assertEquals(
+          List.of(
+              ReportProblem.Kind.EVENT_TOO_LARGE,
+              ReportProblem.Kind.EVENT_TOO_LARGE,
+              ReportProblem.Kind.EVENT_TOO_LARGE),
+          problems.stream().map(ReportProblem::kind).toList());
+      assertTrue(problems.get(2).message().contains("retried without it"));
+      assertEquals(statusOnly, terminalEvents(dir).get(0).payload());
+    }
+
+    @Test
+    void aStatusThatCannotBeWrittenIsNeverReplacedByAnEmptyTerminalEvent() throws IOException {
+      for (SessionStatus status : SessionStatus.values()) {
+        Path dir = Files.createTempDirectory("qe-terminal");
+        SessionFinished statusOnly = SessionFinished.of(status);
+        List<ReportProblem> problems = new ArrayList<>();
+        ReportSession s =
+            session(dir, problems).maxEventBytes(bytesOf(statusOnly) - 1).start(PRODUCER);
+        assertFalse(s.finish(withFailures(status)), status.wireName());
+        assertEquals(
+            ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN,
+            problems.get(problems.size() - 1).kind(),
+            status.wireName());
+        assertFalse(s.emit(new AttemptStarted("a", 1, TEST)), "nothing further is accepted");
+        assertFalse(s.finishRun(), "the run cannot be closed over an open session");
+        s.close();
+        assertEquals(ReportSession.State.CLOSED, s.state());
+        assertEquals(List.of(), terminalEvents(dir), status.wireName());
+        assertTrue(
+            problems.stream()
+                .allMatch(
+                    p ->
+                        p.kind() == ReportProblem.Kind.EVENT_TOO_LARGE
+                            || p.kind() == ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN));
+      }
+    }
+
+    @Test
+    void aSinkFailureOnTheTerminalEventLeavesTheSessionOpenWithoutRetry(@TempDir Path dir)
+        throws IOException {
+      FileSink real = FileSink.open(dir, "s");
+      AtomicInteger terminalWrites = new AtomicInteger();
+      ReportSink sink =
+          new ReportSink() {
+            @Override
+            public long maxAttachmentBytes() {
+              return real.maxAttachmentBytes();
+            }
+
+            @Override
+            public void write(Event event) throws IOException {
+              if (event.eventType().equals("session.finished")) {
+                terminalWrites.incrementAndGet();
+                throw new IOException("disk full");
+              }
+              real.write(event);
+            }
+
+            @Override
+            public StoredAttachment storeAttachment(InputStream bytes) throws IOException {
+              return real.storeAttachment(bytes);
+            }
+
+            @Override
+            public void close() throws IOException {
+              real.close();
+            }
+          };
+      List<ReportProblem> problems = new ArrayList<>();
+      ReportSession s =
+          ReportSession.builder("r", "s", sink)
+              .clock(new TickingClock())
+              .ids(counter())
+              .problems(problems::add)
+              .start(PRODUCER);
+      assertTrue(s.emit(new AttemptStarted("a", 1, TEST)));
+      assertTrue(s.emit(AttemptFinished.of("a", Status.PASSED)));
+      assertFalse(s.finish(withFailures(SessionStatus.FAILED)));
+      s.close();
+      assertEquals(1, terminalWrites.get(), "no reduced retry and no empty finish");
+      assertEquals(
+          List.of(ReportProblem.Kind.SINK_FAILURE, ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN),
+          problems.stream().map(ReportProblem::kind).toList());
+      assertEquals(
+          List.of("session.started", "attempt.started", "attempt.finished"),
+          readEventsOf(dir, "s").stream().map(Event::eventType).toList());
+    }
+
+    private static List<Event> readEventsOf(Path dir, String sessionId) throws IOException {
+      Path file = dir.resolve("events").resolve(SessionFiles.fileName(sessionId));
+      if (!Files.exists(file)) {
+        return List.of();
+      }
+      List<Event> out = new ArrayList<>();
+      for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+        if (!line.isBlank()) {
+          out.add(ProtocolJson.read(line));
+        }
+      }
+      return out;
+    }
+
+    @Test
+    void theModelRefusesAnOutcomeTheProtocolForbids() {
+      assertThrows(
+          IllegalArgumentException.class, () -> new SessionFinished(null, "failed", List.of()));
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> new SessionFinished(null, null, List.of(Failure.of("x"))));
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> new SessionFinished(SessionStatus.PASSED, null, List.of(Failure.of("x"))));
+    }
   }
 }

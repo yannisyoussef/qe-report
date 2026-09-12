@@ -32,7 +32,10 @@ export interface Manifest {
     attachments?: number;
     scopeFailures?: number;
     failedAttempts?: number;
-    verdict?: 'passed' | 'failed' | 'incomplete';
+    failedSessions?: number;
+    inconclusiveSessions?: number;
+    sessionFailures?: number;
+    verdict?: 'passed' | 'failed' | 'inconclusive' | 'incomplete';
     ignored?: number;
     duplicates?: number;
     roundTrip?: 'idempotent';

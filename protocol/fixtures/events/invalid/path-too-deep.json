@@ -1,11 +1,11 @@
 {
-  "protocolVersion": "0.2.0",
-  "eventId": "sess-1-0007",
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-1-0015",
   "eventType": "attempt.started",
   "runId": "run-ev-0001",
   "sessionId": "sess-1",
-  "sequence": 7,
-  "occurredAt": "2026-09-11T10:00:06.000+00:00",
+  "sequence": 15,
+  "occurredAt": "2026-09-11T10:00:14.000+00:00",
   "payload": {
     "attemptId": "a-4",
     "attemptNumber": 1,

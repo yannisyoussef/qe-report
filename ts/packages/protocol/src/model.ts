@@ -1,5 +1,11 @@
 /** Canonical attempt or step status. */
 export type Status = 'passed' | 'failed' | 'skipped' | 'inconclusive';
+
+/**
+ * Canonical aggregate outcome of one session as reported by the runner invocation itself:
+ * distinct from the attempt status (no skipped session, no expected status).
+ */
+export type SessionStatus = 'passed' | 'failed' | 'inconclusive';
 /** What the test author declared the attempt should end with. Absent means passed. */
 export type ExpectedStatus = 'passed' | 'failed' | 'skipped';
 /** How much an adapter trusts a historical identity to survive unrelated edits. */
@@ -84,6 +90,21 @@ export interface SessionStartedPayload {
   readonly executor?: Executor;
   readonly source?: Source;
   readonly labels?: Readonly<Record<string, string>>;
+}
+
+/**
+ * The runner's aggregate outcome for the completed session. Empty for a producer whose runner
+ * exposes none; consumers then derive the outcome from attempt and scope facts alone.
+ */
+export interface SessionFinishedPayload {
+  readonly status?: SessionStatus;
+  /** The runner's own aggregate word; requires `status`. */
+  readonly rawStatus?: string;
+  /**
+   * Errors of the invocation itself that belong to no attempt and no hierarchy scope (a global
+   * setup or teardown exception); require `status` and never accompany `passed`.
+   */
+  readonly failures?: readonly Failure[];
 }
 
 export interface AttemptStartedPayload {
@@ -174,7 +195,7 @@ export interface SessionStartedEvent extends Envelope {
 }
 export interface SessionFinishedEvent extends Envelope {
   readonly eventType: 'session.finished';
-  readonly payload: Readonly<Record<string, unknown>>;
+  readonly payload: SessionFinishedPayload;
 }
 export interface RunFinishedEvent extends Envelope {
   readonly eventType: 'run.finished';

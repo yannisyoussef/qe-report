@@ -66,9 +66,10 @@ The run directory is the SDK's file layout: `events/<session file>.ndjson` per s
 `attachments/<sha256>`. One JUnit test plan is one session. Gradle and Surefire run one plan per
 fork, so a fork is a session. No fork emits `run.finished`: a worker cannot know that every
 other worker has finished, and a run consisting of finished sessions without `run.finished` is
-complete and open by protocol definition. The adapter writes protocol line 0.2: a run in which a
-container failed carries `scope.failed`, which a line 0.1 reader would not see. Validate a run
-with the qe-report validator:
+complete and open by protocol definition. The adapter writes protocol line 0.3 with an empty
+`session.finished` payload, because a forked JVM knows nothing of the build's aggregate
+verdict; a run in which a container failed carries `scope.failed`. Validate a run with the
+qe-report validator:
 
 ```
 qe-report-validate build/qe-report --require-complete

@@ -16,11 +16,13 @@ the ignored `local/` directory).
   incomplete.
 - The fixture corpus is the specification. Add a fixture for every new
   rule, and an invalid fixture for every new invariant, and register both
-  in `protocol/fixtures/manifest.json`. Keep fixtures small and sanitised;
+  in `protocol/fixtures/manifest.json`. The committed fixtures are the
+  authoritative corpus and are maintained as files, so a hand-written fixture
+  is never regenerated away. Keep fixtures small and sanitised;
   never commit raw runner output.
 - Redaction rules change in both SDKs together, and
   `protocol/fixtures/redaction/cases.json` is updated in the same change.
-- Within compatibility line 0.2 a change may add optional properties or
+- Within compatibility line 0.3 a change may add optional properties or
   ignorable event types. Anything a consumer must understand to derive
   existing state starts a new line.
 - Public API is what is not under an `internal` package (Java) or not

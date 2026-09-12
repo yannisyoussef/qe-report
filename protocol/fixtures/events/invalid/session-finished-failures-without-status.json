@@ -1,0 +1,17 @@
+{
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-1-0008",
+  "eventType": "session.finished",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 8,
+  "occurredAt": "2026-09-11T10:00:07.000+00:00",
+  "payload": {
+    "failures": [
+      {
+        "message": "global teardown broke",
+        "phase": "teardown"
+      }
+    ]
+  }
+}

@@ -2,7 +2,7 @@ plugins {
     `java-test-fixtures`
 }
 
-description = "qe-report protocol model and JSON codec (compatibility line 0.2)"
+description = "qe-report protocol model and JSON codec (compatibility line 0.3)"
 
 dependencies {
     implementation(platform(libs.jackson.bom))

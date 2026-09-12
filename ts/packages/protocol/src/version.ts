@@ -1,8 +1,8 @@
 /** The protocol version this binding writes. */
-export const PROTOCOL_VERSION = '0.2.0';
+export const PROTOCOL_VERSION = '0.3.0';
 
 const SUPPORTED_MAJOR = 0;
-const SUPPORTED_MINOR = 2;
+const SUPPORTED_MINOR = 3;
 const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 
 export interface ParsedVersion {
@@ -20,7 +20,7 @@ export function parseProtocolVersion(version: string): ParsedVersion | undefined
 
 /**
  * Whether an event carrying this version can be read by this binding. Before 1.0 the
- * compatibility unit is `0.minor`; a consumer of line 0.2 reads any 0.2.x and nothing else.
+ * compatibility unit is `0.minor`; a consumer of line 0.3 reads any 0.3.x and nothing else.
  */
 export function isSupportedProtocolVersion(version: string | ParsedVersion): boolean {
   const v = typeof version === 'string' ? parseProtocolVersion(version) : version;

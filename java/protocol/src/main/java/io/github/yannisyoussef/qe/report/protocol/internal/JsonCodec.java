@@ -27,6 +27,7 @@ import io.github.yannisyoussef.qe.report.protocol.RunFinished;
 import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.SessionFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
+import io.github.yannisyoussef.qe.report.protocol.SessionStatus;
 import io.github.yannisyoussef.qe.report.protocol.Source;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.StepFinished;
@@ -77,7 +78,7 @@ public final class JsonCodec {
     if (!ProtocolVersion.isSupported(parsed)) {
       throw new ProtocolException(
           Reason.UNSUPPORTED_PROTOCOL_VERSION,
-          "protocol version " + protocolVersion + " is outside the supported line 0.2",
+          "protocol version " + protocolVersion + " is outside the supported line 0.3",
           "/protocolVersion");
     }
     String eventType = requiredString(root, "eventType", "");
@@ -131,7 +132,21 @@ public final class JsonCodec {
               optionalObject(p, "executor", at, n -> executor(n, at + "/executor")),
               optionalObject(p, "source", at, n -> source(n, at + "/source")),
               stringMap(p, "labels", at));
-      case EventTypes.SESSION_FINISHED -> new SessionFinished();
+      case EventTypes.SESSION_FINISHED -> {
+        SessionStatus status = sessionStatus(p, at);
+        String rawStatus = optionalString(p, "rawStatus", at);
+        List<Failure> failures = failures(p, at);
+        if (status == null && rawStatus != null) {
+          throw invalid(at, "rawStatus requires status");
+        }
+        if (status == null && !failures.isEmpty()) {
+          throw invalid(at, "failures require status");
+        }
+        if (status == SessionStatus.PASSED && !failures.isEmpty()) {
+          throw invalid(at, "a passed session carries no failures");
+        }
+        yield new SessionFinished(status, rawStatus, failures);
+      }
       case EventTypes.RUN_FINISHED -> new RunFinished();
       case EventTypes.ATTEMPT_STARTED -> {
         long n = integral(p, "attemptNumber", at);
@@ -247,6 +262,18 @@ public final class JsonCodec {
           new PathSegment(requiredString(seg, "kind", segAt), requiredString(seg, "name", segAt)));
     }
     return path;
+  }
+
+  private static @Nullable SessionStatus sessionStatus(JsonNode p, String at) {
+    String raw = optionalString(p, "status", at);
+    if (raw == null) {
+      return null;
+    }
+    SessionStatus s = SessionStatus.fromWireName(raw);
+    if (s == null) {
+      throw invalid(at + "/status", "must be passed, failed, or inconclusive");
+    }
+    return s;
   }
 
   private static List<Failure> failures(JsonNode p, String at) {
@@ -571,6 +598,14 @@ public final class JsonCodec {
       p.put("mediaType", a.mediaType());
       p.put("sizeBytes", a.sizeBytes());
       p.put("sha256", a.sha256());
+    } else if (payload instanceof SessionFinished s) {
+      if (s.status() != null) {
+        p.put("status", s.status().wireName());
+      }
+      putIfPresent(p, "rawStatus", s.rawStatus());
+      if (!s.failures().isEmpty()) {
+        p.set("failures", failures(s.failures()));
+      }
     } else if (payload instanceof ScopeFailed s) {
       p.set("path", pathSegments(s.path()));
       putIfPresent(p, "displayName", s.displayName());
@@ -590,7 +625,7 @@ public final class JsonCodec {
         throw new IllegalStateException("unknown payload is not JSON", ex);
       }
     }
-    // SessionFinished and RunFinished have empty payloads.
+    // RunFinished has an empty payload.
     return p;
   }
 

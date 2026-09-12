@@ -18,6 +18,12 @@ public record ReportProblem(Kind kind, String message, @Nullable Throwable cause
     /** A session-scoped event was emitted after session.finished and was dropped. */
     SESSION_FINISHED,
     /** An event was emitted after run.finished and was dropped. */
-    RUN_FINISHED
+    RUN_FINISHED,
+    /**
+     * A supplied session outcome could not be written, even reduced to its status alone (too large,
+     * or the sink failed): no session.finished was emitted, the session stays structurally open,
+     * and it accepts nothing further. Also reported for anything emitted after that.
+     */
+    TERMINAL_OUTCOME_NOT_WRITTEN
   }
 }

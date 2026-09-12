@@ -33,7 +33,7 @@
   "scripts": {
     "build": "node ./scripts/copy-schema.mjs && tsdown",
     "typecheck": "node ./scripts/copy-schema.mjs && tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "node ./scripts/copy-schema.mjs && vitest run"
   },
   "bin": {
     "qe-report-validate": "./dist/cli.js"

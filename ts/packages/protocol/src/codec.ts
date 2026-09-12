@@ -22,6 +22,8 @@ import {
   type StepStartedPayload,
   type TestCase,
   type UnknownEvent,
+  type SessionFinishedPayload,
+  type SessionStatus,
 } from './model.js';
 import { isSupportedProtocolVersion, parseProtocolVersion } from './version.js';
 
@@ -31,6 +33,10 @@ const TIMESTAMP =
   /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$/;
 
 type Obj = Record<string, unknown>;
+
+function isSessionStatus(s: string): s is SessionStatus {
+  return s === 'passed' || s === 'failed' || s === 'inconclusive';
+}
 
 function invalid(pointer: string, message: string): ProtocolError {
   return new ProtocolError('SCHEMA_INVALID', `${pointer}: ${message}`, pointer);
@@ -259,7 +265,23 @@ function readPayload(eventType: string, p: Obj, ignorable: boolean): Event['payl
       );
       return payload;
     }
-    case 'session.finished':
+    case 'session.finished': {
+      const status = optionalString(p, 'status', at);
+      if (status !== undefined && !isSessionStatus(status))
+        throw invalid(`${at}/status`, 'must be passed, failed, or inconclusive');
+      const rawStatus = optionalString(p, 'rawStatus', at);
+      const fs = failures(p, at);
+      const some = fs !== undefined && fs.length > 0;
+      if (status === undefined && rawStatus !== undefined)
+        throw invalid(at, 'rawStatus requires status');
+      if (status === undefined && some) throw invalid(at, 'failures require status');
+      if (status === 'passed' && some) throw invalid(at, 'a passed session carries no failures');
+      const payload: SessionFinishedPayload = withOptional(
+        {},
+        { status, rawStatus, failures: some ? fs : undefined },
+      );
+      return payload;
+    }
     case 'run.finished':
       return {};
     case 'attempt.started': {
@@ -390,7 +412,7 @@ export function eventFromObject(root: unknown): Event | UnknownEvent {
   if (!isSupportedProtocolVersion(parsed)) {
     throw new ProtocolError(
       'UNSUPPORTED_PROTOCOL_VERSION',
-      `protocol version ${protocolVersion} is outside the supported line 0.2`,
+      `protocol version ${protocolVersion} is outside the supported line 0.3`,
       '/protocolVersion',
     );
   }
@@ -502,7 +524,15 @@ function writePayload(e: Event): Obj {
         labels: nonEmpty(p.labels) ? { ...p.labels } : undefined,
       });
     }
-    case 'session.finished':
+    case 'session.finished': {
+      const p = e.payload;
+      return omitUndefined({
+        status: p.status,
+        rawStatus: p.rawStatus,
+        failures:
+          p.failures !== undefined && p.failures.length > 0 ? writeFailures(p.failures) : undefined,
+      });
+    }
     case 'run.finished':
       return {};
     case 'attempt.started': {

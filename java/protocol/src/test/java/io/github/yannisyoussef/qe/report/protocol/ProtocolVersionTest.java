@@ -9,11 +9,12 @@ import org.junit.jupiter.api.Test;
 
 class ProtocolVersionTest {
   @Test
-  void supportsOnlyTheZeroTwoLine() {
-    assertTrue(ProtocolVersion.isSupported("0.2.0"));
-    assertTrue(ProtocolVersion.isSupported("0.2.99"));
+  void supportsOnlyTheZeroThreeLine() {
+    assertTrue(ProtocolVersion.isSupported("0.3.0"));
+    assertTrue(ProtocolVersion.isSupported("0.3.99"));
     assertFalse(ProtocolVersion.isSupported("0.1.0"), "the unpublished 0.1 line is not read");
-    assertFalse(ProtocolVersion.isSupported("0.3.0"));
+    assertFalse(ProtocolVersion.isSupported("0.4.0"));
+    assertFalse(ProtocolVersion.isSupported("0.2.0"), "the unpublished 0.2 line is not read");
     assertFalse(ProtocolVersion.isSupported("1.0.0"));
     assertFalse(ProtocolVersion.isSupported("0.1"));
     assertFalse(ProtocolVersion.isSupported("0.1.0-rc.1"));

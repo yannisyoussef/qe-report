@@ -5,7 +5,7 @@ binding, producer SDKs, and a validator. Part of the
 [QE ecosystem](https://github.com/yannisyoussef/qe-ecosystem); the
 ecosystem architecture and decision records apply here.
 
-Status: protocol compatibility line 0.2 is defined and implemented in both
+Status: protocol compatibility line 0.3 is defined and implemented in both
 languages, and a JUnit Platform adapter produces it from real Gradle and
 Maven builds. No HTTP transport and no reporting server exist yet. Nothing
 is published.
