@@ -182,6 +182,25 @@ export class ReportSession {
   }
 
   /**
+   * Like {@link attachFile} but synchronous, for producers whose callbacks are not awaited. The
+   * file is read in chunks and refused as soon as it proves larger than the sink's attachment
+   * limit, whatever its media type, so memory is bounded by that limit (plus one chunk and the
+   * joined copy); a larger file is never read to its end.
+   */
+  attachFileSync(input: AttachmentInput, path: string): boolean {
+    if (!this.acceptsSessionEvents(`attachment ${input.name}`)) return false;
+    let bytes: Buffer | undefined;
+    try {
+      bytes = readBounded(path, this.sink.maxAttachmentBytes);
+    } catch (e) {
+      return this.storeFailed(input, e);
+    }
+    if (bytes === undefined)
+      return this.storeFailed(input, new AttachmentTooLargeError(this.sink.maxAttachmentBytes));
+    return this.attach(input, bytes);
+  }
+
+  /**
    * Emits `session.finished`, with the runner's aggregate outcome for this session when the
    * runner exposes one; a producer without one passes nothing. Only `run.finished` is accepted
    * afterwards.

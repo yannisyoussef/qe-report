@@ -549,6 +549,53 @@ describe('ReportSession', () => {
     });
   });
 
+  describe('attachFileSync', () => {
+    it('bounds binary and text files alike and refuses a larger one unread', () => {
+      const d = temp();
+      const limit = 16;
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's', { maxAttachmentBytes: limit }),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      s.emit({
+        eventType: 'attempt.started',
+        payload: { attemptId: 'a-1', attemptNumber: 1, test },
+      });
+      const exact = join(d, 'exact.bin');
+      const over = join(d, 'over.bin');
+      const text = join(d, 'log.txt');
+      writeFileSync(exact, Buffer.alloc(limit, 1));
+      writeFileSync(over, Buffer.alloc(limit + 1, 1));
+      writeFileSync(text, 'token=abc');
+      expect(
+        s.attachFileSync({ attemptId: 'a-1', name: 'exact', mediaType: 'image/png' }, exact),
+      ).toBe(true);
+      expect(
+        s.attachFileSync({ attemptId: 'a-1', name: 'over', mediaType: 'image/png' }, over),
+      ).toBe(false);
+      expect(
+        s.attachFileSync({ attemptId: 'a-1', name: 'log', mediaType: 'text/plain' }, text),
+      ).toBe(true);
+      expect(
+        s.attachFileSync({ attemptId: 'a-1', name: 'gone', mediaType: 'image/png' }, join(d, 'x')),
+      ).toBe(false);
+      expect(problems.map((p) => p.kind)).toEqual(['ATTACHMENT_TOO_LARGE', 'SINK_FAILURE']);
+      s.close();
+      const stored = readdirSync(join(d, 'attachments'))
+        .map((n) => readFileSync(join(d, 'attachments', n)))
+        .map((b) => b.toString('utf8'))
+        .sort();
+      expect(stored).toEqual([Buffer.alloc(limit, 1).toString('utf8'), `token=${REDACTED}`]);
+    });
+  });
+
   it('drops and reports an oversized event without throwing', () => {
     const problems: ReportProblem[] = [];
     const s = ReportSession.start(

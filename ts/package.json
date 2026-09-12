@@ -14,7 +14,8 @@
     "format:check": "prettier --check .",
     "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
     "test:equivalence": "pnpm --filter qe-report-equivalence run equivalence",
-    "test:consumer-runs": "pnpm --filter qe-report-equivalence run consumer-runs"
+    "test:consumer-runs": "pnpm --filter qe-report-equivalence run consumer-runs",
+    "test:playwright-consumer": "pnpm --filter qe-report-playwright run test:consumer"
   },
   "devDependencies": {
     "@types/node": "24.13.4",

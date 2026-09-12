@@ -48,6 +48,7 @@ GEMINI.md
 *.class
 !gradle/wrapper/gradle-wrapper.jar
 
-# Probe and equivalence output
+# Probe, equivalence, and consumer fixture output
 test-results/
 playwright-report/
+ts/consumer-fixtures/playwright/qe-report/

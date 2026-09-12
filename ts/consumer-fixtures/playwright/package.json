@@ -1,0 +1,14 @@
+{
+  "name": "qe-report-playwright-consumer",
+  "version": "0.0.0",
+  "description": "A Playwright Test project that consumes the qe-report reporter as a package; run by the reporter's consumer tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "qe-report-playwright": "workspace:*"
+  }
+}
