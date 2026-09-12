@@ -3,6 +3,7 @@ export {
   validateFile,
   validateLines,
   validateRunDirectory,
+  validateRunDirectorySnapshot,
   formatDiagnostic,
   type Diagnostic,
   type DiagnosticCode,
@@ -10,4 +11,5 @@ export {
   type Report,
   type Summary,
   type ValidateOptions,
+  type ValidatedRun,
 } from './validator.js';

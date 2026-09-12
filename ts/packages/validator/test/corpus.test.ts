@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { EVENT_TYPES } from 'qe-report-protocol';
 import {
   RunValidator,
   formatDiagnostic,
@@ -10,8 +11,9 @@ import {
   validateLines,
   validateRunDirectory,
   type Report,
+  validateRunDirectorySnapshot,
 } from '../src/index.js';
-import { FIXTURES_DIR, manifest, sessionFiles } from '../../protocol/test/helpers.js';
+import { FIXTURES_DIR, manifest, runLines, sessionFiles } from '../../protocol/test/helpers.js';
 
 const m = manifest();
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js');
@@ -531,5 +533,49 @@ describe('execution invariants', () => {
     expect(d).toMatchObject({ file: 's2', line: 2, eventId: 's2-2' });
     expect(d?.message).toContain('junit-platform');
     expect(d?.message).toContain('playwright');
+  });
+});
+
+describe('validated run snapshot', () => {
+  it('returns the accepted known events once each, in feed order, beside the same report', async () => {
+    const dir = join(FIXTURES_DIR, 'runs/duplicate-event-identical');
+    const { report, events } = await validateRunDirectorySnapshot(dir);
+    expect(report).toEqual(await validateRunDirectory(dir));
+    expect(report.summary.duplicates).toBe(1);
+    expect(events).toHaveLength(report.summary.events);
+    expect(new Set(events.map((e) => e.eventId)).size).toBe(events.length);
+    expect(events.map((e) => e.sequence)).toEqual([...events].map((_, i) => i + 1));
+  });
+  it('lists no unknown ignorable event but keeps its count', async () => {
+    const { report, events } = await validateRunDirectorySnapshot(
+      join(FIXTURES_DIR, 'runs/compat/unknown-event-ignorable'),
+    );
+    expect(report.summary.ignored).toBe(1);
+    expect(events).toHaveLength(report.summary.events - 1);
+    expect(events.every((e) => EVENT_TYPES.includes(e.eventType))).toBe(true);
+  });
+  it('reports an execution-invariant violation identically with and without events', async () => {
+    for (const fixture of [
+      'runs/invalid/duplicate-attempt-number',
+      'runs/invalid/historical-identity-appeared',
+      'runs/invalid/execution-runner-changed',
+    ]) {
+      const dir = join(FIXTURES_DIR, fixture);
+      const plain = await validateRunDirectory(dir);
+      const { report, events } = await validateRunDirectorySnapshot(dir);
+      expect(report, fixture).toEqual(plain);
+      expect(report.valid, fixture).toBe(false);
+      expect(events.length, fixture).toBeGreaterThan(0);
+    }
+  });
+
+  it('retains nothing unless asked', async () => {
+    const { events } = await validateRunDirectorySnapshot(join(FIXTURES_DIR, 'runs/forked'), {
+      retainEvents: false,
+    });
+    expect(events).toEqual([]);
+    const run = new RunValidator();
+    run.feed(runLines('runs/forked'), 'stream', false);
+    expect(run.acceptedEvents()).toEqual([]);
   });
 });
