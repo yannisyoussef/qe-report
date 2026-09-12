@@ -25,7 +25,13 @@ export type ReportProblemKind =
   /** An event was emitted after run.finished and was dropped. */
   | 'RUN_FINISHED'
   /** A payload violates a rule of the protocol and was dropped. */
-  | 'INVALID_PAYLOAD';
+  | 'INVALID_PAYLOAD'
+  /**
+   * A supplied session outcome could not be written, even reduced to its status alone (too large,
+   * or the sink failed): no session.finished was emitted, the session stays structurally open,
+   * and it accepts nothing further. Also reported for anything emitted after that.
+   */
+  | 'TERMINAL_OUTCOME_NOT_WRITTEN';
 
 /**
  * Something the SDK could not do. Problems never change a test result and never propagate into
@@ -95,6 +101,11 @@ export class ReportSession {
   private written = 0;
   private dropped = 0;
   private lifecycle: SessionState = 'active';
+  /**
+   * Set when a supplied session outcome could not be written: the canonical status is never
+   * replaced by an empty terminal event, so the session stays open and accepts nothing further.
+   */
+  private terminalOutcomeLost = false;
 
   private constructor(options: ReportSessionOptions) {
     this.runId = options.runId;
@@ -128,10 +139,9 @@ export class ReportSession {
    */
   emit(input: EventInput): boolean {
     if (input.eventType === 'run.finished') return this.finishRun();
+    if (input.eventType === 'session.finished') return this.finish(input.payload);
     if (!this.acceptsSessionEvents(`event ${input.eventType}`)) return false;
-    const ok = this.write(input);
-    if (ok && input.eventType === 'session.finished') this.lifecycle = 'session-finished';
-    return ok;
+    return this.write(input, true).result === 'written';
   }
 
   /** Stores bytes as an attachment and emits `attachment.added`. Text is redacted first. */
@@ -175,6 +185,12 @@ export class ReportSession {
    * Emits `session.finished`, with the runner's aggregate outcome for this session when the
    * runner exposes one; a producer without one passes nothing. Only `run.finished` is accepted
    * afterwards.
+   *
+   * A supplied status is preserved at all cost: when the event exceeds the size limit, the
+   * failures are dropped first, then the raw status, and each reduction is reported; when even
+   * the status alone cannot be written, or the sink fails, no terminal event is emitted, the
+   * session stays structurally open, and it accepts nothing further. A consumer then sees an
+   * incomplete run rather than a passed one.
    */
   finish(outcome: SessionFinishedPayload = {}): boolean {
     const violation = outcomeViolation(outcome);
@@ -183,31 +199,53 @@ export class ReportSession {
       this.problem('INVALID_PAYLOAD', `session.finished ${violation}; dropped`);
       return false;
     }
-    if (this.emit({ eventType: 'session.finished', payload: outcome })) return true;
-    if (this.lifecycle !== 'active') return false;
-    // Dropped while the session is still active (the outcome exceeded the event limit, or the sink
-    // failed): the session must still close, so the outcome is retried without its failures, then
-    // as the empty payload. Each reduction is reported.
-    if (outcome.failures !== undefined && outcome.failures.length > 0) {
-      this.problem(
-        'EVENT_TOO_LARGE',
-        'session.finished retried without its failures so that the session closes',
-      );
-      const reduced: SessionFinishedPayload = {
-        ...(outcome.status !== undefined ? { status: outcome.status } : {}),
-        ...(outcome.rawStatus !== undefined ? { rawStatus: outcome.rawStatus } : {}),
-      };
-      if (this.emit({ eventType: 'session.finished', payload: reduced })) return true;
-      if (this.lifecycle !== 'active') return false;
+    if (!this.acceptsSessionEvents('event session.finished')) return false;
+    if (outcome.status === undefined) {
+      const plain = this.write({ eventType: 'session.finished', payload: outcome }, true);
+      if (plain.result === 'written') this.lifecycle = 'session-finished';
+      return plain.result === 'written';
     }
-    if (outcome.status !== undefined) {
-      this.problem(
-        'EVENT_TOO_LARGE',
-        'session.finished retried with an empty payload so that the session closes',
-      );
-      return this.emit({ eventType: 'session.finished', payload: {} });
+    const status = outcome.status;
+    let candidate: SessionFinishedPayload = outcome;
+    for (;;) {
+      const attempt = this.write({ eventType: 'session.finished', payload: candidate }, false);
+      if (attempt.result === 'written') {
+        this.lifecycle = 'session-finished';
+        return true;
+      }
+      if (attempt.result === 'sink-failure') {
+        this.terminalOutcomeLost = true;
+        this.problem(
+          'TERMINAL_OUTCOME_NOT_WRITTEN',
+          `session outcome ${status} could not be written because the sink failed; no session.finished is emitted and the session stays open`,
+        );
+        return false;
+      }
+      const size = `${attempt.bytes} bytes, limit ${this.maxEventBytes}`;
+      if (candidate.failures !== undefined && candidate.failures.length > 0) {
+        this.problem(
+          'EVENT_TOO_LARGE',
+          `session.finished with its failures is ${size}; retried without them`,
+        );
+        candidate = {
+          status,
+          ...(candidate.rawStatus !== undefined ? { rawStatus: candidate.rawStatus } : {}),
+        };
+      } else if (candidate.rawStatus !== undefined) {
+        this.problem(
+          'EVENT_TOO_LARGE',
+          `session.finished with its rawStatus is ${size}; retried without it`,
+        );
+        candidate = { status };
+      } else {
+        this.terminalOutcomeLost = true;
+        this.problem(
+          'TERMINAL_OUTCOME_NOT_WRITTEN',
+          `session outcome ${status} alone is ${size} and cannot be written; no session.finished is emitted and the session stays open`,
+        );
+        return false;
+      }
     }
-    return false;
   }
 
   /**
@@ -215,6 +253,14 @@ export class ReportSession {
    * producer that knows every session of the run has finished; a forked worker must not call it.
    */
   finishRun(): boolean {
+    if (this.terminalOutcomeLost) {
+      this.dropped += 1;
+      this.problem(
+        'TERMINAL_OUTCOME_NOT_WRITTEN',
+        'run.finished after a session outcome that could not be written; dropped',
+      );
+      return false;
+    }
     if (this.lifecycle === 'active' && !this.finish()) return false;
     if (this.lifecycle !== 'session-finished') {
       this.dropped += 1;
@@ -224,7 +270,7 @@ export class ReportSession {
       );
       return false;
     }
-    const ok = this.write({ eventType: 'run.finished', payload: {} });
+    const ok = this.write({ eventType: 'run.finished', payload: {} }, true).result === 'written';
     if (ok) this.lifecycle = 'run-finished';
     return ok;
   }
@@ -232,7 +278,7 @@ export class ReportSession {
   /** Finishes the session if it is still active and closes the sink. */
   close(): void {
     if (this.lifecycle === 'closed') return;
-    if (this.lifecycle === 'active') this.finish();
+    if (this.lifecycle === 'active' && !this.terminalOutcomeLost) this.finish();
     this.lifecycle = 'closed';
     try {
       this.sink.close();
@@ -247,6 +293,14 @@ export class ReportSession {
 
   /** False, with a problem reported and counted, when the lifecycle no longer accepts session events. */
   private acceptsSessionEvents(what: string): boolean {
+    if (this.terminalOutcomeLost) {
+      this.dropped += 1;
+      this.problem(
+        'TERMINAL_OUTCOME_NOT_WRITTEN',
+        `${what} after a session outcome that could not be written; dropped`,
+      );
+      return false;
+    }
     if (this.lifecycle === 'active') return true;
     this.dropped += 1;
     const kind: ReportProblemKind =
@@ -255,7 +309,8 @@ export class ReportSession {
     return false;
   }
 
-  private write(input: EventInput): boolean {
+  /** Writes one event; a size rejection is reported only when `reportSize` is set. */
+  private write(input: EventInput, reportSize: boolean): WriteAttempt {
     const candidate = {
       protocolVersion: PROTOCOL_VERSION,
       eventId: this.ids(),
@@ -270,22 +325,23 @@ export class ReportSession {
     const bytes = Buffer.byteLength(stringifyEvent(event), 'utf8') + 1;
     if (bytes > this.maxEventBytes) {
       this.dropped += 1;
-      this.problem(
-        'EVENT_TOO_LARGE',
-        `event ${input.eventType} is ${bytes} bytes, limit ${this.maxEventBytes}; dropped`,
-      );
-      return false;
+      if (reportSize)
+        this.problem(
+          'EVENT_TOO_LARGE',
+          `event ${input.eventType} is ${bytes} bytes, limit ${this.maxEventBytes}; dropped`,
+        );
+      return { result: 'too-large', bytes };
     }
     try {
       this.sink.write(event);
     } catch (e) {
       this.dropped += 1;
       this.problem('SINK_FAILURE', `cannot write ${input.eventType}`, e);
-      return false;
+      return { result: 'sink-failure', bytes };
     }
     this.sequence += 1;
     this.written += 1;
-    return true;
+    return { result: 'written', bytes };
   }
 
   private emitAttachment(input: AttachmentInput, stored: StoredAttachment): boolean {
@@ -312,6 +368,12 @@ export class ReportSession {
   private problem(kind: ReportProblemKind, message: string, cause?: unknown): void {
     this.onProblem(cause === undefined ? { kind, message } : { kind, message, cause });
   }
+}
+
+/** What became of one write: the terminal finish decides on the cause, not on a boolean. */
+interface WriteAttempt {
+  readonly result: 'written' | 'too-large' | 'sink-failure';
+  readonly bytes: number;
 }
 
 /** The rule an outcome breaks, if any: the same three the codec and the schema enforce. */

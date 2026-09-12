@@ -61,6 +61,20 @@ public final class ReportSession implements AutoCloseable {
   private long dropped;
   private State state = State.ACTIVE;
 
+  /**
+   * Set when a supplied session outcome could not be written: the canonical status is never
+   * replaced by an empty terminal event, so the session stays open and accepts nothing further.
+   */
+  private boolean terminalOutcomeLost;
+
+  private enum Written {
+    WRITTEN,
+    TOO_LARGE,
+    SINK_FAILURE
+  }
+
+  private record Attempted(Written result, int bytes) {}
+
   private ReportSession(Builder b) {
     this.runId = b.runId;
     this.sessionId = b.sessionId;
@@ -97,14 +111,13 @@ public final class ReportSession implements AutoCloseable {
     if (payload instanceof RunFinished) {
       return finishRun();
     }
+    if (payload instanceof SessionFinished outcome) {
+      return finish(outcome);
+    }
     if (!acceptsSessionEvents("event " + payload.eventType())) {
       return false;
     }
-    boolean ok = write(payload);
-    if (ok && payload instanceof SessionFinished) {
-      state = State.SESSION_FINISHED;
-    }
-    return ok;
+    return write(payload, true).result() == Written.WRITTEN;
   }
 
   /** Stores bytes as an attachment and emits {@code attachment.added}. Text is redacted first. */
@@ -193,39 +206,77 @@ public final class ReportSession implements AutoCloseable {
    * Emits {@code session.finished} with the runner's aggregate outcome for this session. For a
    * runner that exposes none, {@link #finish()} emits the empty payload instead. Only {@code
    * run.finished} is accepted afterwards.
+   *
+   * <p>A supplied status is preserved at all cost: when the event exceeds the size limit, the
+   * failures are dropped first, then the raw status, and each reduction is reported; when even the
+   * status alone cannot be written, or the sink fails, no terminal event is emitted, the session
+   * stays structurally open, and it accepts nothing further. A consumer then sees an incomplete run
+   * rather than a passed one.
    */
-  public boolean finish(SessionFinished outcome) {
-    if (emit(outcome)) {
-      return true;
-    }
-    if (state != State.ACTIVE) {
+  public synchronized boolean finish(SessionFinished outcome) {
+    if (!acceptsSessionEvents("event session.finished")) {
       return false;
     }
-    // Dropped while the session is still active (the outcome exceeded the event limit, or the sink
-    // failed): the session must still close, so the outcome is retried without its failures, then
-    // as the empty payload. Each reduction is reported.
-    if (!outcome.failures().isEmpty()) {
-      problems.onProblem(
-          new ReportProblem(
-              ReportProblem.Kind.EVENT_TOO_LARGE,
-              "session.finished retried without its failures so that the session closes",
-              null));
-      if (emit(new SessionFinished(outcome.status(), outcome.rawStatus(), List.of()))) {
+    if (outcome.status() == null) {
+      if (write(outcome, true).result() == Written.WRITTEN) {
+        state = State.SESSION_FINISHED;
         return true;
       }
-      if (state != State.ACTIVE) {
-        return false;
+      return false;
+    }
+    SessionFinished candidate = outcome;
+    while (true) {
+      Attempted attempt = write(candidate, false);
+      switch (attempt.result()) {
+        case WRITTEN -> {
+          state = State.SESSION_FINISHED;
+          return true;
+        }
+        case SINK_FAILURE -> {
+          terminalOutcomeLost = true;
+          problems.onProblem(
+              new ReportProblem(
+                  ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN,
+                  "session outcome "
+                      + candidate.status().wireName()
+                      + " could not be written because the sink failed; no session.finished is"
+                      + " emitted and the session stays open",
+                  null));
+          return false;
+        }
+        case TOO_LARGE -> {
+          String size = attempt.bytes() + " bytes, limit " + maxEventBytes;
+          if (!candidate.failures().isEmpty()) {
+            problems.onProblem(
+                new ReportProblem(
+                    ReportProblem.Kind.EVENT_TOO_LARGE,
+                    "session.finished with its failures is " + size + "; retried without them",
+                    null));
+            candidate = new SessionFinished(candidate.status(), candidate.rawStatus(), List.of());
+          } else if (candidate.rawStatus() != null) {
+            problems.onProblem(
+                new ReportProblem(
+                    ReportProblem.Kind.EVENT_TOO_LARGE,
+                    "session.finished with its rawStatus is " + size + "; retried without it",
+                    null));
+            candidate = SessionFinished.of(candidate.status());
+          } else {
+            terminalOutcomeLost = true;
+            problems.onProblem(
+                new ReportProblem(
+                    ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN,
+                    "session outcome "
+                        + candidate.status().wireName()
+                        + " alone is "
+                        + size
+                        + " and cannot be written; no session.finished is emitted and the session"
+                        + " stays open",
+                    null));
+            return false;
+          }
+        }
       }
     }
-    if (outcome.status() != null) {
-      problems.onProblem(
-          new ReportProblem(
-              ReportProblem.Kind.EVENT_TOO_LARGE,
-              "session.finished retried with an empty payload so that the session closes",
-              null));
-      return emit(SessionFinished.empty());
-    }
-    return false;
   }
 
   /**
@@ -234,6 +285,15 @@ public final class ReportSession implements AutoCloseable {
    * it.
    */
   public synchronized boolean finishRun() {
+    if (terminalOutcomeLost) {
+      dropped++;
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN,
+              "run.finished after a session outcome that could not be written; dropped",
+              null));
+      return false;
+    }
     if (state == State.ACTIVE && !finish()) {
       return false;
     }
@@ -246,7 +306,7 @@ public final class ReportSession implements AutoCloseable {
               null));
       return false;
     }
-    boolean ok = write(new RunFinished());
+    boolean ok = write(new RunFinished(), true).result() == Written.WRITTEN;
     if (ok) {
       state = State.RUN_FINISHED;
     }
@@ -259,7 +319,7 @@ public final class ReportSession implements AutoCloseable {
     if (state == State.CLOSED) {
       return;
     }
-    if (state == State.ACTIVE) {
+    if (state == State.ACTIVE && !terminalOutcomeLost) {
       finish();
     }
     state = State.CLOSED;
@@ -279,6 +339,15 @@ public final class ReportSession implements AutoCloseable {
   public record Summary(long eventsWritten, long eventsDropped) {}
 
   private boolean acceptsSessionEvents(String what) {
+    if (terminalOutcomeLost) {
+      dropped++;
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.TERMINAL_OUTCOME_NOT_WRITTEN,
+              what + " after a session outcome that could not be written; dropped",
+              null));
+      return false;
+    }
     if (state == State.ACTIVE) {
       return true;
     }
@@ -301,7 +370,8 @@ public final class ReportSession implements AutoCloseable {
     };
   }
 
-  private boolean write(Payload payload) {
+  /** Writes one event; a size rejection is reported only when {@code reportSize} is set. */
+  private Attempted write(Payload payload, boolean reportSize) {
     Event candidate =
         new Event(
             ProtocolVersion.CURRENT,
@@ -317,18 +387,20 @@ public final class ReportSession implements AutoCloseable {
     int bytes = ProtocolJson.write(event).getBytes(StandardCharsets.UTF_8).length + 1;
     if (bytes > maxEventBytes) {
       dropped++;
-      problems.onProblem(
-          new ReportProblem(
-              ReportProblem.Kind.EVENT_TOO_LARGE,
-              "event "
-                  + payload.eventType()
-                  + " is "
-                  + bytes
-                  + " bytes, limit "
-                  + maxEventBytes
-                  + "; dropped",
-              null));
-      return false;
+      if (reportSize) {
+        problems.onProblem(
+            new ReportProblem(
+                ReportProblem.Kind.EVENT_TOO_LARGE,
+                "event "
+                    + payload.eventType()
+                    + " is "
+                    + bytes
+                    + " bytes, limit "
+                    + maxEventBytes
+                    + "; dropped",
+                null));
+      }
+      return new Attempted(Written.TOO_LARGE, bytes);
     }
     try {
       sink.write(event);
@@ -337,11 +409,11 @@ public final class ReportSession implements AutoCloseable {
       problems.onProblem(
           new ReportProblem(
               ReportProblem.Kind.SINK_FAILURE, "cannot write " + payload.eventType(), e));
-      return false;
+      return new Attempted(Written.SINK_FAILURE, bytes);
     }
     sequence++;
     written++;
-    return true;
+    return new Attempted(Written.WRITTEN, bytes);
   }
 
   /** Configuration for a session. */

@@ -178,6 +178,16 @@ layers stay distinct and none replaces another: an attempt's outcome, a
 scope failure, and the session outcome. `session.finished` remains the
 event that closes the session; only `run.finished` may follow it.
 
+A supplied `status` is never erased. When the terminal event exceeds the
+producer's event size limit, both SDKs drop diagnostic detail in a fixed
+order, the failures first and then the raw status, and report each step;
+the canonical status survives every step. When the status alone cannot be
+written, or the sink fails, they emit no terminal event at all rather than
+an empty one: the session stays structurally open, the SDK accepts nothing
+further for it, and a consumer derives `incomplete` instead of a false
+`passed`. A producer without an aggregate outcome still closes its session
+with the empty payload whenever that can be written.
+
 ```json
 {
   "eventType": "session.finished",
