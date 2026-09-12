@@ -1,5 +1,6 @@
 package io.github.yannisyoussef.qe.report.junitplatform.internal;
 
+import io.github.yannisyoussef.qe.report.sdk.RunDirectories;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -20,7 +21,7 @@ import org.jspecify.annotations.Nullable;
  * <table>
  * <tr><th>System property</th><th>Environment variable</th><th>Default</th></tr>
  * <tr><td>{@code qe.report.enabled}</td><td>{@code QE_REPORT_ENABLED}</td><td>{@code true}</td></tr>
- * <tr><td>{@code qe.report.dir}</td><td>{@code QE_REPORT_DIR}</td><td>{@code qe-report} under the working directory</td></tr>
+ * <tr><td>{@code qe.report.dir}</td><td>{@code QE_REPORT_DIR}</td><td>output root {@code qe-report} under the working directory; the run is written to {@code <root>/runs/<run directory>}</td></tr>
  * <tr><td>{@code qe.report.runId}</td><td>{@code QE_REPORT_RUN_ID}</td><td>generated: this JVM becomes a run of its own</td></tr>
  * <tr><td>{@code qe.report.sessionId}</td><td>{@code QE_REPORT_SESSION_ID}</td><td>generated from the process id and random bytes</td></tr>
  * </table>
@@ -28,7 +29,7 @@ import org.jspecify.annotations.Nullable;
  * @param notes what was ignored or generated, for the diagnostics log
  */
 public record AdapterConfig(
-    boolean enabled, Path runDirectory, String runId, String sessionId, List<String> notes) {
+    boolean enabled, Path outputRoot, String runId, String sessionId, List<String> notes) {
 
   public static final String ENABLED_PROPERTY = "qe.report.enabled";
   public static final String DIR_PROPERTY = "qe.report.dir";
@@ -45,6 +46,14 @@ public record AdapterConfig(
 
   public AdapterConfig {
     notes = List.copyOf(notes);
+  }
+
+  /**
+   * The run directory below the output root, resolved from the run id by the SDK's contract, so
+   * that every fork of one run writes to the same directory and two runs never share one.
+   */
+  public Path runDirectory() {
+    return RunDirectories.resolve(outputRoot, runId);
   }
 
   public static AdapterConfig fromSystem() {
@@ -64,7 +73,7 @@ public record AdapterConfig(
         notes.add(
             ENABLED_PROPERTY
                 + " has unrecognised value '"
-                + enabledRaw
+                + shown(enabledRaw)
                 + "'; reporting stays enabled");
       }
     }
@@ -102,11 +111,16 @@ public record AdapterConfig(
       notes.add(
           name
               + " '"
-              + v
+              + shown(v)
               + "' is not a valid identifier (printable ASCII, no spaces, at most 128 characters); a generated value is used");
       return null;
     }
     return v;
+  }
+
+  /** A configured value as it appears in a note: bounded, so an oversized value stays one line. */
+  private static String shown(String value) {
+    return value.length() > 40 ? value.substring(0, 40) + "..." : value;
   }
 
   private static @Nullable String pick(

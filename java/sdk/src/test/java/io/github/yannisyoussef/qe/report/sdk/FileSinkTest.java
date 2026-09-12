@@ -44,6 +44,7 @@ class FileSinkTest {
             .matches("_\\._\\.\\._etc_passwd-[0-9a-f]{12}\\.ndjson"));
     assertTrue(SessionFiles.fileName("..").matches("_\\.-[0-9a-f]{12}\\.ndjson"));
     assertTrue(SessionFiles.fileName(".hidden").startsWith("_hidden-"));
+    assertTrue(SessionFiles.fileName("-x").startsWith("_x-"), "a leading dash is replaced");
     assertFalse(SessionFiles.fileName("a/b").equals(SessionFiles.fileName("a_b")));
     assertEquals(48 + 1 + 12 + ".ndjson".length(), SessionFiles.fileName("x".repeat(200)).length());
     assertTrue(SessionFiles.fileName("émoji 🚀").startsWith("_moji__-"));

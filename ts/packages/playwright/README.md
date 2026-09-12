@@ -26,13 +26,13 @@ export default defineConfig({
 
 A reporter option wins over its environment variable, which wins over the default.
 
-| Option               | Environment variable   | Default                                        |
-| -------------------- | ---------------------- | ---------------------------------------------- |
-| `enabled`            | `QE_REPORT_ENABLED`    | `true`                                         |
-| `dir`                | `QE_REPORT_DIR`        | `qe-report` under the working directory        |
-| `runId`              | `QE_REPORT_RUN_ID`     | generated; the invocation is a run of its own  |
-| `sessionId`          | `QE_REPORT_SESSION_ID` | generated from the process id and random bytes |
-| `maxAttachmentBytes` | option only            | the SDK's 64 MiB                               |
+| Option               | Environment variable   | Default                                             |
+| -------------------- | ---------------------- | --------------------------------------------------- |
+| `enabled`            | `QE_REPORT_ENABLED`    | `true`                                              |
+| `dir`                | `QE_REPORT_DIR`        | output root `qe-report` under the working directory |
+| `runId`              | `QE_REPORT_RUN_ID`     | generated; the invocation is a run of its own       |
+| `sessionId`          | `QE_REPORT_SESSION_ID` | generated from the process id and random bytes      |
+| `maxAttachmentBytes` | option only            | the SDK's 64 MiB                                    |
 
 Run and session ids are protocol identifiers: 1 to 128 printable ASCII characters without
 spaces. A malformed value is reported once on standard error and replaced by the default.
@@ -42,12 +42,15 @@ spaces. A malformed value is reported once on standard error and replaced by the
 One `playwright test` process is one session: reporter callbacks run in that process, so
 worker processes are not sessions and a worker restart after a failure changes nothing in the
 report except the `playwright.workerIndex` label of later attempts. A shard is a separate
-process and therefore a separate session; give every shard the same `dir` and `runId` and
-each writes its own session file into the shared run directory (`events/<session>.ndjson`,
-`attachments/<sha256>`). A configured run id is for processes that run disjoint sets of
-tests, as shards do: attempt ids are built from Playwright's test id and the retry, so two
-invocations of the same tests under one run id would collide. A job that re-runs failures
-gets a run id of its own.
+process and therefore a separate session; give every shard the same `dir` and `runId` and each
+resolves the same run directory below the output root, `<dir>/runs/<run directory>`, named
+from the run id by the SDK's contract, and writes its own session file into it
+(`events/<session>.ndjson`, `attachments/<sha256>`). An invocation with a generated run id
+gets a run directory of its own, so two sequential default invocations never share one, and no
+directory ever holds two runs. The start-up line names the resolved run directory. A
+configured run id is for processes that run disjoint sets of tests, as shards do: attempt ids
+are built from Playwright's test id and the retry, so two invocations of the same tests under
+one run id would collide. A job that re-runs failures gets a run id of its own.
 
 `run.finished` is emitted only when the reporter generated the run id itself, because only
 then can it know that no other process shares the run. With a configured run id, whether
@@ -57,7 +60,7 @@ protocol treats as complete and open.
 Validate a run with the qe-report validator:
 
 ```
-qe-report-validate build/qe-report --require-complete
+qe-report-validate build/qe-report/runs/<run directory> --require-complete
 ```
 
 ## What is reported
@@ -141,7 +144,8 @@ the message starts with an error class name, and a `location` inside the root di
 fixture of an attempt under root steps of category `hook` that it titles "Before Hooks",
 "After Hooks", and "Worker Cleanup", and the reporter recognises those groups by their
 category and title. An error first seen on a step under "Before Hooks" is `setup`, under
-"After Hooks" or "Worker Cleanup" is `teardown`, under any other root step is `test`. An error with no step, such as a plain
+"After Hooks" or "Worker Cleanup" is `teardown`, under any other root step is `test`. An error
+with no step, such as a plain
 `throw` in the test body or a test timeout, carries no phase. Playwright attributes
 `beforeAll` and `afterAll` failures to the tests of the file; the reporter keeps that and
 emits no `scope.failed` for them.

@@ -43,55 +43,58 @@ switch it off with JUnit's own configuration parameter
 Four settings. A system property wins over an environment variable, which wins over the default.
 Properties are set per JVM by the build tool; variables are inherited by every fork.
 
-| System property | Environment variable | Default |
-|---|---|---|
-| `qe.report.enabled` | `QE_REPORT_ENABLED` | `true` |
-| `qe.report.dir` | `QE_REPORT_DIR` | `qe-report` under the working directory |
-| `qe.report.runId` | `QE_REPORT_RUN_ID` | generated; this JVM becomes a run of its own |
-| `qe.report.sessionId` | `QE_REPORT_SESSION_ID` | generated from the process id and random bytes |
+| System property       | Environment variable   | Default                                             |
+| --------------------- | ---------------------- | --------------------------------------------------- |
+| `qe.report.enabled`   | `QE_REPORT_ENABLED`    | `true`                                              |
+| `qe.report.dir`       | `QE_REPORT_DIR`        | output root `qe-report` under the working directory |
+| `qe.report.runId`     | `QE_REPORT_RUN_ID`     | generated; this JVM becomes a run of its own        |
+| `qe.report.sessionId` | `QE_REPORT_SESSION_ID` | generated from the process id and random bytes      |
 
 A run id and a session id are identifiers in the protocol sense: printable ASCII, no spaces, at
 most 128 characters. An invalid value, or an unrecognised `qe.report.enabled` value, is reported
 once on standard error and replaced by the default.
 
 Forked builds (Gradle `maxParallelForks`, Surefire `forkCount`) work without coordination: give
-every fork the same `qe.report.dir` and `qe.report.runId`, and each JVM writes its own session
-file into the shared run directory. Without a run id, each fork is a separate run. A session id
-should not be configured for forked builds unless each fork gets its own; a reused session id
-fails at start, because a session file is created exclusively.
+every fork the same `qe.report.dir` and `qe.report.runId`, and each JVM resolves the same run
+directory below the output root and writes its own session file into it. Without a run id,
+each fork is a separate run in a run directory of its own; no directory ever holds two runs. A
+session id should not be configured for forked builds unless each fork gets its own; a reused
+session id fails at start, because a session file is created exclusively.
 
 ## Output
 
-The run directory is the SDK's file layout: `events/<session file>.ndjson` per session and
-`attachments/<sha256>`. One JUnit test plan is one session. Gradle and Surefire run one plan per
-fork, so a fork is a session. No fork emits `run.finished`: a worker cannot know that every
-other worker has finished, and a run consisting of finished sessions without `run.finished` is
-complete and open by protocol definition. The adapter writes protocol line 0.3 with an empty
-`session.finished` payload, because a forked JVM knows nothing of the build's aggregate
-verdict; a run in which a container failed carries `scope.failed`. Validate a run with the
-qe-report validator:
+The output root holds one run directory per run, `<root>/runs/<run directory>`, named from the
+run id by the SDK's contract; inside it lies the SDK's file layout, `events/<session
+file>.ndjson` per session and `attachments/<sha256>`. The start-up line on standard error
+names the resolved run directory. One JUnit test plan is one session. Gradle and Surefire run
+one plan per fork, so a fork is a session. No fork emits `run.finished`: a worker cannot know
+that every other worker has finished, and a run consisting of finished sessions without
+`run.finished` is complete and open by protocol definition. The adapter writes protocol line
+0.3 with an empty `session.finished` payload, because a forked JVM knows nothing of the
+build's aggregate verdict; a run in which a container failed carries `scope.failed`. Validate
+a run with the qe-report validator:
 
 ```
-qe-report-validate build/qe-report --require-complete
+qe-report-validate build/qe-report/runs/<run directory> --require-complete
 ```
 
 ## What is reported
 
-| JUnit | Protocol |
-|---|---|
-| `session.started` | producer `qe-report-junit-platform` with the adapter version; runner `junit-platform` with the launcher's implementation version; environment `java.version` only |
-| Test started and finished | `attempt.started`, `attempt.finished`; `attemptNumber` 1, or n for the n-th execution of the same unique id in one plan |
-| `SUCCESSFUL`, `FAILED` | `passed`, `failed`, with `rawStatus` |
-| `ABORTED` (assumption) | `skipped`, `rawStatus: ABORTED`, the assumption message in `failures[0]` |
-| Skipped test (`@Disabled`, `@Ignore`) | a synthesised `attempt.started` and `attempt.finished` with `skipped`, `rawStatus: SKIPPED`, the reason in `failures[0].message`, no duration |
-| Skipped container | every planned test below it reported as skipped with the container's reason, so the count of planned tests stays honest |
-| Container failed before any test started (`@BeforeAll`) | every planned test below it reported as `failed` with the container's failure and `phase: setup`, no duration |
+| JUnit                                                                                                                               | Protocol                                                                                                                                                                                                                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session.started`                                                                                                                   | producer `qe-report-junit-platform` with the adapter version; runner `junit-platform` with the launcher's implementation version; environment `java.version` only                                                                                                                                     |
+| Test started and finished                                                                                                           | `attempt.started`, `attempt.finished`; `attemptNumber` 1, or n for the n-th execution of the same unique id in one plan                                                                                                                                                                               |
+| `SUCCESSFUL`, `FAILED`                                                                                                              | `passed`, `failed`, with `rawStatus`                                                                                                                                                                                                                                                                  |
+| `ABORTED` (assumption)                                                                                                              | `skipped`, `rawStatus: ABORTED`, the assumption message in `failures[0]`                                                                                                                                                                                                                              |
+| Skipped test (`@Disabled`, `@Ignore`)                                                                                               | a synthesised `attempt.started` and `attempt.finished` with `skipped`, `rawStatus: SKIPPED`, the reason in `failures[0].message`, no duration                                                                                                                                                         |
+| Skipped container                                                                                                                   | every planned test below it reported as skipped with the container's reason, so the count of planned tests stays honest                                                                                                                                                                               |
+| Container failed before any test started (`@BeforeAll`)                                                                             | every planned test below it reported as `failed` with the container's failure and `phase: setup`, no duration                                                                                                                                                                                         |
 | Container failed after its tests ran or were skipped (`@AfterAll`), or a container with no planned test (a throwing `@TestFactory`) | one `scope.failed` for the container: `path` is its own position in the hierarchy (a prefix of every test path below it), `displayName`, `rawStatus: FAILED`, and the failure with its inferred phase, `teardown` for `@AfterAll`; the tests below keep their own verdicts and no attempt is invented |
-| Failure | `message`, `type` (exception class), `stackTrace` (JUnit-pruned, bounded to 64 KiB with a visible marker), `phase` |
-| `TestReporter` entry on a test | a `text/plain` attachment named `junit-report-entry`, one `key: value` line per entry plus its timestamp, redacted like every text attachment |
-| `TestReporter` entry on a container | not recorded; reported once on standard error |
-| Tags | `tags` |
-| Duration | measured by the adapter with a monotonic clock between the start and finish callbacks; JUnit reports none |
+| Failure                                                                                                                             | `message`, `type` (exception class), `stackTrace` (JUnit-pruned, bounded to 64 KiB with a visible marker), `phase`                                                                                                                                                                                    |
+| `TestReporter` entry on a test                                                                                                      | a `text/plain` attachment named `junit-report-entry`, one `key: value` line per entry plus its timestamp, redacted like every text attachment                                                                                                                                                         |
+| `TestReporter` entry on a container                                                                                                 | not recorded; reported once on standard error                                                                                                                                                                                                                                                         |
+| Tags                                                                                                                                | `tags`                                                                                                                                                                                                                                                                                                |
+| Duration                                                                                                                            | measured by the adapter with a monotonic clock between the start and finish callbacks; JUnit reports none                                                                                                                                                                                             |
 
 `phase` is inferred from the throw site, not from the exception class: JUnit prunes its own
 frames, so the top frame is the user's method, and its Jupiter annotation (`@BeforeEach`,
@@ -131,12 +134,12 @@ runner, `junit-platform`, and still separates engines.
 The adapter compiles against JUnit Platform 1.10.5 and runs its launcher tests on each line
 below; a version outside this list is unsupported until CI proves it.
 
-| JUnit Platform | Jupiter | JDK |
-|---|---|---|
-| 1.10.5 | 5.10.5 | 17 |
-| 1.13.4 | 5.13.4 | 21 |
-| 6.0.3 | 6.0.3 | 25 |
-| 6.1.3 | 6.1.3 | 17, 21, 25 |
+| JUnit Platform | Jupiter | JDK        |
+| -------------- | ------- | ---------- |
+| 1.10.5         | 5.10.5  | 17         |
+| 1.13.4         | 5.13.4  | 21         |
+| 6.0.3          | 6.0.3   | 25         |
+| 6.1.3          | 6.1.3   | 17, 21, 25 |
 
 The consumer fixtures run Gradle 9.7 with `maxParallelForks` and `forkEvery`, and Maven Surefire
 3.6 with `forkCount` and `reuseForks=false`, both on JUnit 6.1.3, and their run directories are

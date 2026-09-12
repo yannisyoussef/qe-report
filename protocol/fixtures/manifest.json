@@ -890,6 +890,14 @@
       "file": "s-1-6a840baf5d8c.ndjson"
     },
     {
+      "dir": "runs/invalid/mixed-run-ids",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "RUN_ID_MISMATCH",
+      "line": 1,
+      "file": "s-2-450222bcc347.ndjson"
+    },
+    {
       "dir": "runs/invalid/historical-id-without-runner",
       "outcome": "INVALID",
       "reason": "LIFECYCLE_INVALID",

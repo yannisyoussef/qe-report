@@ -1,11 +1,15 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { resolveRunDirectory } from 'qe-report-sdk';
 
 /** Options given in `playwright.config`; each one wins over its environment variable. */
 export interface QeReportReporterOptions {
   /** Default true; `QE_REPORT_ENABLED`. */
   readonly enabled?: boolean;
-  /** Run directory; `QE_REPORT_DIR`; default `qe-report` under the working directory. */
+  /**
+   * Output root; `QE_REPORT_DIR`; default `qe-report` under the working directory. The run is
+   * written to `<root>/runs/<run directory>`, named from the run id by the SDK's contract.
+   */
   readonly dir?: string;
   /** `QE_REPORT_RUN_ID`; generated when absent, and then this process is a run of its own. */
   readonly runId?: string;
@@ -17,7 +21,9 @@ export interface QeReportReporterOptions {
 
 export interface ResolvedConfig {
   readonly enabled: boolean;
-  readonly dir: string;
+  readonly outputRoot: string;
+  /** `<outputRoot>/runs/<run directory>`, the same for every process reporting into the run. */
+  readonly runDirectory: string;
   readonly runId: string;
   /** True when no run id was configured: this process is then the only session of its run. */
   readonly runIdGenerated: boolean;
@@ -54,7 +60,7 @@ export function resolveConfig(
   }
 
   const dirValue = o.dir ?? env.QE_REPORT_DIR;
-  const dir = resolve(
+  const outputRoot = resolve(
     context.cwd,
     dirValue === undefined || dirValue === '' ? 'qe-report' : dirValue,
   );
@@ -77,7 +83,8 @@ export function resolveConfig(
 
   return {
     enabled,
-    dir,
+    outputRoot,
+    runDirectory: resolveRunDirectory(outputRoot, runId),
     runId,
     runIdGenerated: runIdValue === undefined,
     sessionId,

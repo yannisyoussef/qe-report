@@ -16,6 +16,7 @@ import {
   type StepStartedEvent,
   type UnknownEvent,
 } from 'qe-report-protocol';
+import { RUNS_DIR, resolveRunDirectory } from 'qe-report-sdk';
 import { validateRunDirectory, type Report } from 'qe-report-validator';
 
 /** The Playwright project under consumer-fixtures; it registers the reporter by package name. */
@@ -36,7 +37,8 @@ export interface RunOptions {
   readonly env?: Readonly<Record<string, string>>;
   /** Shared by several invocations of one logical run; omitted means the reporter generates one. */
   readonly runId?: string;
-  readonly runDir?: string;
+  /** The output root (`QE_REPORT_DIR`); runs are written below it under `runs/`. */
+  readonly outputRoot?: string;
   /** Sends SIGINT to Playwright once a test body has announced its start through a marker file. */
   readonly interruptWhenStarted?: boolean;
 }
@@ -59,6 +61,14 @@ export interface RunOutcome {
   readonly stderr: string;
   /** What Playwright's own reporter API concluded, from the status probe reporter. */
   readonly playwright: PlaywrightOutcome | undefined;
+  readonly outputRoot: string;
+  /** Every run directory below the root, sorted. */
+  readonly runDirs: readonly string[];
+  /**
+   * The run directory of this invocation's run: the configured run id's, or the only one below
+   * the root. With several run directories and no configured id nothing is selected; `runDirs`
+   * lists them all.
+   */
   readonly runDir: string;
   readonly report: Report;
   readonly events: readonly Event[];
@@ -75,16 +85,16 @@ export function freshDir(name: string): string {
 }
 
 export async function runPlaywright(o: RunOptions = {}): Promise<RunOutcome> {
-  const runDir = o.runDir ?? freshDir('run');
-  const statusFile = join(dirname(runDir), `status-${process.pid}-${Date.now()}.json`);
-  const marker = join(dirname(runDir), `marker-${process.pid}-${Date.now()}`);
+  const outputRoot = o.outputRoot ?? freshDir('run');
+  const statusFile = join(dirname(outputRoot), `status-${process.pid}-${Date.now()}.json`);
+  const marker = join(dirname(outputRoot), `marker-${process.pid}-${Date.now()}`);
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   delete env.QE_REPORT_RUN_ID;
   delete env.QE_REPORT_SESSION_ID;
   delete env.QE_REPORT_ENABLED;
   Object.assign(
     env,
-    { QE_REPORT_DIR: runDir, PW_STATUS_FILE: statusFile, PW_MARKER_FILE: marker, CI: '1' },
+    { QE_REPORT_DIR: outputRoot, PW_STATUS_FILE: statusFile, PW_MARKER_FILE: marker, CI: '1' },
     o.env ?? {},
   );
   if (o.runId !== undefined) env.QE_REPORT_RUN_ID = o.runId;
@@ -114,6 +124,18 @@ export async function runPlaywright(o: RunOptions = {}): Promise<RunOutcome> {
   const playwright = existsSync(statusFile)
     ? (JSON.parse(readFileSync(statusFile, 'utf8')) as PlaywrightOutcome)
     : undefined;
+  const runsDir = join(outputRoot, RUNS_DIR);
+  const runDirs = existsSync(runsDir)
+    ? readdirSync(runsDir)
+        .sort()
+        .map((d) => join(runsDir, d))
+    : [];
+  const runDir =
+    o.runId !== undefined
+      ? resolveRunDirectory(outputRoot, o.runId)
+      : runDirs.length === 1
+        ? (runDirs[0] ?? join(runsDir, 'none'))
+        : join(runsDir, 'none');
   const events = existsSync(join(runDir, 'events')) ? readEvents(runDir) : [];
   const report = existsSync(runDir)
     ? await validateRunDirectory(runDir, { requireComplete: true })
@@ -123,6 +145,8 @@ export async function runPlaywright(o: RunOptions = {}): Promise<RunOutcome> {
     stdout,
     stderr,
     playwright,
+    outputRoot,
+    runDirs,
     runDir,
     report,
     events,

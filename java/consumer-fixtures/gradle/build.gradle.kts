@@ -19,6 +19,7 @@ tasks.test {
     systemProperty("junit.jupiter.execution.parallel.enabled", "true")
     systemProperty("junit.jupiter.execution.parallel.mode.default", "concurrent")
     systemProperty("qe.report.dir", providers.gradleProperty("qe.report.dir").get())
-    systemProperty("qe.report.runId", providers.gradleProperty("qe.report.runId").get())
+    // Without a run id every fork is a run of its own, in its own directory under the root.
+    providers.gradleProperty("qe.report.runId").orNull?.let { systemProperty("qe.report.runId", it) }
     testLogging { events("failed") }
 }

@@ -1,0 +1,115 @@
+{
+  "description": "Run-directory naming contract: the readable stem is the run id reduced to [A-Za-z0-9._-] with a leading dot or dash replaced by an underscore, at most 48 characters, followed by '-' and the first 12 lowercase hex digits of the SHA-256 of the original id. The directory is a locator only; the runId inside the events stays authoritative.",
+  "cases": [
+    {
+      "runId": "normal-id",
+      "directory": "normal-id-e3bf9924bfdc",
+      "note": "a plain identifier keeps its readable form"
+    },
+    {
+      "runId": "run.with.dots",
+      "directory": "run.with.dots-5219de06265c",
+      "note": "dots are allowed inside the name"
+    },
+    {
+      "runId": "run_with_underscores",
+      "directory": "run_with_underscores-2fc93c78d3e8",
+      "note": "underscores are allowed"
+    },
+    {
+      "runId": "run/with/slashes",
+      "directory": "run_with_slashes-6fc98cc0702f",
+      "note": "separators become underscores"
+    },
+    {
+      "runId": "../escape",
+      "directory": "_._escape-1ba7343c47dc",
+      "note": "a traversal attempt becomes a plain name"
+    },
+    {
+      "runId": "..\\escape",
+      "directory": "_._escape-4f46e4a87bc0",
+      "note": "a backslash traversal attempt becomes a plain name"
+    },
+    {
+      "runId": ".leading-dot",
+      "directory": "_leading-dot-1cd5752d5148",
+      "note": "a leading dot becomes an underscore"
+    },
+    {
+      "runId": "..",
+      "directory": "_.-5ec1f7e700f3",
+      "note": "two dots alone become a plain name"
+    },
+    {
+      "runId": "run:with:colons",
+      "directory": "run_with_colons-e6710db0b969",
+      "note": "colons become underscores"
+    },
+    {
+      "runId": "run/a",
+      "directory": "run_a-c1a7a856f719",
+      "note": "collides with the next two on the readable stem; the hash keeps them apart"
+    },
+    {
+      "runId": "run_a",
+      "directory": "run_a-90a466e2f869",
+      "note": "same readable stem as run/a"
+    },
+    {
+      "runId": "run:a",
+      "directory": "run_a-7ed64a774b24",
+      "note": "same readable stem as run/a"
+    },
+    {
+      "runId": "C:\\evil",
+      "directory": "C__evil-a54598a49a52",
+      "note": "a drive-letter path becomes a plain name"
+    },
+    {
+      "runId": "/absolute/path",
+      "directory": "_absolute_path-b8eb93a82f34",
+      "note": "an absolute path becomes a plain name"
+    },
+    {
+      "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "directory": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-09ecb6ebc8bc",
+      "note": "a long identifier keeps only the first 48 characters of its stem"
+    },
+    {
+      "runId": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "directory": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy-9c62286370de",
+      "note": "the maximum-length identifier"
+    },
+    {
+      "runId": "build-123",
+      "directory": "build-123-383cf9300288",
+      "note": "a typical configured run id"
+    },
+    {
+      "runId": "run-4f1c2e3a-9b8d-4c7e-a6f5-1234567890ab",
+      "directory": "run-4f1c2e3a-9b8d-4c7e-a6f5-1234567890ab-24ce80c35d71",
+      "note": "a generated run id"
+    },
+    {
+      "runId": "-x",
+      "directory": "_x-a420962426d7",
+      "note": "a leading dash becomes an underscore so the name is never read as an option"
+    },
+    {
+      "runId": "--",
+      "directory": "_--d8156bae0c42",
+      "note": "dashes alone become a plain name"
+    },
+    {
+      "runId": "~",
+      "directory": "_-7ace431cb615",
+      "note": "a single unsafe character becomes an underscore"
+    },
+    {
+      "runId": "",
+      "directory": "_-e3b0c44298fc",
+      "note": "an empty stem (not a valid protocol identifier, but reachable through the SDK helper) becomes an underscore"
+    }
+  ]
+}

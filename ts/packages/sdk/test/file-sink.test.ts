@@ -36,6 +36,7 @@ describe('session file names', () => {
     );
     expect(sessionFileName('..')).toMatch(/^_\.-[0-9a-f]{12}\.ndjson$/);
     expect(sessionFileName('.hidden')).toMatch(/^_hidden-/);
+    expect(sessionFileName('-x')).toMatch(/^_x-/u);
     expect(sessionFileName('a/b')).not.toBe(sessionFileName('a_b'));
     expect(sessionFileName('x'.repeat(200)).length).toBe(48 + 1 + 12 + '.ndjson'.length);
     expect(sessionFileName('émoji 🚀')).toMatch(/^_moji__-/);

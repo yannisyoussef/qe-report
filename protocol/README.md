@@ -369,15 +369,33 @@ server; the hash is never a global lookup key.
 ### Run directory
 
 ```
-<run directory>/
-  events/<session file>.ndjson    one file per session, created exclusively by its producer
-  attachments/<sha256>            bytes, shared by every session of the run
+<output root>/
+  runs/
+    <run directory>/
+      events/<session file>.ndjson    one file per session, created exclusively by its producer
+      attachments/<sha256>            bytes, shared by every session of the run
 ```
 
+One physical run directory holds one logical run. The directory configured
+through an adapter (`qe.report.dir`, `QE_REPORT_DIR`, Playwright's `dir`)
+is the output root, and every run below it lives in its own run directory
+named from the `runId`: the id reduced to `[A-Za-z0-9._-]` (a leading
+character that is not a letter, digit, or underscore becomes an
+underscore), at most 48 characters, then `-` and the first 12 hex digits of
+the SHA-256 of the original id, the same contract as session files without
+the extension. Every process reporting into one run resolves
+the same directory from the same `runId`, two runs never share one, and
+the name contains nothing a path could use, so a hostile-looking but valid
+identifier still lands below `runs`. The directory is a locator only: the
+`runId` inside the events is authoritative and is never read back from the
+name. Both SDKs compute the name (`RunDirectories` in Java,
+`resolveRunDirectory` in TypeScript) from the shared corpus under
+[`fixtures/naming/`](fixtures/naming/run-directories.json).
+
 A session file is named from its `sessionId`: the id reduced to
-`[A-Za-z0-9._-]` (a leading dot becomes an underscore), at most 48
-characters, then `-` and the first 12 hex digits of the SHA-256 of the
-original id. The suffix keeps names unique when sanitisation collides, the
+`[A-Za-z0-9._-]` (a leading character that is not a letter, digit, or
+underscore becomes an underscore), at most 48 characters, then `-` and the
+first 12 hex digits of the SHA-256 of the original id. The suffix keeps names unique when sanitisation collides, the
 sanitiser leaves nothing a path could use, and the file name is never
 authoritative: the events inside it carry the `sessionId`. A file holds
 exactly one session. Producers create their file exclusively, so a second
@@ -485,7 +503,10 @@ qe-report-validate <run directory | events file> [--attachments <dir>] [--requir
 A run directory is validated as a whole: every `events/*.ndjson` file as
 one session, then the run-level rules (one `runId`, unique event and
 session ids, at most one `run.finished`, every session finished when the
-run is closed) and the bytes under `attachments/`. A single session file
+run is closed) and the bytes under `attachments/`. The argument is one run
+directory, `<output root>/runs/<run directory>`, not the output root;
+discovering the runs below a root is the read model's job, not the
+validator's. A single session file
 can be validated on its own; attachment bytes are then looked up in the
 `attachments` directory of its run unless `--attachments` names another. A
 declared attachment that is not there is reported as missing.
@@ -522,8 +543,9 @@ version, the unpublished 0.1 and 0.2 lines, session outcomes (a failed,
 inconclusive, or passed session over attempts that say otherwise, a flaky
 test with and without a failing invocation policy, an invocation-level
 setup failure with no attempt, an inconclusive final attempt with and
-without a passed session), and each lifecycle, session-file, and
-attachment violation.
+without a passed session), two run ids in one directory, and each
+lifecycle, session-file, and attachment violation. `naming/` holds the
+run-directory naming corpus.
 
 ## Conceptual mappings (not executed)
 
