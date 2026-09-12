@@ -1,10 +1,10 @@
 {
-  "protocolVersion": "0.2.0",
-  "eventId": "sess-1-0003",
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-1-0011",
   "eventType": "run.finished",
   "runId": "run-ev-0001",
   "sessionId": "sess-1",
-  "sequence": 3,
-  "occurredAt": "2026-09-11T10:00:02.000+00:00",
+  "sequence": 11,
+  "occurredAt": "2026-09-11T10:00:10.000+00:00",
   "payload": {}
 }

@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-1-0005",
+  "eventType": "session.finished",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 5,
+  "occurredAt": "2026-09-11T10:00:04.000+00:00",
+  "payload": {
+    "status": "failed",
+    "failures": []
+  }
+}

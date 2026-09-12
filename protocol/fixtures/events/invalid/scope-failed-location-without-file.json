@@ -1,11 +1,11 @@
 {
-  "protocolVersion": "0.2.0",
-  "eventId": "sess-1-0021",
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-1-0029",
   "eventType": "scope.failed",
   "runId": "run-ev-0001",
   "sessionId": "sess-1",
-  "sequence": 21,
-  "occurredAt": "2026-09-11T10:00:20.000+00:00",
+  "sequence": 29,
+  "occurredAt": "2026-09-11T10:00:28.000+00:00",
   "payload": {
     "path": [
       {

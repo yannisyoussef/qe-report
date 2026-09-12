@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://yannisyoussef.github.io/qe-report/schema/0.2/event.schema.json",
+  "$id": "https://yannisyoussef.github.io/qe-report/schema/0.3/event.schema.json",
   "title": "qe-report protocol event",
-  "description": "One event of the qe-report test reporting protocol, compatibility line 0.2. A run is a sequence of these events, one JSON object per line in a newline-delimited file or stream. Unknown properties are permitted everywhere so that a later minor version can add optional fields; consumers ignore them.",
+  "description": "One event of the qe-report test reporting protocol, compatibility line 0.3. A run is a sequence of these events, one JSON object per line in a newline-delimited file or stream. Unknown properties are permitted everywhere so that a later minor version can add optional fields; consumers ignore them.",
   "type": "object",
   "required": [
     "protocolVersion",
@@ -16,9 +16,9 @@
   ],
   "properties": {
     "protocolVersion": {
-      "description": "Full Semantic Version of the protocol the producer wrote. Compatibility line 0.2 accepts any 0.2.x.",
+      "description": "Full Semantic Version of the protocol the producer wrote. Compatibility line 0.3 accepts any 0.3.x.",
       "type": "string",
-      "pattern": "^0\\.2\\.(0|[1-9][0-9]*)$"
+      "pattern": "^0\\.3\\.(0|[1-9][0-9]*)$"
     },
     "eventId": {
       "description": "Unique within the run. A consumer that sees the same eventId twice treats the second occurrence as a harmless duplicate only if the content is identical.",
@@ -142,6 +142,15 @@
         "passed",
         "failed",
         "skipped",
+        "inconclusive"
+      ]
+    },
+    "sessionStatus": {
+      "description": "Canonical aggregate outcome of one session, as reported by the runner invocation itself: passed (completed with a successful aggregate outcome), failed (completed with a failed aggregate outcome, whether or not a test or scope explains it), inconclusive (completed without a pass/fail verdict, for example interrupted or cancelled). Distinct from the attempt and step status: there is no skipped session, and no expected status applies.",
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
         "inconclusive"
       ]
     },
@@ -384,12 +393,50 @@
     },
     "event.session.finished": {
       "type": "object",
+      "description": "The session emits no further session-scoped event; only run.finished may follow. The payload may carry the runner's aggregate outcome for the completed session. Empty for a producer whose runner exposes no authoritative aggregate outcome; consumers then derive the outcome from attempt and scope facts alone.",
       "properties": {
         "eventType": {
           "const": "session.finished"
         },
         "payload": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/sessionStatus"
+            },
+            "rawStatus": {
+              "$ref": "#/$defs/rawStatus"
+            },
+            "failures": {
+              "description": "Errors that belong to the runner invocation as a whole and to no attempt and no hierarchy scope: a global setup or teardown exception, a runner or plugin hook error. A failed session may carry none.",
+              "$ref": "#/$defs/failures"
+            }
+          },
+          "dependentRequired": {
+            "rawStatus": [
+              "status"
+            ],
+            "failures": [
+              "status"
+            ]
+          },
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "failures"
+              ]
+            }
+          }
         }
       }
     },

@@ -1,0 +1,26 @@
+{
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-1-0007",
+  "eventType": "session.finished",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-1",
+  "sequence": 7,
+  "occurredAt": "2026-09-11T10:00:06.000+00:00",
+  "payload": {
+    "status": "failed",
+    "rawStatus": "failed",
+    "failures": [
+      {
+        "message": "global setup broke",
+        "type": "Error",
+        "stackTrace": "Error: global setup broke\n    at globalSetup (global-setup.ts:3:9)\n",
+        "phase": "setup",
+        "location": {
+          "file": "global-setup.ts",
+          "line": 3,
+          "column": 9
+        }
+      }
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "protocolVersion": "0.2.0",
+  "protocolVersion": "0.3.0",
   "schema": "../schema/event.schema.json",
   "events": {
     "valid": [
@@ -13,6 +13,38 @@
       },
       {
         "file": "events/valid/session-finished.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-passed.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-passed-raw-status.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-failed.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-failed-raw-status-timedout.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-failed-setup-failure.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-failed-teardown-failure.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-inconclusive-raw-status-interrupted.json",
+        "roundTrip": "exact"
+      },
+      {
+        "file": "events/valid/session-finished-boundary-max.json",
         "roundTrip": "exact"
       },
       {
@@ -144,6 +176,12 @@
         "codec": "reject"
       },
       {
+        "file": "events/invalid/unsupported-line-0.1.json",
+        "reason": "UNSUPPORTED_PROTOCOL_VERSION",
+        "pointer": "/protocolVersion",
+        "codec": "reject"
+      },
+      {
         "file": "events/invalid/scope-failed-missing-path.json",
         "reason": "SCHEMA_INVALID",
         "pointer": "/payload",
@@ -214,6 +252,54 @@
         "reason": "SCHEMA_INVALID",
         "pointer": "/payload/path/0",
         "codec": "reject"
+      },
+      {
+        "file": "events/invalid/session-finished-raw-status-without-status.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/session-finished-failures-without-status.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/session-finished-passed-with-failures.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/session-finished-status-unknown.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/status",
+        "codec": "reject"
+      },
+      {
+        "file": "events/invalid/session-finished-failures-too-many.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/session-finished-failures-empty.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/failures",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/session-finished-raw-status-too-long.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/rawStatus",
+        "codec": "accept"
+      },
+      {
+        "file": "events/invalid/session-finished-raw-status-multiline.json",
+        "reason": "SCHEMA_INVALID",
+        "pointer": "/payload/rawStatus",
+        "codec": "accept"
       },
       {
         "file": "events/invalid/unknown-type-not-ignorable.json",
@@ -484,6 +570,7 @@
       "attempts": 12,
       "attachments": 4,
       "failedAttempts": 5,
+      "failedSessions": 2,
       "verdict": "failed"
     },
     {
@@ -603,6 +690,135 @@
       "verdict": "failed"
     },
     {
+      "dir": "runs/session-failed-all-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 0,
+      "failedSessions": 1,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/session-inconclusive-all-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 0,
+      "inconclusiveSessions": 1,
+      "verdict": "inconclusive"
+    },
+    {
+      "dir": "runs/final-attempt-inconclusive",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 0,
+      "verdict": "inconclusive"
+    },
+    {
+      "dir": "runs/inconclusive-attempt-session-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 1,
+      "failedAttempts": 0,
+      "verdict": "inconclusive"
+    },
+    {
+      "dir": "runs/inconclusive-retry-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 0,
+      "verdict": "passed"
+    },
+    {
+      "dir": "runs/unexpected-failure-session-inconclusive",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 1,
+      "failedAttempts": 1,
+      "inconclusiveSessions": 1,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/scope-failed-session-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "scopeFailures": 1,
+      "failedAttempts": 0,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/open-run-session-failed-elsewhere",
+      "outcome": "VALID",
+      "complete": false,
+      "closed": false,
+      "sessions": 2,
+      "attempts": 2,
+      "failedAttempts": 0,
+      "failedSessions": 1,
+      "sessionFailures": 1,
+      "verdict": "incomplete"
+    },
+    {
+      "dir": "runs/all-skipped-session-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 0,
+      "verdict": "passed"
+    },
+    {
+      "dir": "runs/flaky-session-passed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 1,
+      "verdict": "passed"
+    },
+    {
+      "dir": "runs/flaky-session-failed",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 2,
+      "failedAttempts": 1,
+      "failedSessions": 1,
+      "verdict": "failed"
+    },
+    {
+      "dir": "runs/session-failed-with-setup-failure",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 1,
+      "attempts": 0,
+      "failedAttempts": 0,
+      "failedSessions": 1,
+      "sessionFailures": 1,
+      "verdict": "failed"
+    },
+    {
       "dir": "runs/invalid/scope-failed-after-session-finished",
       "outcome": "INVALID",
       "reason": "LIFECYCLE_INVALID",
@@ -624,7 +840,7 @@
       "line": 4
     },
     {
-      "dir": "runs/compat/previous-line-0.1",
+      "dir": "runs/compat/previous-line-0.2",
       "outcome": "INVALID",
       "reason": "UNSUPPORTED_PROTOCOL_VERSION",
       "line": 2
