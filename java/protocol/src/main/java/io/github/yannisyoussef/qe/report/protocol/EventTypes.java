@@ -2,7 +2,7 @@ package io.github.yannisyoussef.qe.report.protocol;
 
 import java.util.Set;
 
-/** The event type names of compatibility line 0.2. */
+/** The event type names of compatibility line 0.3. */
 public final class EventTypes {
   public static final String SESSION_STARTED = "session.started";
   public static final String SESSION_FINISHED = "session.finished";

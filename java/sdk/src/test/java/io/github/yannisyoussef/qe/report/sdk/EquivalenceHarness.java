@@ -13,7 +13,9 @@ import io.github.yannisyoussef.qe.report.protocol.Location;
 import io.github.yannisyoussef.qe.report.protocol.PathSegment;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
 import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
+import io.github.yannisyoussef.qe.report.protocol.SessionFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
+import io.github.yannisyoussef.qe.report.protocol.SessionStatus;
 import io.github.yannisyoussef.qe.report.protocol.Source;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.StepFinished;
@@ -198,6 +200,17 @@ public final class EquivalenceHarness {
                       "after hook failed password=secret",
                       "Error",
                       "at spec.ts:1 token=xyz",
+                      FailurePhase.TEARDOWN,
+                      null))));
+      s.finish(
+          new SessionFinished(
+              SessionStatus.FAILED,
+              "timedout",
+              List.of(
+                  new Failure(
+                      "global teardown failed password=secret",
+                      "Error",
+                      "at global-teardown.ts:2 token=xyz",
                       FailurePhase.TEARDOWN,
                       null))));
       s.finishRun();

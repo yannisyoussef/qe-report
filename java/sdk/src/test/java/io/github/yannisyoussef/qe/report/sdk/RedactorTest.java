@@ -68,7 +68,7 @@ class RedactorTest {
   @Test
   void eventRedactionLeavesStructureAndEnvelopeAlone() {
     String line =
-        "{\"protocolVersion\":\"0.2.0\",\"eventId\":\"e-1\",\"eventType\":\"attempt.finished\","
+        "{\"protocolVersion\":\"0.3.0\",\"eventId\":\"e-1\",\"eventType\":\"attempt.finished\","
             + "\"runId\":\"r\",\"sessionId\":\"s\",\"sequence\":1,\"occurredAt\":\"2026-01-01T00:00:00.000Z\","
             + "\"payload\":{\"attemptId\":\"password=keep-me\",\"status\":\"failed\",\"rawStatus\":\"token=raw\","
             + "\"failures\":[{\"message\":\"Authorization: Bearer abc\",\"type\":\"x\","
@@ -105,7 +105,7 @@ class RedactorTest {
   @Test
   void scopeFailureFreeTextIsRedactedAndStructureIsNot() {
     String line =
-        "{\"protocolVersion\":\"0.2.0\",\"eventId\":\"e-2\",\"eventType\":\"scope.failed\","
+        "{\"protocolVersion\":\"0.3.0\",\"eventId\":\"e-2\",\"eventType\":\"scope.failed\","
             + "\"runId\":\"r\",\"sessionId\":\"s\",\"sequence\":2,\"occurredAt\":\"2026-01-01T00:00:00.000Z\","
             + "\"payload\":{\"path\":[{\"kind\":\"class\",\"name\":\"Suite password=inname\"}],"
             + "\"displayName\":\"token=display\",\"rawStatus\":\"token=raw\","

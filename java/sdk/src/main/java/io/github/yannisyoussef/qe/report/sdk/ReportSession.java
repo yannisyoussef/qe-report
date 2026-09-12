@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -185,7 +186,46 @@ public final class ReportSession implements AutoCloseable {
 
   /** Emits {@code session.finished}. Only {@code run.finished} is accepted afterwards. */
   public boolean finish() {
-    return emit(new SessionFinished());
+    return finish(SessionFinished.empty());
+  }
+
+  /**
+   * Emits {@code session.finished} with the runner's aggregate outcome for this session. For a
+   * runner that exposes none, {@link #finish()} emits the empty payload instead. Only {@code
+   * run.finished} is accepted afterwards.
+   */
+  public boolean finish(SessionFinished outcome) {
+    if (emit(outcome)) {
+      return true;
+    }
+    if (state != State.ACTIVE) {
+      return false;
+    }
+    // Dropped while the session is still active (the outcome exceeded the event limit, or the sink
+    // failed): the session must still close, so the outcome is retried without its failures, then
+    // as the empty payload. Each reduction is reported.
+    if (!outcome.failures().isEmpty()) {
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.EVENT_TOO_LARGE,
+              "session.finished retried without its failures so that the session closes",
+              null));
+      if (emit(new SessionFinished(outcome.status(), outcome.rawStatus(), List.of()))) {
+        return true;
+      }
+      if (state != State.ACTIVE) {
+        return false;
+      }
+    }
+    if (outcome.status() != null) {
+      problems.onProblem(
+          new ReportProblem(
+              ReportProblem.Kind.EVENT_TOO_LARGE,
+              "session.finished retried with an empty payload so that the session closes",
+              null));
+      return emit(SessionFinished.empty());
+    }
+    return false;
   }
 
   /**

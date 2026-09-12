@@ -13,12 +13,14 @@ import io.github.yannisyoussef.qe.report.protocol.AttemptStarted;
 import io.github.yannisyoussef.qe.report.protocol.Component;
 import io.github.yannisyoussef.qe.report.protocol.Event;
 import io.github.yannisyoussef.qe.report.protocol.Failure;
+import io.github.yannisyoussef.qe.report.protocol.FailurePhase;
 import io.github.yannisyoussef.qe.report.protocol.HistoricalIdStability;
 import io.github.yannisyoussef.qe.report.protocol.PathSegment;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
 import io.github.yannisyoussef.qe.report.protocol.RunFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionFinished;
 import io.github.yannisyoussef.qe.report.protocol.SessionStarted;
+import io.github.yannisyoussef.qe.report.protocol.SessionStatus;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.TestCase;
 import java.io.IOException;
@@ -362,5 +364,103 @@ class ReportSessionTest {
     assertEquals(
         Map.of("CI", "true", "DB_URL", "postgres://[REDACTED]@host/db"),
         EnvironmentCapture.fromMap(env, List.of("CI", "DB_URL", "MISSING"), Redactor.defaults()));
+  }
+
+  @Nested
+  class SessionOutcome {
+    @Test
+    void finishWithOutcomeWritesItRedactedAndClosesTheSession(@TempDir Path dir)
+        throws IOException {
+      ReportSession s =
+          ReportSession.builder("run-1", "s-1", FileSink.open(dir, "s-1"))
+              .clock(new TickingClock())
+              .start(SessionStarted.of(new Component("p", "1")));
+      assertTrue(
+          s.finish(
+              new SessionFinished(
+                  SessionStatus.FAILED,
+                  "timedout",
+                  List.of(
+                      new Failure(
+                          "global setup broke Authorization: Bearer abc.def.ghi",
+                          "Error",
+                          "at global-setup.ts:3 password=hunter2",
+                          FailurePhase.SETUP,
+                          null)))));
+      assertFalse(s.finish(), "a second session.finished is dropped");
+      List<Event> events = outcomeEvents(dir);
+      SessionFinished p = assertInstanceOf(SessionFinished.class, events.get(1).payload());
+      assertEquals(SessionStatus.FAILED, p.status());
+      assertEquals("timedout", p.rawStatus());
+      assertEquals("global setup broke Authorization: [REDACTED]", p.failures().get(0).message());
+      assertEquals("at global-setup.ts:3 password=[REDACTED]", p.failures().get(0).stackTrace());
+      assertEquals(FailurePhase.SETUP, p.failures().get(0).phase());
+      s.close();
+    }
+
+    @Test
+    void plainFinishStaysEmpty(@TempDir Path dir) throws IOException {
+      ReportSession s =
+          ReportSession.builder("run-1", "s-1", FileSink.open(dir, "s-1"))
+              .clock(new TickingClock())
+              .start(SessionStarted.of(new Component("p", "1")));
+      assertTrue(s.finish());
+      SessionFinished p =
+          assertInstanceOf(SessionFinished.class, outcomeEvents(dir).get(1).payload());
+      assertEquals(SessionFinished.empty(), p);
+      s.close();
+    }
+
+    private List<Event> outcomeEvents(Path dir) throws IOException {
+      Path file = dir.resolve("events").resolve(SessionFiles.fileName("s-1"));
+      List<Event> out = new ArrayList<>();
+      for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+        if (!line.isBlank()) {
+          out.add(ProtocolJson.read(line));
+        }
+      }
+      return out;
+    }
+
+    @Test
+    void anOversizedOutcomeStillClosesTheSessionWithWhatFits(@TempDir Path dir) throws IOException {
+      List<ReportProblem> problems = new ArrayList<>();
+      ReportSession s = session(dir, problems).maxEventBytes(700).start(PRODUCER);
+      assertTrue(
+          s.finish(
+              new SessionFinished(
+                  SessionStatus.FAILED, "timedout", List.of(Failure.of("x".repeat(2_000))))));
+      assertEquals(ReportSession.State.SESSION_FINISHED, s.state());
+      s.close();
+      SessionFinished p =
+          assertInstanceOf(SessionFinished.class, readEventsOf(dir, "s").get(1).payload());
+      assertEquals(new SessionFinished(SessionStatus.FAILED, "timedout", List.of()), p);
+      assertEquals(
+          List.of(ReportProblem.Kind.EVENT_TOO_LARGE, ReportProblem.Kind.EVENT_TOO_LARGE),
+          problems.stream().map(ReportProblem::kind).toList());
+    }
+
+    private List<Event> readEventsOf(Path dir, String sessionId) throws IOException {
+      Path file = dir.resolve("events").resolve(SessionFiles.fileName(sessionId));
+      List<Event> out = new ArrayList<>();
+      for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+        if (!line.isBlank()) {
+          out.add(ProtocolJson.read(line));
+        }
+      }
+      return out;
+    }
+
+    @Test
+    void theModelRefusesAnOutcomeTheProtocolForbids() {
+      assertThrows(
+          IllegalArgumentException.class, () -> new SessionFinished(null, "failed", List.of()));
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> new SessionFinished(null, null, List.of(Failure.of("x"))));
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> new SessionFinished(SessionStatus.PASSED, null, List.of(Failure.of("x"))));
+    }
   }
 }

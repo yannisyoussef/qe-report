@@ -1,5 +1,5 @@
 /**
- * Model and JSON codec for the qe-report protocol, compatibility line 0.2.
+ * Model and JSON codec for the qe-report protocol, compatibility line 0.3.
  *
  * <p>The JSON Schema in the repository's {@code protocol/schema} directory is the source of truth;
  * these types are checked against it. Everything under {@code internal} is not public API.
