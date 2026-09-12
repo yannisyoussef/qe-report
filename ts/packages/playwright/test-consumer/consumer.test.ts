@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { parseEvent } from 'qe-report-protocol';
+import { resolveRunDirectory } from 'qe-report-sdk';
+import { validateRunDirectory } from 'qe-report-validator';
 import { dirname, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -264,11 +267,12 @@ describe('qe-report-playwright consumer', () => {
   });
 
   it('runs shards as sessions of one run without run.finished', async () => {
-    const runDir = freshDir('shards');
-    const first = await runPlaywright({ runDir, runId: 'run-shards', args: ['--shard=1/2'] });
-    const second = await runPlaywright({ runDir, runId: 'run-shards', args: ['--shard=2/2'] });
+    const outputRoot = freshDir('shards');
+    const first = await runPlaywright({ outputRoot, runId: 'run-shards', args: ['--shard=1/2'] });
+    const second = await runPlaywright({ outputRoot, runId: 'run-shards', args: ['--shard=2/2'] });
     noErrors(second);
-    expect(readdirSync(join(runDir, 'events'))).toHaveLength(2);
+    expect(readdirSync(join(second.runDir, 'events'))).toHaveLength(2);
+    expect(second.runDirs).toEqual([second.runDir]);
     expect(second.report.summary).toMatchObject({
       sessions: 2,
       files: 2,
@@ -290,14 +294,14 @@ describe('qe-report-playwright consumer', () => {
   });
 
   it('derives a passed run from shards that all passed', async () => {
-    const runDir = freshDir('shards-passed');
+    const outputRoot = freshDir('shards-passed');
     await runPlaywright({
-      runDir,
+      outputRoot,
       runId: 'run-shards-passed',
       args: ['pass.spec.ts', '--shard=1/2'],
     });
     const run = await runPlaywright({
-      runDir,
+      outputRoot,
       runId: 'run-shards-passed',
       args: ['pass.spec.ts', '--shard=2/2'],
     });
@@ -310,10 +314,10 @@ describe('qe-report-playwright consumer', () => {
   });
 
   it('derives an inconclusive run from an interrupted shard beside a passed one', async () => {
-    const runDir = freshDir('shards-mixed');
+    const outputRoot = freshDir('shards-mixed');
     const interrupted = await runPlaywright({
       config: 'configs/slow.config.ts',
-      runDir,
+      outputRoot,
       runId: 'run-shards-mixed',
       args: ['--shard=1/2'],
       interruptWhenStarted: true,
@@ -321,7 +325,7 @@ describe('qe-report-playwright consumer', () => {
     expect(interrupted.playwright?.status).toBe('interrupted');
     const run = await runPlaywright({
       config: 'configs/slow.config.ts',
-      runDir,
+      outputRoot,
       runId: 'run-shards-mixed',
       args: ['--shard=2/2'],
     });
@@ -344,8 +348,9 @@ describe('qe-report-playwright consumer', () => {
       env: { OPTIONS_DIR: optionsDir, QE_REPORT_SESSION_ID: 'session-from-env' },
       args: ['pass.spec.ts'],
     });
-    expect(existsSync(join(run.runDir, 'events'))).toBe(false);
-    const files = readdirSync(join(optionsDir, 'events'));
+    expect(run.runDirs).toEqual([]);
+    const optionsRun = resolveRunDirectory(optionsDir, 'run-from-options');
+    const files = readdirSync(join(optionsRun, 'events'));
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^session-from-options-/u);
     const rerun = await runPlaywright({
@@ -356,13 +361,45 @@ describe('qe-report-playwright consumer', () => {
     expect(rerun.diagnostics.join('\n')).toContain('EEXIST');
   });
 
+  it('keeps two sequential default invocations in two run directories under one root', async () => {
+    const outputRoot = freshDir('sequential');
+    const first = await runPlaywright({
+      outputRoot,
+      args: ['pass.spec.ts', '--project', 'desktop'],
+    });
+    const second = await runPlaywright({
+      outputRoot,
+      args: ['pass.spec.ts', '--project', 'desktop'],
+    });
+    expect(first.runDirs).toHaveLength(1);
+    expect(second.runDirs).toHaveLength(2);
+    const runIds = new Set<string>();
+    for (const dir of second.runDirs) {
+      const report = await validateRunDirectory(dir, { requireComplete: true });
+      expect(report.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+      expect(report.summary).toMatchObject({
+        sessions: 1,
+        attempts: 3,
+        closed: true,
+        verdict: 'passed',
+      });
+      const files = readdirSync(join(dir, 'events'));
+      expect(files).toHaveLength(1);
+      const line = readFileSync(join(dir, 'events', files[0] ?? ''), 'utf8').split('\n')[0] ?? '';
+      const runId = parseEvent(line).runId;
+      expect(dir).toBe(resolveRunDirectory(outputRoot, runId));
+      runIds.add(runId);
+    }
+    expect(runIds.size).toBe(2);
+  });
+
   it('writes nothing when disabled', async () => {
     const run = await runPlaywright({
       env: { QE_REPORT_ENABLED: 'false' },
       args: ['pass.spec.ts'],
     });
     expect(run.exitCode).toBe(0);
-    expect(existsSync(run.runDir)).toBe(false);
+    expect(existsSync(run.outputRoot)).toBe(false);
     expect(run.diagnostics).toEqual([]);
   });
 

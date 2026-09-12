@@ -30,17 +30,25 @@ interface Expectations {
   closed: boolean;
 }
 
-const names = existsSync(RUNS)
-  ? readdirSync(RUNS).filter((n) => existsSync(join(RUNS, n, 'expectations.json')))
+/** Each consumer build wrote its runs under `<name>/runs/<run directory>`; every one validates alone. */
+const runDirs: { name: string; dir: string }[] = existsSync(RUNS)
+  ? readdirSync(RUNS).flatMap((name) => {
+      const runs = join(RUNS, name, 'runs');
+      if (!existsSync(runs)) return [];
+      return readdirSync(runs)
+        .filter((d) => existsSync(join(runs, d, 'expectations.json')))
+        .map((d) => ({ name: `${name}/${d}`, dir: join(runs, d) }));
+    })
   : [];
 
 describe('consumer fixture runs', () => {
   it('exist (run ./gradlew :junit-platform:test first)', () => {
-    expect(names.sort()).toEqual(['gradle', 'maven']);
+    const groups = new Set(runDirs.map((r) => r.name.split('/')[0]));
+    expect([...groups].sort()).toEqual(['gradle', 'gradle-isolated', 'maven']);
+    expect(runDirs.filter((r) => r.name.startsWith('gradle-isolated/'))).toHaveLength(3);
   });
-  for (const name of names) {
+  for (const { name, dir } of runDirs) {
     it(`${name} validates as a complete, open run with the observed counts and verdict`, async () => {
-      const dir = join(RUNS, name);
       const expected = JSON.parse(
         readFileSync(join(dir, 'expectations.json'), 'utf8'),
       ) as Expectations;

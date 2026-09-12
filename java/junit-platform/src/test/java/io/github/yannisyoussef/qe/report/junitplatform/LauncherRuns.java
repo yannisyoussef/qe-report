@@ -10,6 +10,7 @@ import io.github.yannisyoussef.qe.report.protocol.Event;
 import io.github.yannisyoussef.qe.report.protocol.ProtocolJson;
 import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.testing.Schemas;
+import io.github.yannisyoussef.qe.report.sdk.RunDirectories;
 import io.github.yannisyoussef.qe.report.sdk.SessionFiles;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -44,8 +45,13 @@ final class LauncherRuns {
 
   record Result(
       Path dir, String sessionId, List<Event> events, String log, TestExecutionSummary summary) {
+    /** The run directory this run resolved to, below the output root {@code dir}. */
+    Path runDir() {
+      return RunDirectories.resolve(dir, RUN_ID);
+    }
+
     Path eventFile() {
-      return dir.resolve("events").resolve(SessionFiles.fileName(sessionId));
+      return runDir().resolve("events").resolve(SessionFiles.fileName(sessionId));
     }
 
     Map<String, Attempt> attempts() {
@@ -95,7 +101,7 @@ final class LauncherRuns {
           try {
             out.add(
                 Files.readString(
-                    dir.resolve("attachments").resolve(a.sha256()), StandardCharsets.UTF_8));
+                    runDir().resolve("attachments").resolve(a.sha256()), StandardCharsets.UTF_8));
           } catch (java.io.IOException ex) {
             throw new java.io.UncheckedIOException(ex);
           }
@@ -170,7 +176,10 @@ final class LauncherRuns {
             new TickingClock(),
             new PrintStream(logBytes, true, StandardCharsets.UTF_8));
     TestExecutionSummary summary = execute(listener, configuration, classes);
-    Path file = dir.resolve("events").resolve(SessionFiles.fileName(sessionId));
+    Path file =
+        RunDirectories.resolve(dir, RUN_ID)
+            .resolve("events")
+            .resolve(SessionFiles.fileName(sessionId));
     List<Event> events = new ArrayList<>();
     if (Files.exists(file)) {
       try {

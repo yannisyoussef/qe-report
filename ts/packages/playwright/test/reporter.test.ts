@@ -38,7 +38,15 @@ function temp(): string {
   return mkdtempSync(join(tmpdir(), 'qe-pw-'));
 }
 
-function events(dir: string): (Event | UnknownEvent)[] {
+/** The single run directory written below the output root. */
+function runDir(root: string): string {
+  const runs = readdirSync(join(root, 'runs'));
+  expect(runs).toHaveLength(1);
+  return join(root, 'runs', runs[0] ?? '');
+}
+
+function events(root: string): (Event | UnknownEvent)[] {
+  const dir = runDir(root);
   const files = readdirSync(join(dir, 'events'));
   expect(files).toHaveLength(1);
   return readFileSync(join(dir, 'events', files[0] ?? ''), 'utf8')
@@ -75,13 +83,14 @@ describe('QeReportReporter isolation', () => {
 
   it('refuses a session id whose file already exists', () => {
     const dir = temp();
-    const first = reporter({ dir, sessionId: 'same' });
+    // The same run id resolves the same run directory; only then can the session file collide.
+    const first = reporter({ dir, runId: 'run-same', sessionId: 'same' });
     first.begin();
     first.r.onEnd(fullResult('passed'));
-    const second = reporter({ dir, sessionId: 'same' });
+    const second = reporter({ dir, runId: 'run-same', sessionId: 'same' });
     second.begin();
     expect(second.lines.join('\n')).toContain('EEXIST');
-    expect(readdirSync(join(dir, 'events'))).toHaveLength(1);
+    expect(readdirSync(join(runDir(dir), 'events'))).toHaveLength(1);
   });
 
   it('records the attempt when an attachment is missing or too large, and says so once', () => {
@@ -217,7 +226,7 @@ describe('QeReportReporter isolation', () => {
     const { lines, begin } = reporter({ dir }, { env: { QE_REPORT_RUN_ID: 'bad id' } });
     begin();
     expect(lines.filter((l) => l.includes("run id 'bad id'"))).toHaveLength(1);
-    expect(existsSync(join(dir, 'events'))).toBe(true);
+    expect(existsSync(join(dir, 'runs'))).toBe(true);
   });
 
   it("records Playwright's aggregate status as the session outcome", () => {

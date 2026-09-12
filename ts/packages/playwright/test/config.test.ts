@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { resolveRunDirectory } from 'qe-report-sdk';
 import { resolveConfig } from '../src/config.js';
 
 const cwd = '/work/project';
@@ -8,7 +9,9 @@ describe('resolveConfig', () => {
   it('defaults to an enabled run of its own under qe-report', () => {
     const c = resolveConfig(undefined, { env: {}, cwd });
     expect(c.enabled).toBe(true);
-    expect(c.dir).toBe(resolve(cwd, 'qe-report'));
+    expect(c.outputRoot).toBe(resolve(cwd, 'qe-report'));
+    expect(c.runDirectory).toBe(resolveRunDirectory(resolve(cwd, 'qe-report'), c.runId));
+    expect(c.runDirectory.startsWith(join(resolve(cwd, 'qe-report'), 'runs'))).toBe(true);
     expect(c.runIdGenerated).toBe(true);
     expect(c.runId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(c.sessionId).toMatch(/^pw-\d+-[0-9a-f]{8}$/u);
@@ -24,7 +27,8 @@ describe('resolveConfig', () => {
     };
     const fromEnv = resolveConfig(undefined, { env, cwd });
     expect(fromEnv.enabled).toBe(false);
-    expect(fromEnv.dir).toBe(resolve(cwd, 'out/qe'));
+    expect(fromEnv.outputRoot).toBe(resolve(cwd, 'out/qe'));
+    expect(fromEnv.runDirectory).toBe(resolveRunDirectory(resolve(cwd, 'out/qe'), 'run-env'));
     expect(fromEnv.runId).toBe('run-env');
     expect(fromEnv.runIdGenerated).toBe(false);
     expect(fromEnv.sessionId).toBe('session-env');
@@ -33,9 +37,24 @@ describe('resolveConfig', () => {
       { env, cwd },
     );
     expect(fromOptions.enabled).toBe(true);
-    expect(fromOptions.dir).toBe('/abs/dir');
+    expect(fromOptions.outputRoot).toBe('/abs/dir');
+    expect(fromOptions.runDirectory).toBe(resolveRunDirectory('/abs/dir', 'run-opt'));
     expect(fromOptions.runId).toBe('run-opt');
     expect(fromOptions.sessionId).toBe('session-opt');
+  });
+
+  it('resolves one run directory per run id under the root, never one for two', () => {
+    const a = resolveConfig({ dir: '/out', runId: 'build-123' }, { env: {}, cwd });
+    const b = resolveConfig(
+      { dir: '/out', runId: 'build-123', sessionId: 'shard-2' },
+      { env: {}, cwd },
+    );
+    const c = resolveConfig({ dir: '/out', runId: 'build-124' }, { env: {}, cwd });
+    expect(a.runDirectory).toBe(b.runDirectory);
+    expect(a.runDirectory).not.toBe(c.runDirectory);
+    const g1 = resolveConfig({ dir: '/out' }, { env: {}, cwd });
+    const g2 = resolveConfig({ dir: '/out' }, { env: {}, cwd });
+    expect(g1.runDirectory).not.toBe(g2.runDirectory);
   });
 
   it('names a shard in a generated session id', () => {

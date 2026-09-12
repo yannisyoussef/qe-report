@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.yannisyoussef.qe.report.junitplatform.internal.AdapterConfig;
+import io.github.yannisyoussef.qe.report.sdk.RunDirectories;
 import io.github.yannisyoussef.qe.report.sdk.SessionFiles;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -58,20 +59,23 @@ class FailureIsolationTest {
 
   @Test
   void sessionFileAlreadyExists(@TempDir Path dir) throws Exception {
-    Files.createDirectories(dir.resolve("events"));
-    Files.writeString(dir.resolve("events").resolve(SessionFiles.fileName("s")), "{}\n");
+    Files.createDirectories(RunDirectories.resolve(dir, "r").resolve("events"));
+    Files.writeString(
+        RunDirectories.resolve(dir, "r").resolve("events").resolve(SessionFiles.fileName("s")),
+        "{}\n");
     Outcome o = run(new AdapterConfig(true, dir, "r", "s", List.of()), System::nanoTime);
     assertResultsUntouched(o);
     assertTrue(o.log().contains("cannot start reporting"), o.log());
     assertEquals(
         "{}\n",
-        Files.readString(dir.resolve("events").resolve(SessionFiles.fileName("s"))),
+        Files.readString(
+            RunDirectories.resolve(dir, "r").resolve("events").resolve(SessionFiles.fileName("s"))),
         "the existing file is never touched");
   }
 
   @Test
   void attachmentCannotBeWritten(@TempDir Path dir) throws Exception {
-    Path attachments = dir.resolve("attachments");
+    Path attachments = RunDirectories.resolve(dir, "r").resolve("attachments");
     Files.createDirectories(attachments);
     assertTrue(attachments.toFile().setWritable(false, false), "test needs a read-only directory");
     try {
@@ -88,7 +92,10 @@ class FailureIsolationTest {
       String text = log.toString(StandardCharsets.UTF_8);
       assertTrue(text.contains("SINK_FAILURE: cannot store attachment"), text);
       List<String> lines =
-          Files.readAllLines(dir.resolve("events").resolve(SessionFiles.fileName("s")));
+          Files.readAllLines(
+              RunDirectories.resolve(dir, "r")
+                  .resolve("events")
+                  .resolve(SessionFiles.fileName("s")));
       assertTrue(
           lines.stream().anyMatch(l -> l.contains("\"attempt.finished\"")),
           "the attempt still finished");
@@ -116,7 +123,11 @@ class FailureIsolationTest {
     assertResultsUntouched(o);
     assertTrue(o.log().contains("unrecognised value 'maybe'"), o.log());
     assertTrue(
-        Files.exists(dir.resolve("events").resolve(SessionFiles.fileName(config.sessionId()))));
+        Files.exists(
+            config
+                .runDirectory()
+                .resolve("events")
+                .resolve(SessionFiles.fileName(config.sessionId()))));
   }
 
   @Test
@@ -136,7 +147,8 @@ class FailureIsolationTest {
             .filter(l -> l.contains("internal error while reporting an execution start"))
             .count());
     List<String> lines =
-        Files.readAllLines(dir.resolve("events").resolve(SessionFiles.fileName("s")));
+        Files.readAllLines(
+            RunDirectories.resolve(dir, "r").resolve("events").resolve(SessionFiles.fileName("s")));
     assertTrue(lines.get(0).contains("\"session.started\""));
     assertTrue(
         lines.get(lines.size() - 1).contains("\"session.finished\""),
@@ -148,6 +160,6 @@ class FailureIsolationTest {
     Outcome o = run(new AdapterConfig(false, dir, "r", "s", List.of()), System::nanoTime);
     assertResultsUntouched(o);
     assertTrue(o.log().contains("reporting is disabled"), o.log());
-    assertFalse(Files.exists(dir.resolve("events")));
+    assertFalse(Files.exists(dir.resolve("runs")));
   }
 }

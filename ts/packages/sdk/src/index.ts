@@ -16,6 +16,7 @@ export {
   type FileSinkOptions,
 } from './file-sink.js';
 export { sessionFileName } from './session-file.js';
+export { runDirectoryName, resolveRunDirectory, RUNS_DIR } from './run-directory.js';
 export {
   ReportSession,
   standardErrorProblemHandler,

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.yannisyoussef.qe.report.junitplatform.internal.AdapterConfig;
+import io.github.yannisyoussef.qe.report.sdk.RunDirectories;
 import io.github.yannisyoussef.qe.report.sdk.SessionFiles;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,7 +25,10 @@ class DiscoveryTest {
         () -> {
           Launcher launcher = LauncherFactory.create();
           launcher.execute(LauncherRuns.request(Map.of(), qe.fixtures.PassingTests.class));
-          Path file = dir.resolve("events").resolve(SessionFiles.fileName("discovered"));
+          Path file =
+              RunDirectories.resolve(dir, "run-discovery")
+                  .resolve("events")
+                  .resolve(SessionFiles.fileName("discovered"));
           assertTrue(Files.exists(file), "session file written by the auto-registered listener");
         });
   }
@@ -42,7 +46,7 @@ class DiscoveryTest {
                       .build());
           launcher.execute(LauncherRuns.request(Map.of(), qe.fixtures.PassingTests.class));
           assertFalse(
-              Files.exists(dir.resolve("events")),
+              Files.exists(dir.resolve(RunDirectories.RUNS_DIR)),
               "nothing is written when the listener is not registered");
         });
   }

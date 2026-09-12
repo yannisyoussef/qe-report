@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseEvent, stringifyEvent } from 'qe-report-protocol';
-import { AttachmentTooLargeError, FileSink, sessionFileName } from '../src/index.js';
+import {
+  AttachmentTooLargeError,
+  FileSink,
+  runDirectoryName,
+  sessionFileName,
+} from '../src/index.js';
 
 const dirs: string[] = [];
 const temp = (): string => {
@@ -36,9 +41,16 @@ describe('session file names', () => {
     );
     expect(sessionFileName('..')).toMatch(/^_\.-[0-9a-f]{12}\.ndjson$/);
     expect(sessionFileName('.hidden')).toMatch(/^_hidden-/);
+    expect(sessionFileName('-x')).toMatch(/^_x-/u);
     expect(sessionFileName('a/b')).not.toBe(sessionFileName('a_b'));
     expect(sessionFileName('x'.repeat(200)).length).toBe(48 + 1 + 12 + '.ndjson'.length);
     expect(sessionFileName('émoji 🚀')).toMatch(/^_moji__-/);
+    expect(sessionFileName('CON.foo'), 'a reserved device basename is neutralised').toMatch(
+      /^_ON\.foo-/u,
+    );
+    expect(sessionFileName('nul')).toMatch(/^_ul-/u);
+    expect(sessionFileName('CONSOLE')).toMatch(/^CONSOLE-/u);
+    expect(sessionFileName('COM1.log')).toBe(`${runDirectoryName('COM1.log')}.ndjson`);
   });
 });
 

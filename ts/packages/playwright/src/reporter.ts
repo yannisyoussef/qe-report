@@ -148,7 +148,7 @@ export class QeReportReporter implements Reporter {
       if (!cfg.enabled) return;
       const shard = config.shard;
       try {
-        const sink = this.openSink(cfg.dir, cfg.sessionId, cfg.maxAttachmentBytes);
+        const sink = this.openSink(cfg.runDirectory, cfg.sessionId, cfg.maxAttachmentBytes);
         this.session = ReportSession.start(
           {
             runId: cfg.runId,
@@ -169,14 +169,14 @@ export class QeReportReporter implements Reporter {
       } catch (e) {
         this.diagnostics.once(
           'start-failed',
-          `cannot open run directory ${cfg.dir} for session ${cfg.sessionId}: ${describe(e)}; this run is not reported`,
+          `cannot open run directory ${cfg.runDirectory} for session ${cfg.sessionId}: ${describe(e)}; this run is not reported`,
         );
         return;
       }
       this.config = cfg;
       this.diagnostics.once(
         'started',
-        `writing run ${cfg.runId} session ${cfg.sessionId} to ${cfg.dir}`,
+        `writing run ${cfg.runId} session ${cfg.sessionId} to ${cfg.runDirectory}`,
       );
     });
   }

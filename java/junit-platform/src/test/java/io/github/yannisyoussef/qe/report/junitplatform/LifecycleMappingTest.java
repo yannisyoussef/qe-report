@@ -416,7 +416,7 @@ class LifecycleMappingTest {
       assertEquals("text/plain", att.mediaType());
       String text =
           Files.readString(
-              run.dir().resolve("attachments").resolve(att.sha256()), StandardCharsets.UTF_8);
+              run.runDir().resolve("attachments").resolve(att.sha256()), StandardCharsets.UTF_8);
       assertTrue(text.startsWith("timestamp: "), text);
       assertFalse(text.contains("abc.def.ghi"), text);
     }

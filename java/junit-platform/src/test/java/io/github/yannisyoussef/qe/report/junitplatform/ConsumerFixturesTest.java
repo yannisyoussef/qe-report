@@ -10,6 +10,7 @@ import io.github.yannisyoussef.qe.report.protocol.ScopeFailed;
 import io.github.yannisyoussef.qe.report.protocol.Status;
 import io.github.yannisyoussef.qe.report.protocol.testing.Corpus;
 import io.github.yannisyoussef.qe.report.protocol.testing.Schemas;
+import io.github.yannisyoussef.qe.report.sdk.RunDirectories;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -25,8 +26,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Real consumer builds resolve the adapter from the build-local repository and discover it through
- * ServiceLoader. Each fork of the consumer becomes one session of one run directory, which the
- * TypeScript validator checks afterwards from {@code build/consumer-runs}.
+ * ServiceLoader. With a shared run id each fork becomes one session of one run directory; without
+ * one, each fork is a run of its own in its own directory below the root. The TypeScript validator
+ * checks every run directory afterwards from {@code build/consumer-runs}.
  */
 @Tag("consumer")
 class ConsumerFixturesTest {
@@ -116,8 +118,85 @@ class ConsumerFixturesTest {
     return output;
   }
 
+  /**
+   * Every fork without a configured run id is a run of its own: three forks, three run directories
+   * under one output root, one session and one run id each.
+   */
+  @Test
+  void gradleForksWithoutARunIdAreIsolatedRuns() throws Exception {
+    Path root = fresh("gradle-isolated");
+    Path cache = Files.createTempDirectory("qe-gradle-cache");
+    List<String> command =
+        List.of(
+            System.getProperty("qe.gradleWrapper"),
+            "-p",
+            FIXTURES.resolve("gradle").toString(),
+            "test",
+            "--no-daemon",
+            "-q",
+            "--project-cache-dir",
+            cache.toString(),
+            "-Pqe.localRepo=" + LOCAL_REPO,
+            "-Pqe.report.dir=" + root);
+    execute(command, FIXTURES.resolve("gradle"));
+    List<Path> runDirs;
+    try (Stream<Path> s = Files.list(root.resolve(RunDirectories.RUNS_DIR))) {
+      runDirs = s.sorted().toList();
+    }
+    assertEquals(GRADLE_FORKS, runDirs.size(), "one run directory per fork: " + runDirs);
+    Set<String> runIds = new HashSet<>();
+    int attempts = 0;
+    for (Path run : runDirs) {
+      List<Path> files = Corpus.sessionFiles(run);
+      assertEquals(1, files.size(), "one session per isolated run: " + files);
+      Set<String> inRun = new HashSet<>();
+      int runAttempts = 0;
+      int failed = 0;
+      int scopes = 0;
+      for (String line : Corpus.lines(files.get(0))) {
+        Event e = ProtocolJson.read(line);
+        inRun.add(e.runId());
+        if (e.payload() instanceof AttemptFinished f) {
+          runAttempts++;
+          if (f.status() == Status.FAILED) {
+            failed++;
+          }
+        } else if (e.payload() instanceof ScopeFailed) {
+          scopes++;
+        }
+      }
+      assertEquals(1, inRun.size(), "one run id per run directory");
+      String runId = inRun.iterator().next();
+      assertEquals(run, RunDirectories.resolve(root, runId), "the directory is the run's own");
+      runIds.addAll(inRun);
+      attempts += runAttempts;
+      Files.writeString(
+          run.resolve("expectations.json"),
+          expectations(1, runAttempts, failed, scopes, failed > 0 || scopes > 0),
+          StandardCharsets.UTF_8);
+    }
+    assertEquals(GRADLE_FORKS, runIds.size(), "every fork generated its own run id");
+    assertEquals(CLASSES * ATTEMPTS_PER_CLASS, attempts);
+  }
+
+  private static String expectations(
+      int sessions, int attempts, int failedAttempts, int scopeFailures, boolean failed) {
+    return "{\"sessions\": "
+        + sessions
+        + ", \"attempts\": "
+        + attempts
+        + ", \"failedAttempts\": "
+        + failedAttempts
+        + ", \"scopeFailures\": "
+        + scopeFailures
+        + ", \"verdict\": \""
+        + (failed ? "failed" : "passed")
+        + "\", \"closed\": false}\n";
+  }
+
   /** Structural checks in Java; the TypeScript validator checks the same directory in CI. */
-  private static void assertRun(Path run, int expectedSessions, String runId) throws IOException {
+  private static void assertRun(Path root, int expectedSessions, String runId) throws IOException {
+    Path run = RunDirectories.resolve(root, runId);
     List<Path> files = Corpus.sessionFiles(run);
     assertEquals(expectedSessions, files.size(), "one session file per fork: " + files);
     Set<String> sessions = new HashSet<>();
