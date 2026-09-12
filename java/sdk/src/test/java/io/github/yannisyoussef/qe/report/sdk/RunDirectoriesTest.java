@@ -19,6 +19,20 @@ import org.junit.jupiter.api.TestFactory;
 class RunDirectoriesTest {
   private static final Pattern SAFE =
       Pattern.compile("^[A-Za-z0-9_][A-Za-z0-9._-]{0,47}-[0-9a-f]{12}$");
+  private static final Pattern RESERVED_DEVICE =
+      Pattern.compile("^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|$)", Pattern.CASE_INSENSITIVE);
+
+  /**
+   * What every generated component must satisfy, whatever the identifier. The reserved-name check
+   * runs on the stem, before the hash suffix, because a bare reserved stem is followed by the
+   * suffix's dash in the full name and would pass the check for the wrong reason.
+   */
+  private static void assertPortable(String name, String id) {
+    assertTrue(SAFE.matcher(name).matches(), id + " -> " + name);
+    String stem = name.substring(0, name.length() - 1 - SafeNames.HASH_LENGTH);
+    assertFalse(RESERVED_DEVICE.matcher(stem).find(), id + " -> " + name);
+    assertFalse(name.endsWith(".") || name.endsWith(" "), id + " -> " + name);
+  }
 
   @TestFactory
   List<DynamicTest> namingContractCorpus() {
@@ -33,7 +47,7 @@ class RunDirectoriesTest {
               () -> {
                 String name = RunDirectories.directoryName(runId);
                 assertEquals(c.get("directory").asText(), name);
-                assertTrue(SAFE.matcher(name).matches(), name);
+                assertPortable(name, runId);
                 assertEquals(
                     Path.of("out", "runs", name), RunDirectories.resolve(Path.of("out"), runId));
               }));
@@ -57,12 +71,20 @@ class RunDirectoriesTest {
             "....//x",
             "x/../../y",
             "~/home",
-            "a b")) {
+            "a b",
+            "CON",
+            "con.",
+            "NUL.txt",
+            "COM1/x",
+            "lpt9.a.b",
+            ".CON")) {
       Path dir = RunDirectories.resolve(root, id).toAbsolutePath().normalize();
       assertTrue(dir.startsWith(runs), id);
       assertEquals(runs, dir.getParent(), id);
-      assertFalse(dir.getFileName().toString().contains("/"), id);
-      assertFalse(dir.getFileName().toString().contains("\\"), id);
+      String name = dir.getFileName().toString();
+      assertFalse(name.contains("/"), id);
+      assertFalse(name.contains("\\"), id);
+      assertPortable(name, id);
     }
   }
 

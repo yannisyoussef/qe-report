@@ -5,11 +5,12 @@ import { safeStem, shortHash } from './safe-name.js';
 export const RUNS_DIR = 'runs';
 
 /**
- * The directory name for a run: the runId reduced to `[A-Za-z0-9._-]` (a leading character that
- * is not a letter, digit, or underscore becomes one), at most 48 characters, then `-` and the first 12 hex digits of the SHA-256 of the
- * original id. The same contract as session file names, without the extension; the Java SDK
- * computes the same name. The directory is a locator only: the runId inside the events stays
- * authoritative and is never read back from the name.
+ * The directory name for a run: the runId reduced to `[A-Za-z0-9._-]`, a leading character that
+ * is not a letter, digit, or underscore replaced by one, cut to 48 characters, a reserved device
+ * basename such as `CON` or `NUL.txt` then neutralised the same way, and `-` plus the first 12 hex
+ * digits of the SHA-256 of the original id appended. The same contract as session file names,
+ * without the extension; the Java SDK computes the same name. The directory is a locator only:
+ * the runId inside the events stays authoritative and is never read back from the name.
  */
 export function runDirectoryName(runId: string): string {
   return `${safeStem(runId)}-${shortHash(runId)}`;

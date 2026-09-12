@@ -22,10 +22,12 @@ public final class RunDirectories {
   private RunDirectories() {}
 
   /**
-   * The directory name for a run: the runId reduced to {@code [A-Za-z0-9._-]} (a leading character
-   * that is not a letter, digit, or underscore becomes one), at most 48 characters, then {@code -}
-   * and the first 12 hex digits of the SHA-256 of the original id. The same contract as session
-   * file names, without the extension; the TypeScript SDK computes the same name.
+   * The directory name for a run: the runId reduced to {@code [A-Za-z0-9._-]}, a leading character
+   * that is not a letter, digit, or underscore replaced by one, cut to 48 characters, a reserved
+   * device basename such as {@code CON} or {@code NUL.txt} then neutralised the same way, and
+   * {@code -} plus the first 12 hex digits of the SHA-256 of the original id appended. The same
+   * contract as session file names, without the extension; the TypeScript SDK computes the same
+   * name.
    */
   public static String directoryName(String runId) {
     return SafeNames.stem(runId) + "-" + SafeNames.hash(runId);

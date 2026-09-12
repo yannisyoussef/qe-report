@@ -11,6 +11,8 @@ import java.util.regex.Pattern;
  */
 final class SafeNames {
   private static final Pattern UNSAFE = Pattern.compile("[^A-Za-z0-9._-]");
+  private static final Pattern RESERVED_DEVICE =
+      Pattern.compile("^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|$)", Pattern.CASE_INSENSITIVE);
   static final int MAX_STEM = 48;
   static final int HASH_LENGTH = 12;
 
@@ -19,7 +21,10 @@ final class SafeNames {
   /**
    * The identifier reduced to {@code [A-Za-z0-9._-]}, at most 48 characters, starting with a
    * letter, digit, or underscore: a leading dot or dash is replaced, so the name is never hidden
-   * and never read as an option, and an empty stem becomes an underscore.
+   * and never read as an option, and an empty stem becomes an underscore. A stem that is a reserved
+   * device basename ({@code CON}, {@code PRN}, {@code AUX}, {@code NUL}, {@code COM1} to {@code
+   * COM9}, {@code LPT1} to {@code LPT9}, in any case, alone or followed by an extension) has its
+   * first character replaced as well, so the name is portable across filesystems.
    */
   static String stem(String id) {
     String safe = UNSAFE.matcher(id).replaceAll("_");
@@ -30,7 +35,13 @@ final class SafeNames {
     if (!(Character.isLetterOrDigit(first) && first < 128) && first != '_') {
       safe = "_" + safe.substring(1);
     }
-    return safe.length() > MAX_STEM ? safe.substring(0, MAX_STEM) : safe;
+    if (safe.length() > MAX_STEM) {
+      safe = safe.substring(0, MAX_STEM);
+    }
+    if (RESERVED_DEVICE.matcher(safe).find()) {
+      safe = "_" + safe.substring(1);
+    }
+    return safe;
   }
 
   /** The first 12 lowercase hex digits of the SHA-256 of the original identifier. */

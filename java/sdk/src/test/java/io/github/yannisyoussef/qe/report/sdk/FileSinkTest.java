@@ -48,6 +48,13 @@ class FileSinkTest {
     assertFalse(SessionFiles.fileName("a/b").equals(SessionFiles.fileName("a_b")));
     assertEquals(48 + 1 + 12 + ".ndjson".length(), SessionFiles.fileName("x".repeat(200)).length());
     assertTrue(SessionFiles.fileName("émoji 🚀").startsWith("_moji__-"));
+    assertTrue(
+        SessionFiles.fileName("CON.foo").startsWith("_ON.foo-"),
+        "a reserved device basename is neutralised by the shared stem rule");
+    assertTrue(SessionFiles.fileName("nul").startsWith("_ul-"));
+    assertTrue(SessionFiles.fileName("CONSOLE").startsWith("CONSOLE-"));
+    assertEquals(
+        RunDirectories.directoryName("COM1.log") + ".ndjson", SessionFiles.fileName("COM1.log"));
   }
 
   @Test
