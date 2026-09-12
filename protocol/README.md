@@ -1,7 +1,7 @@
 # qe-report protocol
 
 A language-neutral description of a test run as a sequence of events, for
-reporting from any runner. Compatibility line 0.2; the schema in
+reporting from any runner. Compatibility line 0.3; the schema in
 [`schema/event.schema.json`](schema/event.schema.json) is the source of
 truth, and the fixtures in [`fixtures/`](fixtures/) are its executable
 specification. Both the Java and TypeScript bindings in this repository are
@@ -9,9 +9,11 @@ checked against them.
 
 The design was derived from the observed behaviour of three runners: JUnit
 Platform 6 (`TestExecutionListener`), Playwright 1.63 (`Reporter`), and
-Karate 1.5 (`RuntimeHook`), and line 0.2 from the first real adapter (the
-JUnit Platform adapter, in review), which met a failure that line 0.1 could
-not represent. Where a concept exists because of what those
+Karate 1.5 (`RuntimeHook`); line 0.2 from the first real adapter (the
+JUnit Platform adapter), which met a failure that line 0.1 could not
+represent; and line 0.3 from the second (the Playwright reporter), which
+met invocation-level outcomes that no attempt and no scope could carry.
+Where a concept exists because of what those
 runners do, this document says so. The ecosystem-level boundary this
 protocol implements is in the
 [qe-ecosystem architecture](https://github.com/yannisyoussef/qe-ecosystem/blob/develop/docs/architecture.md)
@@ -41,7 +43,7 @@ Every event carries:
 
 | Field | Meaning |
 |---|---|
-| `protocolVersion` | Full Semantic Version written by the producer, for example `0.2.0`. |
+| `protocolVersion` | Full Semantic Version written by the producer, for example `0.3.0`. |
 | `eventId` | Unique within the run. A second occurrence with identical content is a harmless duplicate; with different content it is invalid. |
 | `eventType` | Discriminator for `payload`, dotted lower case. |
 | `runId`, `sessionId` | Identity of the run and of the producer process. |
@@ -59,7 +61,7 @@ carried as `durationMs` on the finishing events.
 | Event | Emitted when | Payload |
 |---|---|---|
 | `session.started` | A producer process begins. | `producer` (required), `runner`, `environment`, `executor`, `source`, `labels`. |
-| `session.finished` | The session emits no further session-scoped event. | empty |
+| `session.finished` | The session emits no further session-scoped event. | `status`, `rawStatus`, `failures` (the runner's aggregate outcome, all optional). |
 | `run.finished` | Only from a producer that knows every session has finished. | empty |
 | `attempt.started` | A test case execution begins. | `attemptId`, `attemptNumber` (1 for the first execution, 2 for the first retry), `test`. |
 | `attempt.finished` | It ends. | `attemptId`, `status`, `rawStatus`, `expectedStatus`, `durationMs`, `failures`. |
@@ -89,7 +91,7 @@ it could not be an ignorable addition to line 0.1.
 
 ```json
 {
-  "protocolVersion": "0.2.0",
+  "protocolVersion": "0.3.0",
   "eventId": "jvm-1-0033",
   "eventType": "scope.failed",
   "runId": "run-junit-0001",
@@ -138,14 +140,82 @@ for planned tests (the JUnit `@BeforeAll` mapping), those are failed
 attempts with `phase: setup`; otherwise a single `scope.failed` with
 `phase: setup`. Consumers never infer one from the other.
 
-A run's verdict is derived, never persisted. A test case's outcome is that
-of its final attempt (the highest `attemptNumber`), read against
-`expectedStatus`: failed where passing was expected, or passed where
-failure was expected, is an unexpected outcome. The run is `incomplete`
-while any session, attempt, or step is still open; otherwise `failed` when
-any test case's outcome is unexpected or the run carries at least one
-`scope.failed`; otherwise `passed`. A `scope.failed` never rewrites a
-completed attempt. For
+### Session outcome
+
+A runner invocation can end with an aggregate outcome that no attempt and
+no hierarchy scope explains: a global setup or teardown exception, a global
+timeout, an interruption, a runner policy such as failing the invocation
+for a flaky test. The Playwright reporter met all of these. Its `onEnd`
+reports `passed`, `failed`, `timedout`, or `interrupted` for the whole
+invocation, and under line 0.2 a run whose global setup threw derived as
+`passed`. Line 0.3 therefore lets `session.finished` carry the runner's own
+aggregate outcome for the completed session, in three optional fields:
+
+- `status`: `passed` (the invocation completed with a successful aggregate
+  outcome), `failed` (it completed with a failed aggregate outcome, whether
+  or not a test or a scope explains it), or `inconclusive` (it completed
+  without a pass or fail verdict: interrupted, cancelled). This is its own
+  set, `sessionStatus`, not the attempt status: there is no skipped session
+  and no expected status.
+- `rawStatus`: the runner's own aggregate word (`timedout`, `interrupted`),
+  for display and lossy mappings only. It never enters verdict derivation,
+  a consumer needs no runner knowledge to derive one, and it requires
+  `status`.
+- `failures`: errors of the invocation itself that belong to no attempt and
+  no scope, in the ordinary failure shape and limits, with `phase` `setup`
+  or `teardown` where truthful. They require `status`, so that the failure
+  list never becomes a second, implicit verdict carrier; a `failed` session
+  may carry none (a timeout or a policy has no exception to attach), an
+  `inconclusive` session may carry the error that stopped it, and a
+  `passed` session carries none.
+
+An empty payload remains valid and is what a producer emits when its
+runner exposes no authoritative aggregate outcome; the JUnit Platform
+adapter does so, because a forked JVM knows nothing of the build's
+verdict, and consumers then derive the outcome from attempt and scope
+facts alone. A producer whose runner exposes one must emit `status`. Three
+layers stay distinct and none replaces another: an attempt's outcome, a
+scope failure, and the session outcome. `session.finished` remains the
+event that closes the session; only `run.finished` may follow it.
+
+```json
+{
+  "eventType": "session.finished",
+  "payload": {
+    "status": "failed",
+    "rawStatus": "timedout",
+    "failures": [{ "message": "global setup broke", "phase": "setup" }]
+  }
+}
+```
+
+A run's verdict is derived, never persisted, and is one of four:
+`incomplete` (the event lifecycle is structurally unfinished: a session,
+attempt, or step never finished), `failed`, `inconclusive` (the lifecycle
+finished correctly but execution ended without a pass or fail verdict),
+or `passed`. A test case's outcome is that of its final attempt (the
+highest `attemptNumber`), read against `expectedStatus`: failed where
+passing was expected, or passed where failure was expected, is an
+unexpected outcome. Derivation, in order of precedence:
+
+1. any session, attempt, or step still open: `incomplete`;
+2. otherwise any unexpected test outcome, any `scope.failed`, or any
+   session with `status: "failed"`: `failed`;
+3. otherwise any test whose final attempt is `inconclusive`, or any session
+   with `status: "inconclusive"`: `inconclusive`;
+4. otherwise `passed`.
+
+Failure evidence outranks inconclusive evidence, and a session's `passed`
+never erases an unexpected attempt, a scope failure, or an inconclusive
+final attempt: all attempts passed
+with a failed session is a failed run, one unexpected failure with an
+inconclusive session is a failed run, all attempts passed with an
+inconclusive session is an inconclusive run, and a properly closed
+interrupted run is inconclusive, not incomplete. A flaky test, one failed
+attempt followed by an expected passed final attempt, is not an unexpected
+outcome; a runner policy that fails the invocation for it is exactly what
+the session status expresses, and the two layers stay separate. A
+`scope.failed` never rewrites a completed attempt. For
 
 ```
 class FooTest
@@ -166,7 +236,9 @@ ACTIVE ──session.finished──▶ SESSION FINISHED ──run.finished──
 - While active, a session emits any event.
 - After `session.finished`, no attempt, step, attachment, or other
   session-scoped event is valid for that session. The only event a
-  finished session may still emit is `run.finished`.
+  finished session may still emit is `run.finished`. The outcome carried
+  by `session.finished` describes the completed session itself.
+- `run.finished` carries no status; the run's verdict is derived.
 - `run.finished` is optional and is emitted only by a producer that knows
   every session of the run has finished: a single-process reporter, or a
   coordinator. A forked worker cannot know this and must not emit it. A run
@@ -237,8 +309,10 @@ is a display string; a consumer never resolves it on disk.
 
 ## Status
 
-`status` is one of four values. The runner's own word is kept in
-`rawStatus` so a lossy mapping loses nothing for display.
+`status` of an attempt or step is one of four values. The runner's own
+word is kept in `rawStatus` so a lossy mapping loses nothing for display.
+A session's aggregate `status` is a separate, three-valued set described
+under session outcome.
 
 | Canonical | Meaning | Observed sources |
 |---|---|---|
@@ -338,11 +412,14 @@ responsible for what it contains.
 
 ## Compatibility
 
-The compatibility unit before 1.0 is `0.minor`: a consumer of line 0.2
-reads any `0.2.x` and rejects everything else, including the unpublished
-line 0.1, as an unsupported protocol version. From 1.0 the unit is the
-major. Line 0.1 exists in the repository history only; nothing was ever
-published from it, so there is no migration path to maintain.
+The compatibility unit before 1.0 is `0.minor`: a consumer of line 0.3
+reads any `0.3.x` and rejects everything else, including the unpublished
+lines 0.1 and 0.2, as an unsupported protocol version. From 1.0 the unit
+is the major. Lines 0.1 and 0.2 exist in the repository history only;
+nothing was ever published from them, so there is no migration path, no
+parallel runtime support, and no dual schema to maintain. Line 0.3 is a
+new line rather than a 0.2 minor because a 0.2 consumer that ignored the
+session outcome would derive a passed run from a failed one.
 
 Within a supported line:
 
@@ -358,7 +435,7 @@ Within a supported line:
   ignorable.
 
 The schema `$id` is
-`https://yannisyoussef.github.io/qe-report/schema/0.2/event.schema.json`.
+`https://yannisyoussef.github.io/qe-report/schema/0.3/event.schema.json`.
 It identifies the compatibility line; consumers ship the schema and do not
 fetch it, and the URL is not yet served.
 
@@ -416,8 +493,9 @@ and the informational `IGNORED_EVENT_TYPE`, `DUPLICATE_EVENT`, and
 
 The summary reports the derived run verdict as defined above, together
 with the counts it rests on: attempts, attempts that finished `failed`,
-and scope failures. Scope failures are counted on their own and never
-become failed attempts.
+scope failures, sessions whose status is `failed` or `inconclusive`, and
+session failures. Scope and session failures are counted on their own and
+never become failed attempts.
 
 ## Fixture corpus
 
@@ -430,7 +508,11 @@ sanitised and timestamps fixed. Others cover forked producers without a
 coordinator, a coordinator that closes the run, scope failures after all
 tests passed, after a test failed, and several in one session, a crashed
 producer, an identical duplicate, an ignorable unknown event, a newer patch
-version, the unpublished 0.1 line, and each lifecycle, session-file, and
+version, the unpublished 0.1 and 0.2 lines, session outcomes (a failed,
+inconclusive, or passed session over attempts that say otherwise, a flaky
+test with and without a failing invocation policy, an invocation-level
+setup failure with no attempt, an inconclusive final attempt with and
+without a passed session), and each lifecycle, session-file, and
 attachment violation.
 
 ## Conceptual mappings (not executed)
@@ -466,5 +548,5 @@ and, by Cypress semantics, the remaining tests of the suite, each with
 `scope.failed` for that suite or spec. Command log entries could be steps with `kind`
 `"command"`; that is a choice for an adapter, not a protocol change.
 
-Neither mapping needs anything beyond the 0.2 event set, which is the check
+Neither mapping needs anything beyond the 0.3 event set, which is the check
 the exercise was for.
