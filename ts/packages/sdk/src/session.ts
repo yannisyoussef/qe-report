@@ -6,6 +6,7 @@ import {
   stringifyEvent,
   type Event,
   type EventInput,
+  type SessionFinishedPayload,
   type SessionStartedPayload,
 } from 'qe-report-protocol';
 import { isTextualMediaType } from './media-types.js';
@@ -22,7 +23,9 @@ export type ReportProblemKind =
   /** A session-scoped event was emitted after session.finished and was dropped. */
   | 'SESSION_FINISHED'
   /** An event was emitted after run.finished and was dropped. */
-  | 'RUN_FINISHED';
+  | 'RUN_FINISHED'
+  /** A payload violates a rule of the protocol and was dropped. */
+  | 'INVALID_PAYLOAD';
 
 /**
  * Something the SDK could not do. Problems never change a test result and never propagate into
@@ -168,9 +171,43 @@ export class ReportSession {
     }
   }
 
-  /** Emits `session.finished`. Only `run.finished` is accepted afterwards. */
-  finish(): boolean {
-    return this.emit({ eventType: 'session.finished', payload: {} });
+  /**
+   * Emits `session.finished`, with the runner's aggregate outcome for this session when the
+   * runner exposes one; a producer without one passes nothing. Only `run.finished` is accepted
+   * afterwards.
+   */
+  finish(outcome: SessionFinishedPayload = {}): boolean {
+    const violation = outcomeViolation(outcome);
+    if (violation !== undefined) {
+      this.dropped += 1;
+      this.problem('INVALID_PAYLOAD', `session.finished ${violation}; dropped`);
+      return false;
+    }
+    if (this.emit({ eventType: 'session.finished', payload: outcome })) return true;
+    if (this.lifecycle !== 'active') return false;
+    // Dropped while the session is still active (the outcome exceeded the event limit, or the sink
+    // failed): the session must still close, so the outcome is retried without its failures, then
+    // as the empty payload. Each reduction is reported.
+    if (outcome.failures !== undefined && outcome.failures.length > 0) {
+      this.problem(
+        'EVENT_TOO_LARGE',
+        'session.finished retried without its failures so that the session closes',
+      );
+      const reduced: SessionFinishedPayload = {
+        ...(outcome.status !== undefined ? { status: outcome.status } : {}),
+        ...(outcome.rawStatus !== undefined ? { rawStatus: outcome.rawStatus } : {}),
+      };
+      if (this.emit({ eventType: 'session.finished', payload: reduced })) return true;
+      if (this.lifecycle !== 'active') return false;
+    }
+    if (outcome.status !== undefined) {
+      this.problem(
+        'EVENT_TOO_LARGE',
+        'session.finished retried with an empty payload so that the session closes',
+      );
+      return this.emit({ eventType: 'session.finished', payload: {} });
+    }
+    return false;
   }
 
   /**
@@ -275,6 +312,15 @@ export class ReportSession {
   private problem(kind: ReportProblemKind, message: string, cause?: unknown): void {
     this.onProblem(cause === undefined ? { kind, message } : { kind, message, cause });
   }
+}
+
+/** The rule an outcome breaks, if any: the same three the codec and the schema enforce. */
+function outcomeViolation(o: SessionFinishedPayload): string | undefined {
+  const some = o.failures !== undefined && o.failures.length > 0;
+  if (o.status === undefined && o.rawStatus !== undefined) return 'rawStatus requires status';
+  if (o.status === undefined && some) return 'failures require status';
+  if (o.status === 'passed' && some) return 'a passed session carries no failures';
+  return undefined;
 }
 
 /** Reads at most `limit` bytes; returns undefined as soon as the file proves larger. */

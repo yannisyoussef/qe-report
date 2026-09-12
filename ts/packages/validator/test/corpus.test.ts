@@ -30,6 +30,9 @@ describe('run directory fixtures', () => {
         expect(report.summary.duplicates).toBe(run.duplicates ?? 0);
         if (run.attachments !== undefined) expect(report.summary.attachments).toBe(run.attachments);
         expect(report.summary.scopeFailures).toBe(run.scopeFailures ?? 0);
+        expect(report.summary.failedSessions).toBe(run.failedSessions ?? 0);
+        expect(report.summary.inconclusiveSessions).toBe(run.inconclusiveSessions ?? 0);
+        expect(report.summary.sessionFailures).toBe(run.sessionFailures ?? 0);
         if (run.failedAttempts !== undefined)
           expect(report.summary.failedAttempts).toBe(run.failedAttempts);
         if (run.verdict !== undefined) expect(report.summary.verdict).toBe(run.verdict);
@@ -80,7 +83,7 @@ describe('scope failures in the derived verdict', () => {
   it('does not count a scope failure as a failed attempt, and a retried test counts by its final attempt', async () => {
     const line = (seq: number, type: string, payload: unknown): string =>
       JSON.stringify({
-        protocolVersion: '0.2.0',
+        protocolVersion: '0.3.0',
         eventId: `e-${seq}`,
         eventType: type,
         runId: 'r',
@@ -126,7 +129,7 @@ describe('scope failures in the derived verdict', () => {
   });
   it('keeps diagnostics on one line whatever the producer wrote', async () => {
     const bad = JSON.stringify({
-      protocolVersion: '0.2.0',
+      protocolVersion: '0.3.0',
       eventId: 'e',
       eventType: 'scope.failed',
       runId: 'r',
@@ -155,7 +158,7 @@ describe('options', () => {
   });
   it('flags an event over the size limit', async () => {
     const big = JSON.stringify({
-      protocolVersion: '0.2.0',
+      protocolVersion: '0.3.0',
       eventId: 'e',
       eventType: 'session.started',
       runId: 'r',
@@ -170,7 +173,7 @@ describe('options', () => {
   it('reports a reused event id with different content', async () => {
     const line = (seq: number, id: string): string =>
       JSON.stringify({
-        protocolVersion: '0.2.0',
+        protocolVersion: '0.3.0',
         eventId: id,
         eventType: seq === 1 ? 'session.started' : 'session.finished',
         runId: 'r',

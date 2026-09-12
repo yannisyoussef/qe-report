@@ -287,6 +287,134 @@ describe('ReportSession', () => {
     });
   });
 
+  describe('session outcome', () => {
+    it('writes the outcome redacted and closes the session, while a plain finish stays empty', () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's'),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      expect(
+        s.finish({
+          status: 'failed',
+          rawStatus: 'timedout',
+          failures: [
+            {
+              message: 'global setup broke Authorization: Bearer abc.def.ghi',
+              type: 'Error',
+              stackTrace: 'at global-setup.ts:3 password=hunter2',
+              phase: 'setup',
+            },
+          ],
+        }),
+      ).toBe(true);
+      expect(s.finish()).toBe(false);
+      expect(s.state).toBe('session-finished');
+      expect(problems.map((p) => p.kind)).toEqual(['SESSION_FINISHED']);
+      s.close();
+      const lines = readFileSync(join(d, 'events', readdirSync(join(d, 'events'))[0] ?? ''), 'utf8')
+        .split('\n')
+        .filter((l) => l !== '');
+      const finished = JSON.parse(lines[1] ?? '{}') as {
+        eventType: string;
+        payload: {
+          status: string;
+          rawStatus: string;
+          failures: { message: string; stackTrace: string; phase: string }[];
+        };
+      };
+      expect(finished.eventType).toBe('session.finished');
+      expect(finished.payload.status).toBe('failed');
+      expect(finished.payload.rawStatus).toBe('timedout');
+      expect(finished.payload.failures[0]?.message).toBe(
+        'global setup broke Authorization: [REDACTED]',
+      );
+      expect(finished.payload.failures[0]?.stackTrace).toBe(
+        'at global-setup.ts:3 password=[REDACTED]',
+      );
+      expect(finished.payload.failures[0]?.phase).toBe('setup');
+      const plain = ReportSession.start(
+        { runId: 'r', sessionId: 'p', sink: FileSink.open(d, 'p'), ...fixed() },
+        producer,
+      );
+      plain.close();
+      const plainLines = readFileSync(
+        join(d, 'events', readdirSync(join(d, 'events')).find((n) => n.startsWith('p-')) ?? ''),
+        'utf8',
+      )
+        .split('\n')
+        .filter((l) => l !== '');
+      expect((JSON.parse(plainLines[1] ?? '{}') as { payload: unknown }).payload).toEqual({});
+    });
+  });
+
+  describe('session outcome fallbacks', () => {
+    it('drops an outcome the protocol forbids, reports it, and still closes on close()', () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's'),
+          ...fixed(),
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      expect(s.finish({ rawStatus: 'timedout' })).toBe(false);
+      expect(s.finish({ failures: [{ message: 'x' }] })).toBe(false);
+      expect(s.finish({ status: 'passed', failures: [{ message: 'x' }] })).toBe(false);
+      expect(s.state).toBe('active');
+      expect(problems.map((p) => p.kind)).toEqual([
+        'INVALID_PAYLOAD',
+        'INVALID_PAYLOAD',
+        'INVALID_PAYLOAD',
+      ]);
+      s.close();
+      expect(s.state).toBe('closed');
+    });
+
+    it('closes the session with what fits when the outcome exceeds the event limit', () => {
+      const d = temp();
+      const problems: ReportProblem[] = [];
+      const s = ReportSession.start(
+        {
+          runId: 'r',
+          sessionId: 's',
+          sink: FileSink.open(d, 's'),
+          ...fixed(),
+          maxEventBytes: 700,
+          onProblem: (p) => problems.push(p),
+        },
+        producer,
+      );
+      expect(
+        s.finish({
+          status: 'failed',
+          rawStatus: 'timedout',
+          failures: [{ message: 'x'.repeat(2_000) }],
+        }),
+      ).toBe(true);
+      expect(s.state).toBe('session-finished');
+      expect(problems.map((p) => p.kind)).toEqual(['EVENT_TOO_LARGE', 'EVENT_TOO_LARGE']);
+      const lines = readFileSync(join(d, 'events', readdirSync(join(d, 'events'))[0] ?? ''), 'utf8')
+        .split('\n')
+        .filter((l) => l !== '');
+      expect((JSON.parse(lines[1] ?? '{}') as { payload: unknown }).payload).toEqual({
+        status: 'failed',
+        rawStatus: 'timedout',
+      });
+    });
+  });
+
   it('drops and reports an oversized event without throwing', () => {
     const problems: ReportProblem[] = [];
     const s = ReportSession.start(
@@ -367,7 +495,7 @@ describe('ReportSession', () => {
     const d = temp();
     const sink = FileSink.open(d, 's');
     const unknown: UnknownEvent = {
-      protocolVersion: '0.2.0',
+      protocolVersion: '0.3.0',
       eventId: 'u',
       eventType: 'attempt.heartbeat',
       runId: 'r',

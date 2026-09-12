@@ -77,6 +77,12 @@ export interface Summary {
   readonly failedAttempts: number;
   /** scope.failed events: failures of non-test scopes that fail the run without touching attempt verdicts. */
   readonly scopeFailures: number;
+  /** Sessions whose runner reported a failed aggregate outcome; never counted as attempts or scope failures. */
+  readonly failedSessions: number;
+  /** Sessions whose runner reported an inconclusive aggregate outcome. */
+  readonly inconclusiveSessions: number;
+  /** Failures carried by session.finished events: errors of the invocation itself. */
+  readonly sessionFailures: number;
   readonly ignored: number;
   readonly duplicates: number;
   /** Every session, attempt, and step that started also finished. */
@@ -84,11 +90,13 @@ export interface Summary {
   /** A run.finished event was seen. */
   readonly closed: boolean;
   /**
-   * The derived run verdict: `incomplete` while anything is still open; otherwise `failed` when
-   * any test case's final attempt is unexpected (failed when passing was expected, or passed when
-   * failure was expected) or when any scope failed; otherwise `passed`.
+   * The derived run verdict, in order of precedence: `incomplete` while any session, attempt, or
+   * step is structurally open; `failed` on any unexpected final test outcome (read against
+   * `expectedStatus`), any `scope.failed`, or any session whose status is `failed`;
+   * `inconclusive` on any inconclusive final attempt or any session whose status is
+   * `inconclusive`; otherwise `passed`.
    */
-  readonly verdict: 'passed' | 'failed' | 'incomplete';
+  readonly verdict: 'passed' | 'failed' | 'inconclusive' | 'incomplete';
 }
 
 export interface Report {
@@ -167,6 +175,7 @@ interface AttemptState {
   session: string;
   executionId: string;
   attemptNumber: number;
+  inconclusive: boolean;
   finished: boolean;
   unexpected: boolean;
   steps: Map<string, boolean>;
@@ -199,6 +208,9 @@ export class RunValidator {
   private steps = 0;
   private scopeFailures = 0;
   private failedAttempts = 0;
+  private failedSessions = 0;
+  private inconclusiveSessions = 0;
+  private sessionFailures = 0;
 
   constructor(options: ValidateOptions = {}) {
     this.options = options;
@@ -334,7 +346,11 @@ export class RunValidator {
           `${event.eventType} before session.started for ${event.sessionId}`,
           event.eventId,
         );
-        session = { finished: false, lastSequence: event.sequence - 1, runnerName: undefined };
+        session = {
+          finished: false,
+          lastSequence: event.sequence - 1,
+          runnerName: undefined,
+        };
         this.sessions.set(event.sessionId, session);
       }
       if (event.sequence !== session.lastSequence + 1) {
@@ -371,6 +387,9 @@ export class RunValidator {
           break;
         case 'session.finished': {
           session.finished = true;
+          if (event.payload.status === 'failed') this.failedSessions += 1;
+          if (event.payload.status === 'inconclusive') this.inconclusiveSessions += 1;
+          this.sessionFailures += event.payload.failures?.length ?? 0;
           for (const [id, a] of this.attempts) {
             if (a.session === event.sessionId && !a.finished)
               lifecycle(
@@ -410,6 +429,7 @@ export class RunValidator {
               attemptNumber: event.payload.attemptNumber,
               finished: false,
               unexpected: false,
+              inconclusive: false,
               steps: new Map(),
             });
           break;
@@ -436,6 +456,7 @@ export class RunValidator {
             a.unexpected =
               (status === 'failed' && expected !== 'failed') ||
               (status === 'passed' && expected === 'failed');
+            a.inconclusive = status === 'inconclusive';
             for (const [sid, done] of a.steps) {
               if (!done)
                 lifecycle(
@@ -599,12 +620,17 @@ export class RunValidator {
       const current = finalAttempts.get(a.executionId);
       if (!current || a.attemptNumber > current.attemptNumber) finalAttempts.set(a.executionId, a);
     }
-    const anyUnexpected = [...finalAttempts.values()].some((a) => a.unexpected);
+    const finals = [...finalAttempts.values()];
+    const anyUnexpected = finals.some((a) => a.unexpected);
+    const anyInconclusive = finals.some((a) => a.inconclusive);
+    // Precedence: structurally open, then any failure fact, then any inconclusive fact.
     const verdict = !complete
       ? 'incomplete'
-      : anyUnexpected || this.scopeFailures > 0
+      : anyUnexpected || this.scopeFailures > 0 || this.failedSessions > 0
         ? 'failed'
-        : 'passed';
+        : anyInconclusive || this.inconclusiveSessions > 0
+          ? 'inconclusive'
+          : 'passed';
     return {
       valid,
       diagnostics: this.diagnostics,
@@ -617,6 +643,9 @@ export class RunValidator {
         attachments: this.attachments.length,
         failedAttempts: this.failedAttempts,
         scopeFailures: this.scopeFailures,
+        failedSessions: this.failedSessions,
+        inconclusiveSessions: this.inconclusiveSessions,
+        sessionFailures: this.sessionFailures,
         ignored: this.ignored,
         duplicates: this.duplicates,
         complete,
