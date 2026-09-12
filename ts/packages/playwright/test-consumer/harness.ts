@@ -10,6 +10,7 @@ import {
   type AttemptFinishedEvent,
   type AttemptStartedEvent,
   type Event,
+  type SessionFinishedEvent,
   type SessionStartedEvent,
   type StepFinishedEvent,
   type StepStartedEvent,
@@ -62,6 +63,8 @@ export interface RunOutcome {
   readonly report: Report;
   readonly events: readonly Event[];
   readonly sessions: readonly SessionStartedEvent[];
+  /** Every session.finished, one per session, carrying the runner's aggregate outcome. */
+  readonly finished: readonly SessionFinishedEvent[];
   readonly attempts: readonly Attempt[];
   /** Every qe-report-playwright diagnostic line printed on standard error. */
   readonly diagnostics: readonly string[];
@@ -124,6 +127,7 @@ export async function runPlaywright(o: RunOptions = {}): Promise<RunOutcome> {
     report,
     events,
     sessions: events.filter((e): e is SessionStartedEvent => e.eventType === 'session.started'),
+    finished: events.filter((e): e is SessionFinishedEvent => e.eventType === 'session.finished'),
     attempts: attemptsOf(events),
     diagnostics: stderr.split('\n').filter((l) => l.startsWith('qe-report-playwright: ')),
   };
@@ -218,11 +222,14 @@ function emptyReport(): Report {
       attachments: 0,
       failedAttempts: 0,
       scopeFailures: 0,
+      failedSessions: 0,
+      inconclusiveSessions: 0,
+      sessionFailures: 0,
       ignored: 0,
       duplicates: 0,
       complete: false,
       closed: false,
-      verdict: 'incomplete',
+      verdict: 'incomplete' as const,
     },
   };
 }

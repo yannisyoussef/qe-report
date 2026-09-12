@@ -4,16 +4,34 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { FullConfig } from '@playwright/test/reporter';
 import { parseEvent, type Event, type UnknownEvent } from 'qe-report-protocol';
+import { FileSink } from 'qe-report-sdk';
 import { QeReportReporter, type ReporterHooks } from '../src/reporter.js';
 import type { QeReportReporterOptions } from '../src/config.js';
-import { ROOT, testCase, testResult, testStep } from './fakes.js';
+import { ROOT, fullResult, testCase, testResult, testStep } from './fakes.js';
 
 /** Drives the reporter with fake Playwright objects; the consumer tests use the real runner. */
-function reporter(options: QeReportReporterOptions, hooks: ReporterHooks = {}) {
+function reporter(
+  options: QeReportReporterOptions,
+  hooks: ReporterHooks = {},
+  configOverrides: Partial<FullConfig> = {},
+) {
   const lines: string[] = [];
   const r = new QeReportReporter(options, { env: {}, write: (l) => lines.push(l), ...hooks });
-  const config = { rootDir: ROOT, version: '1.63.0', workers: 1, shard: null } as FullConfig;
+  const config = {
+    rootDir: ROOT,
+    version: '1.63.0',
+    workers: 1,
+    shard: null,
+    globalSetup: null,
+    globalTeardown: null,
+    ...configOverrides,
+  } as FullConfig;
   return { r, lines, begin: () => r.onBegin(config) };
+}
+
+function terminal(dir: string): { status?: string; rawStatus?: string; failures?: unknown[] } {
+  const e = events(dir).find((x) => x.eventType === 'session.finished');
+  return (e as { payload: { status?: string; rawStatus?: string; failures?: unknown[] } }).payload;
 }
 
 function temp(): string {
@@ -36,7 +54,7 @@ describe('QeReportReporter isolation', () => {
     begin();
     r.onTestBegin(testCase(), testResult());
     r.onTestEnd(testCase(), testResult());
-    r.onEnd();
+    r.onEnd(fullResult('passed'));
     expect(existsSync(dir)).toBe(false);
     expect(lines).toEqual([]);
   });
@@ -49,7 +67,7 @@ describe('QeReportReporter isolation', () => {
     begin();
     r.onTestBegin(testCase(), testResult());
     r.onTestEnd(testCase(), testResult());
-    r.onEnd();
+    r.onEnd(fullResult('passed'));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('cannot open run directory');
     expect(lines[0]).toContain('this run is not reported');
@@ -59,7 +77,7 @@ describe('QeReportReporter isolation', () => {
     const dir = temp();
     const first = reporter({ dir, sessionId: 'same' });
     first.begin();
-    first.r.onEnd();
+    first.r.onEnd(fullResult('passed'));
     const second = reporter({ dir, sessionId: 'same' });
     second.begin();
     expect(second.lines.join('\n')).toContain('EEXIST');
@@ -84,7 +102,7 @@ describe('QeReportReporter isolation', () => {
         ],
       }),
     );
-    r.onEnd();
+    r.onEnd(fullResult('passed'));
     const types = events(dir).map((e) => e.eventType);
     expect(types).toEqual([
       'session.started',
@@ -111,7 +129,7 @@ describe('QeReportReporter isolation', () => {
     const fine = testCase({ id: 'cccccccccccccccccccc-dddddddddddddddddddd', title: 'fine' });
     r.onTestBegin(fine, testResult());
     r.onTestEnd(fine, testResult());
-    r.onEnd();
+    r.onEnd(fullResult('passed'));
     expect(lines.some((l) => l.includes('internal error in onTestBegin'))).toBe(true);
     expect(events(dir).filter((e) => e.eventType === 'attempt.finished')).toHaveLength(1);
   });
@@ -124,7 +142,7 @@ describe('QeReportReporter isolation', () => {
       r.onStepEnd(testCase(), testResult(), testStep({ title: 'x', category: 'y' })),
     ).not.toThrow();
     expect(() => r.onTestEnd(testCase(), testResult())).not.toThrow();
-    expect(r.onEnd()).toBeUndefined();
+    expect(r.onEnd(fullResult('passed'))).toBeUndefined();
     expect(r.printsToStdio()).toBe(false);
   });
 
@@ -132,7 +150,7 @@ describe('QeReportReporter isolation', () => {
     const own = temp();
     const first = reporter({ dir: own });
     first.begin();
-    first.r.onEnd();
+    first.r.onEnd(fullResult('passed'));
     expect(events(own).map((e) => e.eventType)).toEqual([
       'session.started',
       'session.finished',
@@ -141,7 +159,7 @@ describe('QeReportReporter isolation', () => {
     const shared = temp();
     const second = reporter({ dir: shared, runId: 'run-shared' });
     second.begin();
-    second.r.onEnd();
+    second.r.onEnd(fullResult('passed'));
     expect(events(shared).map((e) => e.eventType)).toEqual(['session.started', 'session.finished']);
   });
 
@@ -159,7 +177,7 @@ describe('QeReportReporter isolation', () => {
     r.onTestBegin(test, testResult());
     r.onTestEnd(test, testResult());
     r.onError({ message: 'Error: connect postgres://u:hunter2@db failed' });
-    r.onEnd();
+    r.onEnd(fullResult('passed'));
     const started = events(dir).find((e) => e.eventType === 'attempt.started');
     const labels = (started as { payload: { test: { labels: Record<string, string> } } }).payload
       .test.labels;
@@ -181,7 +199,7 @@ describe('QeReportReporter isolation', () => {
       message: 'Error: global setup broke',
       location: { file: '/elsewhere/setup.ts', line: 1, column: 1 },
     });
-    r.onEnd();
+    r.onEnd(fullResult('passed'));
     const scopes = events(dir).filter((e) => e.eventType === 'scope.failed');
     expect(scopes).toHaveLength(1);
     expect((scopes[0] as { payload: unknown }).payload).toMatchObject({
@@ -200,5 +218,115 @@ describe('QeReportReporter isolation', () => {
     begin();
     expect(lines.filter((l) => l.includes("run id 'bad id'"))).toHaveLength(1);
     expect(existsSync(join(dir, 'events'))).toBe(true);
+  });
+
+  it("records Playwright's aggregate status as the session outcome", () => {
+    const cases = [
+      ['passed', 'passed'],
+      ['failed', 'failed'],
+      ['timedout', 'failed'],
+      ['interrupted', 'inconclusive'],
+    ] as const;
+    for (const [raw, status] of cases) {
+      const dir = temp();
+      const { r, begin } = reporter({ dir, runId: `run-${raw}` });
+      begin();
+      r.onEnd(fullResult(raw));
+      expect(terminal(dir), raw).toEqual({ status, rawStatus: raw });
+    }
+  });
+
+  it('keeps global setup and teardown errors for session.finished with their phase', () => {
+    const dir = temp();
+    const setup = `${ROOT}/global-setup.ts`;
+    const teardown = `${ROOT}/global-teardown.ts`;
+    const { r, lines, begin } = reporter(
+      { dir, runId: 'run-g' },
+      {},
+      { globalSetup: setup, globalTeardown: teardown },
+    );
+    begin();
+    r.onError({ message: 'Error: setup broke', location: { file: setup, line: 3, column: 9 } });
+    r.onError({
+      message: 'Error: teardown broke',
+      location: { file: teardown, line: 2, column: 1 },
+    });
+    r.onEnd(fullResult('failed'));
+    const t = terminal(dir);
+    expect(t.status).toBe('failed');
+    expect(t.failures).toEqual([
+      expect.objectContaining({
+        message: 'Error: setup broke',
+        phase: 'setup',
+        location: { file: 'global-setup.ts', line: 3, column: 9 },
+      }),
+      expect.objectContaining({ message: 'Error: teardown broke', phase: 'teardown' }),
+    ]);
+    expect(events(dir).some((e) => e.eventType === 'scope.failed')).toBe(false);
+    expect(lines.filter((l) => l.includes('recorded on session.finished'))).toHaveLength(2);
+  });
+
+  it('never attaches failures to a passed session and bounds them to the protocol maximum', () => {
+    const dir = temp();
+    const setup = `${ROOT}/global-setup.ts`;
+    const { r, lines, begin } = reporter({ dir, runId: 'run-p' }, {}, { globalSetup: setup });
+    begin();
+    for (let i = 0; i < 40; i += 1)
+      r.onError({
+        message: `Error: setup broke ${i}`,
+        location: { file: setup, line: i + 1, column: 1 },
+      });
+    r.onEnd(fullResult('passed'));
+    expect(terminal(dir)).toEqual({ status: 'passed', rawStatus: 'passed' });
+    expect(lines.some((l) => l.includes('more than 32 invocation-level errors'))).toBe(true);
+    expect(lines.some((l) => l.includes('although the run passed'))).toBe(true);
+  });
+
+  it('records at most 32 session failures on a failed session', () => {
+    const dir = temp();
+    const setup = `${ROOT}/global-setup.ts`;
+    const { r, begin } = reporter({ dir, runId: 'run-q' }, {}, { globalSetup: setup });
+    begin();
+    for (let i = 0; i < 40; i += 1)
+      r.onError({
+        message: `Error: setup broke ${i}`,
+        location: { file: setup, line: i + 1, column: 1 },
+      });
+    r.onEnd(fullResult('failed'));
+    expect(terminal(dir).failures).toHaveLength(32);
+  });
+
+  it('does not close the run when the session outcome could not be written', () => {
+    const dir = temp();
+    const { r, lines, begin } = reporter(
+      { dir },
+      {
+        openSink: (d, sessionId) => {
+          const real = FileSink.open(d, sessionId);
+          return {
+            maxAttachmentBytes: real.maxAttachmentBytes,
+            write: (event) => {
+              if (event.eventType === 'session.finished') throw new Error('disk full');
+              real.write(event);
+            },
+            storeAttachment: (bytes) => real.storeAttachment(bytes),
+            storeAttachmentStream: (stream) => real.storeAttachmentStream(stream),
+            close: () => real.close(),
+          };
+        },
+      },
+    );
+    begin();
+    const t = testCase();
+    r.onTestBegin(t, testResult());
+    r.onTestEnd(t, testResult());
+    r.onEnd(fullResult('failed'));
+    expect(events(dir).map((e) => e.eventType)).toEqual([
+      'session.started',
+      'attempt.started',
+      'attempt.finished',
+    ]);
+    expect(lines.some((l) => l.includes('TERMINAL_OUTCOME_NOT_WRITTEN'))).toBe(true);
+    expect(lines.some((l) => l.includes('run.finished'))).toBe(false);
   });
 });

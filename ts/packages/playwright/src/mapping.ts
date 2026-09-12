@@ -1,5 +1,12 @@
-import type { TestCase, TestError, TestResult } from '@playwright/test/reporter';
-import type { ExpectedStatus, Failure, FailurePhase, Location, Status } from 'qe-report-protocol';
+import type { FullResult, TestCase, TestError, TestResult } from '@playwright/test/reporter';
+import type {
+  ExpectedStatus,
+  Failure,
+  FailurePhase,
+  Location,
+  SessionStatus,
+  Status,
+} from 'qe-report-protocol';
 import {
   bounded,
   FAILURE_TEXT_BUDGET,
@@ -23,6 +30,25 @@ export function status(raw: TestResult['status']): Status | undefined {
       return 'failed';
     case 'skipped':
       return 'skipped';
+    case 'interrupted':
+      return 'inconclusive';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Playwright's aggregate status for the whole invocation (`FullResult.status`, which spells
+ * `timedout` unlike a test result's `timedOut`) to the protocol's session status. The native
+ * word travels in `rawStatus`. Unknown words from a later Playwright yield undefined.
+ */
+export function sessionStatus(raw: FullResult['status']): SessionStatus | undefined {
+  switch (raw) {
+    case 'passed':
+      return 'passed';
+    case 'failed':
+    case 'timedout':
+      return 'failed';
     case 'interrupted':
       return 'inconclusive';
     default:

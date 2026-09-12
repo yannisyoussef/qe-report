@@ -1,14 +1,26 @@
 import type {
   FullConfig,
+  FullResult,
   Reporter,
   TestCase,
   TestError,
   TestResult,
   TestStep,
 } from '@playwright/test/reporter';
-import type { Failure, FailurePhase, TestCase as TestCaseModel } from 'qe-report-protocol';
+import type {
+  Failure,
+  FailurePhase,
+  SessionFinishedPayload,
+  TestCase as TestCaseModel,
+} from 'qe-report-protocol';
 import { dirname, resolve } from 'node:path';
-import { FileSink, ReportSession, type AttachmentInput, type ReportProblem } from 'qe-report-sdk';
+import {
+  FileSink,
+  ReportSession,
+  type AttachmentInput,
+  type ReportProblem,
+  type ReportSink,
+} from 'qe-report-sdk';
 import { resolveConfig, type QeReportReporterOptions, type ResolvedConfig } from './config.js';
 import { Diagnostics } from './diagnostics.js';
 import { hierarchy, historicalId, pathSegments } from './identity.js';
@@ -18,6 +30,7 @@ import {
   failure,
   location,
   mediaType,
+  sessionStatus,
   status,
   withinBudget,
   type Roots,
@@ -41,6 +54,8 @@ export interface ReporterHooks {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly cwd?: string;
   readonly write?: (line: string) => void;
+  /** Opens the sink; tests inject a failing one. Default: the SDK file sink. */
+  readonly openSink?: (dir: string, sessionId: string, maxAttachmentBytes?: number) => ReportSink;
 }
 
 interface OpenStep {
@@ -71,7 +86,18 @@ export class QeReportReporter implements Reporter {
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly cwd: string;
   private readonly diagnostics: Diagnostics;
+  private readonly openSink: (
+    dir: string,
+    sessionId: string,
+    maxAttachmentBytes?: number,
+  ) => ReportSink;
   private readonly attempts = new Map<string, OpenAttempt>();
+  /** Errors of the invocation itself (global setup and teardown), for session.finished. */
+  private readonly sessionFailures: Failure[] = [];
+  private sessionFailuresOmitted = 0;
+  /** The configured global setup module, by resolved path; errors located in it are set-up. */
+  private globalSetup: string | undefined;
+  private globalTeardown: string | undefined;
   private session: ReportSession | undefined;
   private config: ResolvedConfig | undefined;
   private rootDir = '';
@@ -85,6 +111,10 @@ export class QeReportReporter implements Reporter {
     this.env = hooks.env ?? process.env;
     this.cwd = hooks.cwd ?? process.cwd();
     this.diagnostics = new Diagnostics(hooks.write);
+    this.openSink =
+      hooks.openSink ??
+      ((dir, sessionId, max) =>
+        FileSink.open(dir, sessionId, max === undefined ? {} : { maxAttachmentBytes: max }));
   }
 
   printsToStdio(): boolean {
@@ -94,8 +124,12 @@ export class QeReportReporter implements Reporter {
   onBegin(config: FullConfig): void {
     this.guard('onBegin', () => {
       this.rootDir = config.rootDir;
-      this.runnerModules = [config.globalSetup, config.globalTeardown].filter(
-        (m): m is string => typeof m === 'string',
+      this.globalSetup =
+        typeof config.globalSetup === 'string' ? resolve(config.globalSetup) : undefined;
+      this.globalTeardown =
+        typeof config.globalTeardown === 'string' ? resolve(config.globalTeardown) : undefined;
+      this.runnerModules = [this.globalSetup, this.globalTeardown].filter(
+        (m): m is string => m !== undefined,
       );
       this.roots = {
         rootDir: config.rootDir,
@@ -114,13 +148,7 @@ export class QeReportReporter implements Reporter {
       if (!cfg.enabled) return;
       const shard = config.shard;
       try {
-        const sink = FileSink.open(
-          cfg.dir,
-          cfg.sessionId,
-          cfg.maxAttachmentBytes === undefined
-            ? {}
-            : { maxAttachmentBytes: cfg.maxAttachmentBytes },
-        );
+        const sink = this.openSink(cfg.dir, cfg.sessionId, cfg.maxAttachmentBytes);
         this.session = ReportSession.start(
           {
             runId: cfg.runId,
@@ -341,11 +369,39 @@ export class QeReportReporter implements Reporter {
         );
         return;
       }
+      const phase = this.invocationPhase(error);
+      if (phase !== undefined) {
+        // An error in the configured global setup or teardown module belongs to the invocation as
+        // a whole: it is kept for session.finished, never given a test or a scope.
+        if (this.sessionFailures.length < MAX_FAILURES) {
+          this.sessionFailures.push({ ...f, phase });
+        } else {
+          this.sessionFailuresOmitted += 1;
+          this.diagnostics.once(
+            'session-failures-omitted',
+            `more than ${MAX_FAILURES} invocation-level errors; ${this.sessionFailuresOmitted} not recorded`,
+          );
+        }
+        this.diagnostics.once(
+          `invocation-error:${errorKey(error)}`,
+          `error in the global ${phase} module, recorded on session.finished: ${first}`,
+        );
+        return;
+      }
       this.diagnostics.once(
         `global-error:${errorKey(error)}`,
-        `error outside any test attempt is not recorded (protocol 0.2 has no event for it): ${first}`,
+        `error outside any test attempt and any test file is not recorded: ${first}`,
       );
     });
+  }
+
+  /** `setup` or `teardown` when the error is located in the configured global module. */
+  private invocationPhase(error: TestError): FailurePhase | undefined {
+    const file = error.location === undefined ? undefined : resolve(error.location.file);
+    if (file === undefined) return undefined;
+    if (file === this.globalSetup) return 'setup';
+    if (file === this.globalTeardown) return 'teardown';
+    return undefined;
   }
 
   /**
@@ -361,7 +417,7 @@ export class QeReportReporter implements Reporter {
     return relative?.file;
   }
 
-  onEnd(): void {
+  onEnd(result: FullResult): void {
     this.guard('onEnd', () => {
       const session = this.session;
       if (!session || !this.config) return;
@@ -379,12 +435,40 @@ export class QeReportReporter implements Reporter {
         }
         this.attempts.clear();
       }
-      session.finish();
-      // Only a run id this process generated is known to have no other session.
-      if (this.config.runIdGenerated) session.finishRun();
+      const finished = session.finish(this.outcome(result));
+      // Only a run id this process generated is known to have no other session, and only a
+      // session whose outcome was written may close the run.
+      if (finished && this.config.runIdGenerated) session.finishRun();
       session.close();
       this.session = undefined;
     });
+  }
+
+  /**
+   * Playwright's authoritative aggregate outcome for this invocation, as the session outcome.
+   * Errors of the global setup and teardown modules accompany a failed or inconclusive status;
+   * a passed session carries none by protocol rule.
+   */
+  private outcome(result: FullResult): SessionFinishedPayload {
+    const status = sessionStatus(result.status);
+    if (status === undefined) {
+      this.diagnostics.once(
+        `run-status:${result.status}`,
+        `run status '${result.status}' is unknown to this reporter; no session outcome recorded`,
+      );
+      return {};
+    }
+    const failures = status === 'passed' ? [] : withinBudget(this.sessionFailures);
+    if (status === 'passed' && this.sessionFailures.length > 0)
+      this.diagnostics.once(
+        'passed-with-errors',
+        `${this.sessionFailures.length} invocation-level error(s) reported although the run passed; not recorded`,
+      );
+    return {
+      status,
+      rawStatus: result.status,
+      ...(failures.length > 0 ? { failures } : {}),
+    };
   }
 
   private attach(

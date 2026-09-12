@@ -38,7 +38,7 @@
     "qe-report-sdk": "workspace:*"
   },
   "peerDependencies": {
-    "@playwright/test": ">=1.57.0"
+    "@playwright/test": ">=1.57.0 <2"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

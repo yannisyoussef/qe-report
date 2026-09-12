@@ -1,4 +1,4 @@
-import type { Suite, TestCase, TestResult, TestStep } from '@playwright/test/reporter';
+import type { FullResult, Suite, TestCase, TestResult, TestStep } from '@playwright/test/reporter';
 
 /** Minimal Playwright objects for mapping tests; only the members the reporter reads exist. */
 export const ROOT = '/work/project';
@@ -77,6 +77,10 @@ export function testResult(o: Partial<TestResult> = {}): TestResult {
     annotations: [],
     ...o,
   } as TestResult;
+}
+
+export function fullResult(status: FullResult['status']): FullResult {
+  return { status, startTime: new Date(0), duration: 1 };
 }
 
 export function testStep(o: Partial<TestStep> & { title: string; category: string }): TestStep {

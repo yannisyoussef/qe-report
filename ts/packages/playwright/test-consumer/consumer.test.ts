@@ -47,6 +47,10 @@ describe('qe-report-playwright consumer', () => {
         verdict: 'failed',
       });
       expect(run.events.some((e) => e.eventType === 'run.finished')).toBe(false);
+      expect(run.finished.map((e) => e.payload)).toEqual([
+        { status: 'failed', rawStatus: 'failed' },
+      ]);
+      expect(run.report.summary.failedSessions).toBe(1);
       expect(run.sessions[0]?.payload).toMatchObject({
         producer: { name: 'qe-report-playwright' },
         runner: { name: 'playwright' },
@@ -252,6 +256,7 @@ describe('qe-report-playwright consumer', () => {
     });
     noErrors(run);
     expect(run.report.summary).toMatchObject({ attempts: 12, verdict: 'passed' });
+    expect(run.finished.map((e) => e.payload)).toEqual([{ status: 'passed', rawStatus: 'passed' }]);
     expect(run.attempts.every((a) => a.started.payload.attemptNumber === 1)).toBe(true);
     expect(new Set(run.attempts.map((a) => a.started.payload.test.executionId)).size).toBe(12);
     expect(new Set(run.attempts.map((a) => a.started.payload.test.historicalId)).size).toBe(6);
@@ -280,6 +285,55 @@ describe('qe-report-playwright consumer', () => {
     expect(new Set(second.attempts.map((a) => a.started.payload.test.executionId)).size).toBe(40);
     for (const a of second.attempts) expect(a.finished.sessionId).toBe(a.started.sessionId);
     expect(first.report.summary.sessions).toBe(1);
+    expect(second.finished.map((e) => e.payload.status)).toEqual(['failed', 'failed']);
+    expect(second.report.summary.failedSessions).toBe(2);
+  });
+
+  it('derives a passed run from shards that all passed', async () => {
+    const runDir = freshDir('shards-passed');
+    await runPlaywright({
+      runDir,
+      runId: 'run-shards-passed',
+      args: ['pass.spec.ts', '--shard=1/2'],
+    });
+    const run = await runPlaywright({
+      runDir,
+      runId: 'run-shards-passed',
+      args: ['pass.spec.ts', '--shard=2/2'],
+    });
+    noErrors(run);
+    expect(run.finished.map((e) => e.payload)).toEqual([
+      { status: 'passed', rawStatus: 'passed' },
+      { status: 'passed', rawStatus: 'passed' },
+    ]);
+    expect(run.report.summary).toMatchObject({ sessions: 2, closed: false, verdict: 'passed' });
+  });
+
+  it('derives an inconclusive run from an interrupted shard beside a passed one', async () => {
+    const runDir = freshDir('shards-mixed');
+    const interrupted = await runPlaywright({
+      config: 'configs/slow.config.ts',
+      runDir,
+      runId: 'run-shards-mixed',
+      args: ['--shard=1/2'],
+      interruptWhenStarted: true,
+    });
+    expect(interrupted.playwright?.status).toBe('interrupted');
+    const run = await runPlaywright({
+      config: 'configs/slow.config.ts',
+      runDir,
+      runId: 'run-shards-mixed',
+      args: ['--shard=2/2'],
+    });
+    noErrors(run);
+    expect(run.finished.map((e) => e.payload.status).sort()).toEqual(['inconclusive', 'passed']);
+    expect(run.report.summary).toMatchObject({
+      sessions: 2,
+      complete: true,
+      inconclusiveSessions: 1,
+      failedSessions: 0,
+      verdict: 'inconclusive',
+    });
   });
 
   it('lets reporter options win over the environment', async () => {
@@ -324,8 +378,29 @@ describe('qe-report-playwright consumer', () => {
         verdict: 'passed',
         closed: true,
       });
+      expect(run.finished[0]?.payload).toEqual({ status: 'passed', rawStatus: 'passed' });
       expect(run.playwright?.status).toBe('passed');
       expect(run.exitCode).toBe(0);
+    });
+
+    it('a flaky test under failOnFlakyTests fails the session, and so the run, without any failure object', async () => {
+      const run = await runPlaywright({
+        config: 'configs/fail-on-flaky.config.ts',
+        args: ['-g', 'flaky passes on retry'],
+      });
+      noErrors(run);
+      const attempts = attemptsNamed(run, 'flaky passes on retry', 'desktop');
+      expect(attempts.map((a) => a.finished.payload.status)).toEqual(['failed', 'passed']);
+      expect(run.finished[0]?.payload).toEqual({ status: 'failed', rawStatus: 'failed' });
+      expect(run.report.summary).toMatchObject({
+        failedAttempts: 1,
+        scopeFailures: 0,
+        failedSessions: 1,
+        sessionFailures: 0,
+        verdict: 'failed',
+      });
+      expect(run.playwright?.status).toBe('failed');
+      expect(run.exitCode).toBe(1);
     });
 
     it('expected failures only pass for both', async () => {
@@ -352,60 +427,79 @@ describe('qe-report-playwright consumer', () => {
       );
       expect(one(run, 'runs after the error').finished.payload.status).toBe('passed');
       expect(run.report.summary.verdict).toBe('failed');
+      expect(run.finished[0]?.payload).toEqual({ status: 'failed', rawStatus: 'failed' });
       expect(run.playwright).toEqual({ status: 'failed', errors: [] });
     });
 
     /**
-     * The cases below are the protocol gate: Playwright ends the invocation failed, timed out,
-     * or interrupted for a reason that belongs to no attempt and no hierarchy scope, so nothing
-     * in protocol 0.2 can carry it and the derived verdict is `passed`. The reporter prints the
-     * error and records nothing; it never invents an attempt or a scope.
+     * Invocation-level outcomes: Playwright's aggregate status is the session outcome, so the
+     * derived verdict agrees with Playwright without any invented attempt or scope.
      */
-    it('global setup failure: Playwright fails, protocol 0.2 derives passed', async () => {
+    it('global setup failure: a failed session with a setup failure and no attempt', async () => {
       const run = await runPlaywright({ config: 'configs/global-setup-fails.config.ts' });
       noErrors(run);
       expect(run.exitCode).toBe(1);
       expect(run.playwright).toEqual({ status: 'failed', errors: ['Error: global setup broke'] });
+      expect(run.finished[0]?.payload).toMatchObject({
+        status: 'failed',
+        rawStatus: 'failed',
+        failures: [{ message: 'Error: global setup broke', phase: 'setup' }],
+      });
+      expect(run.finished[0]?.payload.failures?.[0]?.location).toEqual({
+        file: 'setup-fails.ts',
+        line: 2,
+        column: 9,
+      });
       expect(run.report.summary).toMatchObject({
         attempts: 0,
         scopeFailures: 0,
+        failedSessions: 1,
+        sessionFailures: 1,
         complete: true,
         closed: true,
-        verdict: 'passed',
+        verdict: 'failed',
       });
-      expect(run.diagnostics.join('\n')).toContain(
-        'error outside any test attempt is not recorded',
-      );
-      expect(run.diagnostics.join('\n')).toContain('global setup broke');
+      expect(run.events.some((e) => e.eventType === 'scope.failed')).toBe(false);
     });
 
-    it('global teardown failure: Playwright fails after a passed test, protocol 0.2 derives passed', async () => {
+    it('global teardown failure: the passed attempt keeps its verdict, the session fails', async () => {
       const run = await runPlaywright({ config: 'configs/global-teardown-fails.config.ts' });
       noErrors(run);
       expect(run.playwright).toEqual({
         status: 'failed',
         errors: ['Error: global teardown broke'],
       });
+      expect(one(run, 'passes').finished.payload.status).toBe('passed');
+      expect(run.finished[0]?.payload).toMatchObject({
+        status: 'failed',
+        rawStatus: 'failed',
+        failures: [{ message: 'Error: global teardown broke', phase: 'teardown' }],
+      });
       expect(run.report.summary).toMatchObject({
         attempts: 1,
         failedAttempts: 0,
-        verdict: 'passed',
+        failedSessions: 1,
+        sessionFailures: 1,
+        verdict: 'failed',
       });
-      expect(run.diagnostics.join('\n')).toContain('global teardown broke');
     });
 
-    it('global timeout: Playwright times out, the open attempt closes inconclusive, verdict passed', async () => {
+    it('global timeout: a failed session with the raw word timedout outranks the inconclusive attempt', async () => {
       const run = await runPlaywright({ config: 'configs/global-timeout.config.ts' });
       noErrors(run);
       expect(run.playwright?.status).toBe('timedout');
       expect(
         run.attempts.map((a) => [a.finished.payload.status, a.finished.payload.rawStatus]),
       ).toEqual([['inconclusive', 'unfinished']]);
-      expect(run.report.summary).toMatchObject({ complete: true, verdict: 'passed' });
-      expect(run.diagnostics.join('\n')).toContain('never finished before the run ended');
+      expect(run.finished[0]?.payload).toEqual({ status: 'failed', rawStatus: 'timedout' });
+      expect(run.report.summary).toMatchObject({
+        complete: true,
+        failedSessions: 1,
+        verdict: 'failed',
+      });
     });
 
-    it('interruption: Playwright is interrupted, the running attempt is inconclusive, verdict passed', async () => {
+    it('interruption: an inconclusive session and an inconclusive run, not a passed or incomplete one', async () => {
       const run = await runPlaywright({
         config: 'configs/slow.config.ts',
         interruptWhenStarted: true,
@@ -415,7 +509,16 @@ describe('qe-report-playwright consumer', () => {
       expect(
         run.attempts.map((a) => [a.finished.payload.status, a.finished.payload.rawStatus]),
       ).toEqual([['inconclusive', 'interrupted']]);
-      expect(run.report.summary).toMatchObject({ complete: true, verdict: 'passed' });
+      expect(run.finished[0]?.payload).toEqual({
+        status: 'inconclusive',
+        rawStatus: 'interrupted',
+      });
+      expect(run.report.summary).toMatchObject({
+        complete: true,
+        closed: true,
+        inconclusiveSessions: 1,
+        verdict: 'inconclusive',
+      });
     });
 
     it('spec load error: the file is a scope that failed in set-up, and both verdicts agree', async () => {
@@ -430,9 +533,13 @@ describe('qe-report-playwright consumer', () => {
         failures: [{ type: 'SyntaxError', phase: 'setup' }],
       });
       // Playwright aborts the invocation on a load error, so the other file never runs either.
+      // The file scope carries the concrete failure; the session carries Playwright's verdict.
+      expect(run.finished[0]?.payload).toEqual({ status: 'failed', rawStatus: 'failed' });
       expect(run.report.summary).toMatchObject({
         attempts: 0,
         scopeFailures: 1,
+        failedSessions: 1,
+        sessionFailures: 0,
         verdict: 'failed',
       });
       expect(run.diagnostics.join('\n')).toContain('recorded as a scope failure');

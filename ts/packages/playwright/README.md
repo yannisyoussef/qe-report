@@ -62,14 +62,14 @@ qe-report-validate build/qe-report --require-complete
 
 ## What is reported
 
-| Playwright                 | Protocol                                                                                                                                                                                                                          |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `onBegin`                  | `session.started`: producer `qe-report-playwright`, runner `playwright` with Playwright's version, environment `node.version`, labels `playwright.workers` and `playwright.shard`                                                 |
-| `onTestBegin`              | `attempt.started` with `attemptNumber = retry + 1`                                                                                                                                                                                |
-| `onStepBegin`, `onStepEnd` | `step.started`, `step.finished`, nested through `parentStepId`, `kind` = Playwright's step category (`hook`, `fixture`, `pw:api`, `expect`, `test.step`, `test.attach`)                                                           |
-| `onTestEnd`                | the attempt's attachments, then `attempt.finished`                                                                                                                                                                                |
-| `onError`                  | an error located in a test file outside any of its tests (a spec that fails to load) is a `scope.failed` for that file, with `phase: setup` when nothing ran there; any other error is printed and not recorded (see limitations) |
-| `onEnd`                    | `session.finished`, and `run.finished` for a generated run id                                                                                                                                                                     |
+| Playwright                 | Protocol                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onBegin`                  | `session.started`: producer `qe-report-playwright`, runner `playwright` with Playwright's version, environment `node.version`, labels `playwright.workers` and `playwright.shard`                                                                                                                                                                             |
+| `onTestBegin`              | `attempt.started` with `attemptNumber = retry + 1`                                                                                                                                                                                                                                                                                                            |
+| `onStepBegin`, `onStepEnd` | `step.started`, `step.finished`, nested through `parentStepId`, `kind` = Playwright's step category (`hook`, `fixture`, `pw:api`, `expect`, `test.step`, `test.attach`)                                                                                                                                                                                       |
+| `onTestEnd`                | the attempt's attachments, then `attempt.finished`                                                                                                                                                                                                                                                                                                            |
+| `onError`                  | an error located in a test file outside any of its tests (a spec that fails to load) is a `scope.failed` for that file, with `phase: setup` when nothing ran there; an error located in the configured global setup or teardown module is kept for `session.finished.failures` with `phase: setup` or `teardown`; any other error is printed and not recorded |
+| `onEnd`                    | `session.finished` with Playwright's aggregate `FullResult.status` as the session outcome (see below), then `run.finished` for a generated run id, only if the outcome was written                                                                                                                                                                            |
 
 ### Identity
 
@@ -111,6 +111,27 @@ An unexpected pass is `passed` with `expectedStatus: "failed"`; a flaky test is 
 attempt followed by an expected passed attempt; both are derived from attempts, and
 Playwright's aggregate outcome is not stored.
 
+### Session outcome
+
+Playwright's `onEnd` reports an authoritative status for the whole invocation, and the
+reporter records it as the session outcome without deriving anything from the attempts:
+
+| `FullResult.status` | `session.finished.status` | `rawStatus`   |
+| ------------------- | ------------------------- | ------------- |
+| `passed`            | `passed`                  | `passed`      |
+| `failed`            | `failed`                  | `failed`      |
+| `timedout`          | `failed`                  | `timedout`    |
+| `interrupted`       | `inconclusive`            | `interrupted` |
+
+Errors located in the configured `globalSetup` or `globalTeardown` module accompany a failed
+or inconclusive outcome as `session.finished.failures` with `phase: setup` or `teardown`, at
+most 32 of them; a passed session carries none. A spec that fails to load keeps its
+`scope.failed` for the file, and the session outcome records Playwright's verdict beside it.
+A flaky test that finally passed under `failOnFlakyTests` is two attempts, failed then
+passed, and a failed session with no failure object: the runner's policy is the session
+outcome, nothing else. If the SDK cannot write the outcome (it never replaces a status by an
+empty terminal event), the reporter emits no `run.finished`, and the run reads as incomplete.
+
 ### Failures
 
 Every `TestResult.errors` entry becomes a failure with its message and stack trace (terminal
@@ -145,10 +166,14 @@ path-backed attachment is therefore read into memory up to the attachment limit;
 | 1.63.0     | 22, 24 |
 | 1.57.0     | 22     |
 
+The peer range `>=1.57.0 <2` states compatibility intent; only the lines above are tested.
+
 The consumer fixture under `../../consumer-fixtures/playwright` runs real Playwright
 executions on Chromium: retries, `repeatEach`, two projects, two shards sharing a run,
-parallel workers, hook failures, attachments of every kind, and the runner-level cases below,
-and validates every run directory with the protocol validator.
+parallel workers, hook failures, attachments of every kind, a global setup failure, a global
+teardown failure, a global timeout, an interruption, `failOnFlakyTests`, and shards that
+passed, failed, or were interrupted, and validates every run directory with the protocol
+validator, comparing the derived verdict with Playwright's own final status in each case.
 
 ## Failure isolation
 
@@ -160,14 +185,11 @@ error is printed once and the affected event is dropped while the rest of the ru
 
 ## Limitations
 
-- Errors that belong to the whole invocation rather than to a test or a test file (global
-  setup or teardown failures, the global timeout), and an interrupted or timed-out invocation,
-  are printed but have no representation in protocol 0.2: the derived run verdict can be
-  `passed` while Playwright exits with a failure. The reporter never invents an attempt or a
-  scope to carry them. Global setup and teardown modules are recognised from the
-  configuration, so an error located in them is never mistaken for a test file's.
+- An `onError` without a location, or located outside the root directory and outside the
+  configured global modules, is printed and not recorded; Playwright's aggregate status still
+  fails the session.
 - A test Playwright never finishes (global timeout) is closed as `inconclusive` with
-  `rawStatus: "unfinished"` at the end of the run.
+  `rawStatus: "unfinished"` at the end of the run; the failed session outcome outranks it.
 - Standard output and error of tests are not captured.
 - The reporter is for direct `playwright test` invocations. Under `merge-reports`, which
   replays a blob, step and attempt attachments are distinct objects and a step-scoped

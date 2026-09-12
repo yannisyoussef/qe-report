@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { errorType, expectedStatus, failure, location, status } from '../src/mapping.js';
-import type { TestResult } from '@playwright/test/reporter';
+import {
+  errorType,
+  expectedStatus,
+  failure,
+  location,
+  sessionStatus,
+  status,
+} from '../src/mapping.js';
+import type { FullResult, TestResult } from '@playwright/test/reporter';
 import { ROOT } from './fakes.js';
 
 const ROOTS = { rootDir: ROOT, all: [ROOT] };
@@ -15,6 +22,14 @@ describe('status', () => {
     expect(status('skipped')).toBe('skipped');
     expect(status('interrupted')).toBe('inconclusive');
     expect(status('later' as TestResult['status'])).toBeUndefined();
+  });
+
+  it('maps the aggregate run status, whose timeout word differs from a test result', () => {
+    expect(sessionStatus('passed')).toBe('passed');
+    expect(sessionStatus('failed')).toBe('failed');
+    expect(sessionStatus('timedout')).toBe('failed');
+    expect(sessionStatus('interrupted')).toBe('inconclusive');
+    expect(sessionStatus('later' as FullResult['status'])).toBeUndefined();
   });
 
   it('carries only the expectations the protocol has', () => {
