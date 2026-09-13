@@ -5,4 +5,18 @@ export {
 } from './file-blob-store.js';
 export { BlobStoreError, type BlobStoreErrorCode } from './errors.js';
 export { isSha256 } from './sha256.js';
-export type { BlobDescriptor, BlobSource, BlobStore, OpenedBlob, PutResult } from './store.js';
+export type {
+  BlobDescriptor,
+  BlobMaintenance,
+  BlobSource,
+  BlobStore,
+  CasProblem,
+  ListObjectsOptions,
+  ListTemporaryOptions,
+  ObjectEntry,
+  ObjectListing,
+  OpenedBlob,
+  PutResult,
+  TemporaryFile,
+  TemporaryListing,
+} from './store.js';

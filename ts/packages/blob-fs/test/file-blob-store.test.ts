@@ -432,7 +432,7 @@ describe('FileBlobStore', () => {
     expect(existsSync(objectPath(root, src.sha256))).toBe(false);
   });
 
-  it('refuses a declaration above its size limit before reading anything', async () => {
+  it('refuses a declaration above its size limit before reading anything, and limits only what it admits', async () => {
     const base = freshDir('limit');
     const root = join(base, 'blobs');
     mkdirSync(root);
@@ -441,12 +441,19 @@ describe('FileBlobStore', () => {
     const e = await failure(store.put(src));
     expect(e.code).toBe('BLOB_TOO_LARGE');
     expect(readdirSync(root)).toEqual([]);
-    expect((await failure(store.verify(src.sha256, 17))).code).toBe('BLOB_TOO_LARGE');
-    expect((await failure(store.open(src.sha256, 17))).code).toBe('BLOB_TOO_LARGE');
     const small = sourceFile(join(base, 'src'), 'b', Buffer.alloc(16, 2));
     expect((await store.put(small)).outcome).toBe('stored');
     expect(new FileBlobStore(root).maxBlobBytes).toBe(DEFAULT_MAX_BLOB_BYTES);
     expect(() => new FileBlobStore(root, { maxBlobBytes: -1 })).toThrow(TypeError);
+    // The limit governs what may enter the store. An object already in it stays readable,
+    // verifiable, and removable even once the limit is lowered below its size.
+    const generous = new FileBlobStore(root, { maxBlobBytes: 1024 });
+    const big = sourceFile(join(base, 'src'), 'c', Buffer.alloc(512, 3));
+    expect((await generous.put(big)).outcome).toBe('stored');
+    const strict = new FileBlobStore(root, { maxBlobBytes: 16 });
+    expect(await strict.verify(big.sha256, big.sizeBytes)).toMatchObject({ sha256: big.sha256 });
+    expect((await strict.open(big.sha256, big.sizeBytes)).sizeBytes).toBe(big.sizeBytes);
+    expect(await strict.removeObject(big.sha256, big.sizeBytes)).toBe('removed');
   });
 
   posix('refuses to read an object through a link planted at one of its directories', async () => {
