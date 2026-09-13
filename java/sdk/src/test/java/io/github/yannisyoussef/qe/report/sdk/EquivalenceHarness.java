@@ -84,6 +84,15 @@ public final class EquivalenceHarness {
     sink.close();
   }
 
+  /** Label keys that are ordinary data everywhere, including in a JavaScript object. */
+  private static Map<String, String> labelsWithPrototypeNames() {
+    Map<String, String> labels = new LinkedHashMap<>();
+    labels.put("issue", "QE-1");
+    labels.put("__proto__", "a label named like a prototype");
+    labels.put("constructor", "c");
+    return labels;
+  }
+
   /** The same program as ts/packages/equivalence/src/scripted.ts. */
   static void scripted(Path out) throws IOException {
     Redactor redactor = Redactor.builder().sensitiveKey("otp").build();
@@ -119,7 +128,7 @@ public final class EquivalenceHarness {
                   new PathSegment("group", "group")),
               new Location("spec.ts", 3L, 1L),
               List.of("@smoke", "token=tag"),
-              Map.of("issue", "QE-1"));
+              labelsWithPrototypeNames());
       s.emit(new AttemptStarted("a-1", 1, t1));
       s.emit(
           new StepStarted(

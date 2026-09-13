@@ -175,11 +175,12 @@ export class Redactor {
    * text. Key order is preserved.
    */
   redactHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const [name, value] of Object.entries(headers)) {
-      out[name] = this.isSensitiveHeader(name) ? REDACTED : this.redactText(value);
-    }
-    return out;
+    return Object.fromEntries(
+      Object.entries(headers).map(([name, value]) => [
+        name,
+        this.isSensitiveHeader(name) ? REDACTED : this.redactText(value),
+      ]),
+    );
   }
 
   /**
@@ -197,11 +198,13 @@ export class Redactor {
     if (typeof value === 'string') return this.redactText(value);
     if (Array.isArray(value)) return value.map((v) => this.walk(v));
     if (typeof value === 'object' && value !== null) {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        out[k] = STRUCTURAL_KEYS.has(k) ? v : this.walk(v);
-      }
-      return out;
+      // Every key is data, `__proto__` included: define own properties rather than assign them.
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+          k,
+          STRUCTURAL_KEYS.has(k) ? v : this.walk(v),
+        ]),
+      );
     }
     return value;
   }

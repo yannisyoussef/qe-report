@@ -12,6 +12,10 @@
         "roundTrip": "exact"
       },
       {
+        "file": "events/valid/session-started-prototype-named-keys.json",
+        "roundTrip": "exact"
+      },
+      {
         "file": "events/valid/session-finished.json",
         "roundTrip": "exact"
       },

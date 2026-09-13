@@ -158,3 +158,48 @@ describe('limits beyond the committed corpus', () => {
     expect(validate(at)).toBe(false);
   });
 });
+
+describe('string maps keep every key as data', () => {
+  const mapText = '{"__proto__":"one","constructor":"two","prototype":"three","normal":"four"}';
+  // Written by hand: an object literal with a `__proto__:` entry would set the prototype instead.
+  const wire =
+    '{"protocolVersion":"0.3.0","eventId":"e-1","eventType":"session.started","runId":"r",' +
+    '"sessionId":"s","sequence":1,"occurredAt":"2026-01-01T00:00:00Z","payload":{"producer":' +
+    `{"name":"p"},"environment":${mapText},"labels":${mapText}}}`;
+
+  it('decodes __proto__ as an own enumerable string property without touching the prototype', () => {
+    const before = Object.getOwnPropertyNames(Object.prototype).sort();
+    const event = parseEvent(wire);
+    if (event.eventType !== 'session.started') throw new Error('unexpected type');
+    for (const m of [event.payload.environment, event.payload.labels]) {
+      const map = m as Record<string, string>;
+      expect(Object.getPrototypeOf(map)).toBe(Object.prototype);
+      expect(Object.prototype.hasOwnProperty.call(map, '__proto__')).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(map, '__proto__')).toMatchObject({
+        value: 'one',
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+      expect(Object.keys(map)).toEqual(['__proto__', 'constructor', 'prototype', 'normal']);
+      expect([map['__proto__'], map['constructor'], map['prototype'], map['normal']]).toEqual([
+        'one',
+        'two',
+        'three',
+        'four',
+      ]);
+      expect(JSON.stringify(map)).toBe(mapText);
+    }
+    expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(before);
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+  });
+
+  it('round-trips such maps through the codec unchanged', () => {
+    const written = stringifyEvent(parseEvent(wire));
+    expect(written).toContain('"__proto__":"one"');
+    expect(canonical(JSON.parse(written))).toBe(canonical(JSON.parse(wire)));
+    expect(canonical(JSON.parse(stringifyEvent(parseEvent(written))))).toBe(
+      canonical(JSON.parse(wire)),
+    );
+  });
+});

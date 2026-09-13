@@ -120,3 +120,28 @@ describe('cost', () => {
     expect(Date.now() - start).toBeLessThan(3000);
   });
 });
+
+describe('map keys named like prototype members', () => {
+  it('survive redaction as own data properties', () => {
+    const redactor = Redactor.create({});
+    const wire = JSON.stringify({
+      protocolVersion: '0.3.0',
+      eventId: 'e-1',
+      eventType: 'session.started',
+      runId: 'r',
+      sessionId: 's',
+      sequence: 1,
+      occurredAt: '2026-01-01T00:00:00Z',
+      payload: { producer: { name: 'p' }, labels: { normal: 'password=x' } },
+    }).replace('"normal":', '"__proto__":"token=abc","constructor":"c","normal":');
+    const event = redactor.redactEvent(parseEvent(wire));
+    if (event.eventType !== 'session.started') throw new Error('unexpected type');
+    const labels = event.payload.labels as Record<string, string>;
+    expect(Object.getPrototypeOf(labels)).toBe(Object.prototype);
+    expect(Object.keys(labels)).toEqual(['__proto__', 'constructor', 'normal']);
+    expect(labels['__proto__']).toBe(`token=${REDACTED}`);
+    expect(labels['constructor']).toBe('c');
+    expect(labels['normal']).toBe(`password=${REDACTED}`);
+    expect(JSON.stringify(labels)).toContain('"__proto__":');
+  });
+});
