@@ -19,6 +19,7 @@ import {
   type RunArchive,
 } from './archive.js';
 import { AttachmentIntegrityError, BlobSizeConflictError } from './errors.js';
+import { MAINTENANCE_LOCK_KEY, withIngestionLock } from './locks.js';
 import { MATERIALISE_CONCURRENCY, eachLimited, materialiseBlobs } from './materialise.js';
 
 export interface PersistRequest {
@@ -26,6 +27,13 @@ export interface PersistRequest {
   readonly projectId: string;
   /** The run directory to validate and archive; stored as provenance only. */
   readonly runDirectory: string;
+  /**
+   * The instant after which retention may delete this run: ingestion context like the project
+   * id, supplied by whoever ingests and never derived from the run's events, its files, or the
+   * time it was archived. An instant already past is valid and makes the run eligible at once.
+   * A run archived here always gets one; the first one recorded is the one that stands.
+   */
+  readonly expiresAt: Date;
 }
 
 export type PersistResult =
@@ -39,6 +47,11 @@ export type PersistResult =
        * durable; zero for a run archived with them. The run's source and provenance are untouched.
        */
       readonly blobRelationsAdded: number;
+      /**
+       * True when this call gave a retention-unmanaged run its missing retention fact, which a
+       * run archived before retention existed has none of. An established expiry is never moved.
+       */
+      readonly retentionAdded: boolean;
     }
   | {
       readonly kind: 'rejected';
@@ -92,6 +105,12 @@ export interface StoredRun {
    * the source then; whether durable bytes exist now is `blobs` plus verification.
    */
   readonly sourceAttachmentsVerified: boolean;
+  /**
+   * When retention may delete this run. Absent for a run archived before retention existed:
+   * such a run is retention-unmanaged, is never swept, and gains its fact only if it is
+   * re-ingested from its source.
+   */
+  readonly expiresAt: Date | undefined;
   /** The validator summary at ingestion; an audit record, never the source of outcomes. */
   readonly validationSummary: Summary;
   readonly sourceLines: readonly StoredSourceLine[];
@@ -130,6 +149,16 @@ function checkProjectId(projectId: string): void {
   }
 }
 
+/** Retention refuses to guess: an ingestion states one finite instant, or archives nothing. */
+function checkExpiresAt(expiresAt: unknown): Date {
+  if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())) {
+    throw new TypeError(
+      'expiresAt must be a valid Date: the instant after which retention may delete the run',
+    );
+  }
+  return expiresAt;
+}
+
 const LINE_COLUMNS = 13;
 /** PostgreSQL allows 65535 parameters per statement; 500 rows of 13 stay well below. */
 const LINES_PER_STATEMENT = 500;
@@ -158,6 +187,7 @@ export class PostgresRunStore {
    */
   async persistRunDirectory(request: PersistRequest): Promise<PersistResult> {
     checkProjectId(request.projectId);
+    const expiresAt = checkExpiresAt(request.expiresAt);
     const validated = await validateRunDirectorySnapshot(request.runDirectory, {
       retainEvents: true,
       retainSourceLines: true,
@@ -185,49 +215,26 @@ export class PostgresRunStore {
     }
     // validateRunDirectorySnapshot checked the bytes under <run>/attachments against the events.
     const archive = buildArchive(validated);
-    const known = await this.knownRun(request.projectId, archive);
-    if (known !== undefined) return known;
-    const published = await materialiseBlobs(
-      this.blobs,
-      request.runDirectory,
-      archive.requiredBlobs,
-    );
-    return persistArchive(this.pool, request.projectId, request.runDirectory, archive, published);
-  }
-
-  /**
-   * An advisory look before any blob work: a run already archived with the same content and
-   * every required relation is `already_present`, and different content is `conflict`, without
-   * copying a byte. Anything else (absent, or a legacy archive missing relations) goes through
-   * materialisation and the transaction, which settle races on their own.
-   */
-  private async knownRun(
-    projectId: string,
-    archive: RunArchive,
-  ): Promise<PersistResult | undefined> {
-    const stored = await storedFingerprint(this.pool, projectId, archive);
-    if (stored === undefined) return undefined;
-    if (stored.fingerprint !== archive.contentFingerprint) {
-      return {
-        kind: 'conflict',
-        reason: 'RUN_CONFLICT',
-        runId: archive.runId,
-        storedFingerprint: stored.fingerprint,
-        offeredFingerprint: archive.contentFingerprint,
-      };
-    }
-    const related = await this.pool.query<{ sha256: string }>(
-      'SELECT sha256 FROM qe_run_blobs WHERE project_id = $1 AND run_id = $2',
-      [projectId, archive.runId],
-    );
-    const known = new Set(related.rows.map((r) => r.sha256));
-    if (archive.requiredBlobs.some((b) => !known.has(b.sha256))) return undefined;
-    return {
-      kind: 'already_present',
-      runId: archive.runId,
-      ingestionSequence: stored.ingestionSequence,
-      blobRelationsAdded: 0,
-    };
+    // From here the call may publish bytes or write rows, so it holds the maintenance lock
+    // shared: destructive retention cannot interleave with the identity check, the
+    // materialisation, or the transaction, and other ingestions still run beside it.
+    return withIngestionLock(this.pool, async (client) => {
+      const known = await knownRun(client, request.projectId, archive, expiresAt);
+      if (known !== undefined) return known;
+      const published = await materialiseBlobs(
+        this.blobs,
+        request.runDirectory,
+        archive.requiredBlobs,
+      );
+      return persistArchive(
+        client,
+        request.projectId,
+        request.runDirectory,
+        archive,
+        published,
+        expiresAt,
+      );
+    });
   }
 
   /** The archived run, or nothing when the project holds no such run. */
@@ -242,12 +249,16 @@ export class PostgresRunStore {
       protocol_versions: string[];
       source_line_count: number;
       source_attachments_verified: boolean;
+      expires_at: Date | null;
       validation_summary: Summary;
     }>(
-      `SELECT ingestion_sequence, ingested_at, source_locator, content_fingerprint,
-              fingerprint_version, protocol_versions, source_line_count,
-              source_attachments_verified, validation_summary
-         FROM qe_runs WHERE project_id = $1 AND run_id = $2`,
+      `SELECT r.ingestion_sequence, r.ingested_at, r.source_locator, r.content_fingerprint,
+              r.fingerprint_version, r.protocol_versions, r.source_line_count,
+              r.source_attachments_verified, r.validation_summary, t.expires_at
+         FROM qe_runs r
+         LEFT JOIN qe_run_retention t
+           ON t.project_id = r.project_id AND t.run_id = r.run_id
+        WHERE r.project_id = $1 AND r.run_id = $2`,
       [projectId, runId],
     );
     const head = run.rows[0];
@@ -294,6 +305,7 @@ export class PostgresRunStore {
       protocolVersions: head.protocol_versions,
       sourceLineCount: head.source_line_count,
       sourceAttachmentsVerified: head.source_attachments_verified,
+      expiresAt: head.expires_at ?? undefined,
       validationSummary: head.validation_summary,
       sourceLines: lines.rows.map((r) => ({
         storageOrdinal: r.storage_ordinal,
@@ -428,22 +440,83 @@ export class PostgresRunStore {
 }
 
 /**
- * The transaction behind every persist: claim the identity, record the blobs, insert every line
- * and every run-to-blob relation, commit; or read the claimant and back out. `published` must
- * cover every blob the archive requires: the database references only blobs the store already
- * holds. Exported for the package's own tests; callers archive through the store, which admits
- * only complete valid runs whose bytes it materialised itself.
+ * An advisory look before any blob work: a run already archived with the same content, every
+ * required relation, and its retention fact is `already_present`, and different content is
+ * `conflict`, without copying a byte. Anything else (absent, or an archive missing relations or
+ * retention) goes through materialisation and the transaction, which settle races on their own.
+ */
+async function knownRun(
+  client: PoolClient,
+  projectId: string,
+  archive: RunArchive,
+  expiresAt: Date,
+): Promise<PersistResult | undefined> {
+  const stored = await storedFingerprint(client, projectId, archive);
+  if (stored === undefined) return undefined;
+  if (stored.fingerprint !== archive.contentFingerprint) {
+    return {
+      kind: 'conflict',
+      reason: 'RUN_CONFLICT',
+      runId: archive.runId,
+      storedFingerprint: stored.fingerprint,
+      offeredFingerprint: archive.contentFingerprint,
+    };
+  }
+  const related = await client.query<{ sha256: string }>(
+    'SELECT sha256 FROM qe_run_blobs WHERE project_id = $1 AND run_id = $2',
+    [projectId, archive.runId],
+  );
+  const known = new Set(related.rows.map((r) => r.sha256));
+  if (archive.requiredBlobs.some((b) => !known.has(b.sha256))) return undefined;
+  // Its bytes are all accounted for, so only the lifecycle fact can still be missing, and that
+  // needs no blob work at all: one row completes a run archived before retention existed.
+  const retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
+  return {
+    kind: 'already_present',
+    runId: archive.runId,
+    ingestionSequence: stored.ingestionSequence,
+    blobRelationsAdded: 0,
+    retentionAdded,
+  };
+}
+
+/**
+ * The transaction behind every persist: claim the identity, record the blobs, insert every line,
+ * every run-to-blob relation, and the retention fact, commit; or read the claimant and back out.
+ * `published` must cover every blob the archive requires: the database references only blobs the
+ * store already holds. The caller owns the connection; the shared maintenance lock is taken on
+ * it here as well as by the caller, so that this can never write while a retention pass is
+ * deleting, however it is called. A session lock is counted, so nesting is harmless.
  */
 export async function persistArchive(
-  pool: Pool,
+  client: PoolClient,
   projectId: string,
   sourceLocator: string,
   archive: RunArchive,
   published: readonly BlobDescriptor[],
+  expiresAt: Date,
 ): Promise<PersistResult> {
   checkProjectId(projectId);
+  checkExpiresAt(expiresAt);
   const blobs = coveredBlobs(archive.requiredBlobs, published);
-  const client = await pool.connect();
+  await client.query('SELECT pg_advisory_lock_shared($1)', [MAINTENANCE_LOCK_KEY]);
+  try {
+    return await archiveWithin(client, projectId, sourceLocator, archive, blobs, expiresAt);
+  } finally {
+    await client
+      .query('SELECT pg_advisory_unlock_shared($1)', [MAINTENANCE_LOCK_KEY])
+      .catch(() => undefined);
+  }
+}
+
+async function archiveWithin(
+  client: PoolClient,
+  projectId: string,
+  sourceLocator: string,
+  archive: RunArchive,
+  blobs: readonly BlobDescriptor[],
+  expiresAt: Date,
+): Promise<PersistResult> {
   try {
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
     const claimed = await client.query<{ ingestion_sequence: string }>(
@@ -474,8 +547,8 @@ export async function persistArchive(
         throw new Error('run identity claimed by a transaction that vanished; retry');
       }
       if (stored.fingerprint !== archive.contentFingerprint) {
+        // A different content under this identity changes nothing at all, retention included.
         await client.query('ROLLBACK');
-        client.release();
         return {
           kind: 'conflict',
           reason: 'RUN_CONFLICT',
@@ -497,31 +570,50 @@ export async function persistArchive(
         await recordBlobs(client, missing);
         added = await relateBlobs(client, projectId, archive.runId, missing);
       }
+      // A run archived before retention existed gains its fact here. One already recorded is
+      // left exactly as it is: an established expiry is never moved by re-ingestion.
+      const retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
       await client.query('COMMIT');
-      client.release();
       return {
         kind: 'already_present',
         runId: archive.runId,
         ingestionSequence: stored.ingestionSequence,
         blobRelationsAdded: added,
+        retentionAdded,
       };
     }
     await recordBlobs(client, blobs);
     await insertLines(client, projectId, archive.runId, archive.lines);
     await relateBlobs(client, projectId, archive.runId, blobs);
+    // In the same transaction as the run: this writer never leaves a run without its expiry.
+    await recordRetention(client, projectId, archive.runId, expiresAt);
     await client.query('COMMIT');
-    client.release();
     return {
       kind: 'inserted',
       runId: archive.runId,
       ingestionSequence: BigInt(row.ingestion_sequence),
     };
   } catch (e) {
-    // The connection may be mid-transaction or broken: roll back if possible and discard it.
+    // The transaction is abandoned; the caller decides what to do with the connection.
     await client.query('ROLLBACK').catch(() => undefined);
-    client.release(e instanceof Error ? e : new Error(String(e)));
     throw e;
   }
+}
+
+/** Records the run's expiry when it has none; true when this call wrote it. */
+async function recordRetention(
+  client: PoolClient,
+  projectId: string,
+  runId: string,
+  expiresAt: Date,
+): Promise<boolean> {
+  const written = await client.query(
+    `INSERT INTO qe_run_retention (project_id, run_id, expires_at) VALUES ($1, $2, $3)
+     ON CONFLICT (project_id, run_id) DO NOTHING
+     RETURNING run_id`,
+    [projectId, runId, expiresAt],
+  );
+  return (written.rowCount ?? 0) > 0;
 }
 
 /**

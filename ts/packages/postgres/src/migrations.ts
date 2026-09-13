@@ -127,4 +127,47 @@ COMMENT ON COLUMN qe_runs.source_attachments_verified IS
   'The validation pass at ingestion checked the source attachment bytes against their declarations. An audit claim about the source at that moment, never proof that durable bytes exist: durable presence is qe_run_blobs plus qe_blobs, and integrity is established only by re-reading the blob store.';
 `,
   },
+  {
+    version: 3,
+    name: 'run-retention-and-cascades',
+    sql: `
+CREATE TABLE qe_run_retention (
+  project_id  text        NOT NULL,
+  run_id      text        NOT NULL,
+  expires_at  timestamptz NOT NULL,
+  CONSTRAINT qe_run_retention_pkey PRIMARY KEY (project_id, run_id),
+  CONSTRAINT qe_run_retention_run_fkey FOREIGN KEY (project_id, run_id)
+    REFERENCES qe_runs (project_id, run_id) ON DELETE CASCADE
+);
+
+COMMENT ON TABLE qe_run_retention IS
+  'The lifecycle fact of an archived run: when retention may delete it. A run with no row here was archived before retention existed and is retention-unmanaged: it is reported, never swept. Absence of a row is deliberate, so that no expiry is ever invented for data archived without one.';
+COMMENT ON COLUMN qe_run_retention.project_id IS
+  'The run''s project, as in qe_runs: retention is recorded per archived run, never per project.';
+COMMENT ON COLUMN qe_run_retention.run_id IS
+  'The run this expiry belongs to; the row goes when the run does.';
+COMMENT ON COLUMN qe_run_retention.expires_at IS
+  'Absolute instant supplied by whoever ingested the run, like the project id and never derived from its events, its files, or its ingestion time. Immutable once written: ordinary re-ingestion of the same run does not move it.';
+
+CREATE INDEX qe_run_retention_expires_at_idx ON qe_run_retention (expires_at, project_id, run_id);
+
+-- A run is deleted as a whole: its source, its blob relations, and its retention fact go with it.
+-- qe_run_blobs is not cascaded into qe_blobs: a blob is global, and it is collected only after a
+-- reference count across every project reaches zero.
+-- Added NOT VALID and validated separately: the rows are already known to satisfy the same
+-- reference, and this keeps the upgrade from holding the archive under an exclusive lock while
+-- every existing row is re-checked.
+ALTER TABLE qe_run_source_lines
+  DROP CONSTRAINT qe_run_source_lines_run_fkey,
+  ADD CONSTRAINT qe_run_source_lines_run_fkey FOREIGN KEY (project_id, run_id)
+    REFERENCES qe_runs (project_id, run_id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE qe_run_source_lines VALIDATE CONSTRAINT qe_run_source_lines_run_fkey;
+
+ALTER TABLE qe_run_blobs
+  DROP CONSTRAINT qe_run_blobs_run_fkey,
+  ADD CONSTRAINT qe_run_blobs_run_fkey FOREIGN KEY (project_id, run_id)
+    REFERENCES qe_runs (project_id, run_id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE qe_run_blobs VALIDATE CONSTRAINT qe_run_blobs_run_fkey;
+`,
+  },
 ];

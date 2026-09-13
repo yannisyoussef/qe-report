@@ -1,4 +1,17 @@
 export { migrate, type AppliedMigration } from './migrate.js';
+export { MAINTENANCE_LOCK_KEY, MaintenanceBusyError } from './locks.js';
+export {
+  RetentionMaintenance,
+  DEFAULT_LIMITS,
+  type ExpiredRun,
+  type LegacyRun,
+  type MaintenanceOptions,
+  type MaintenanceProblem,
+  type MaintenanceProblemCode,
+  type MaintenanceReport,
+  type ReclaimedBlob,
+  type ReclaimedTemporaryFile,
+} from './retention.js';
 export {
   AttachmentIntegrityError,
   BlobSizeConflictError,
