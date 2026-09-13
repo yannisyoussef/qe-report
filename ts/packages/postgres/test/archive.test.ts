@@ -7,9 +7,21 @@ import {
   buildArchive,
   contentFingerprint,
   orderLines,
+  requiredBlobs,
 } from '../src/archive.js';
+import { BlobSizeConflictError } from '../src/errors.js';
 import { FIXTURES_DIR, manifest } from '../../protocol/test/helpers.js';
-import { freshRoot } from '../../read-model/test/synthetic.js';
+import {
+  attachment,
+  attemptFinished,
+  attemptStarted,
+  finished,
+  freshRoot,
+  sha256,
+  started,
+  testCase,
+  writeRun,
+} from '../../read-model/test/synthetic.js';
 
 const line = (
   overrides: Partial<ValidatedSourceLine> & { readonly eventId: string },
@@ -112,8 +124,8 @@ describe('content fingerprint', () => {
       expect(contentFingerprint(reversed.sourceLines), fixture).toBe(
         contentFingerprint(original.sourceLines),
       );
-      const a = buildArchive(original, true);
-      const b = buildArchive(reversed, true);
+      const a = buildArchive(original);
+      const b = buildArchive(reversed);
       expect(
         b.lines.map((l) => [l.storageOrdinal, l.eventId, l.disposition, l.canonicalSha256]),
         fixture,
@@ -144,7 +156,7 @@ describe('content fingerprint', () => {
       const validated = await validateRunDirectorySnapshot(join(FIXTURES_DIR, run.dir), {
         retainSourceLines: true,
       });
-      const archive = buildArchive(validated, true);
+      const archive = buildArchive(validated);
       expect(archive.lines.length, run.dir).toBe(validated.sourceLines.length);
       expect(
         archive.lines.map((l) => l.storageOrdinal),
@@ -164,5 +176,61 @@ describe('content fingerprint', () => {
         run.dir,
       ).toHaveLength(validated.report.summary.ignored);
     }
+  });
+});
+
+describe('required blobs', () => {
+  it('lists each distinct hash once with its declared size, whatever the references', async () => {
+    const root = freshRoot('required');
+    const one = Buffer.from('one');
+    const two = Buffer.from('two');
+    const dir = writeRun(
+      root,
+      'r',
+      'run-req',
+      [
+        {
+          sessionId: 's',
+          events: [
+            started('pw'),
+            attemptStarted('a', 1, testCase('e', 'h')),
+            attachment('a', one, { name: 'first' }),
+            attachment('a', two, { name: 'second', mediaType: 'application/octet-stream' }),
+            attachment('a', one, { name: 'first again' }),
+            attemptFinished('a', 'passed'),
+            finished(),
+          ],
+        },
+      ],
+      [one, two],
+    );
+    const validated = await validateRunDirectorySnapshot(dir, { retainSourceLines: true });
+    expect(validated.report.summary.attachments).toBe(3);
+    const required = requiredBlobs(validated);
+    expect(required).toEqual(
+      [
+        { sha256: sha256(one), sizeBytes: 3 },
+        { sha256: sha256(two), sizeBytes: 3 },
+      ].sort((a, b) => (a.sha256 < b.sha256 ? -1 : 1)),
+    );
+    expect(buildArchive(validated).requiredBlobs).toEqual(required);
+    expect(requiredBlobs({ ...validated, events: [] })).toEqual([]);
+  });
+
+  it('refuses a run whose events give one hash two sizes, and an archive built without events', async () => {
+    const validated = await validateRunDirectorySnapshot(join(FIXTURES_DIR, 'runs/karate'), {
+      retainSourceLines: true,
+    });
+    const first = validated.events.find((e) => e.eventType === 'attachment.added');
+    if (first === undefined || first.eventType !== 'attachment.added') throw new Error('fixture');
+    const disagreeing = {
+      ...validated,
+      events: [
+        ...validated.events,
+        { ...first, payload: { ...first.payload, sizeBytes: first.payload.sizeBytes + 1 } },
+      ],
+    };
+    expect(() => requiredBlobs(disagreeing)).toThrow(BlobSizeConflictError);
+    expect(() => buildArchive({ ...validated, events: [] })).toThrow(/retainEvents/u);
   });
 });

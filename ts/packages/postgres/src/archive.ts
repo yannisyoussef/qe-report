@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Summary, ValidatedRun, ValidatedSourceLine } from 'qe-report-validator';
+import { BlobSizeConflictError } from './errors.js';
 
 /** Bumped only if the fingerprint rule changes; stored beside every fingerprint. */
 export const FINGERPRINT_VERSION = 1;
@@ -7,6 +8,12 @@ export const FINGERPRINT_VERSION = 1;
 /** One source line in storage order. */
 export interface ArchivedLine extends ValidatedSourceLine {
   readonly storageOrdinal: number;
+}
+
+/** One distinct byte object a run's attachment events require, with the one size they declare. */
+export interface RequiredBlob {
+  readonly sha256: string;
+  readonly sizeBytes: number;
 }
 
 /** What one transaction writes: built in memory from a successful validation pass, never re-read from disk. */
@@ -17,8 +24,10 @@ export interface RunArchive {
   readonly fingerprintVersion: number;
   readonly protocolVersions: readonly string[];
   readonly summary: Summary;
-  /** Whether the validation pass behind this archive checked the attachment bytes. */
-  readonly attachmentsVerified: boolean;
+  /** The validation pass behind this archive checked the source attachment bytes; always true for a directory validation. */
+  readonly sourceAttachmentsVerified: boolean;
+  /** The distinct blobs the run's attachment events reference, by hash; every one must be durable before the run is. */
+  readonly requiredBlobs: readonly RequiredBlob[];
 }
 
 function compare(a: string, b: string): number {
@@ -63,14 +72,39 @@ export function contentFingerprint(
 }
 
 /**
- * Builds the immutable archive of a validated run. The caller has checked validity and
- * completeness, and says whether that validation checked the attachment bytes: the store cannot
- * tell from the report, and a replayed run was validated without them.
+ * The distinct blobs a validated run's attachment events reference, by hash. One hash carries
+ * one size: two declarations disagreeing about it name bytes that cannot both exist, which a
+ * directory validation would already have refused for at least one of them.
  */
-export function buildArchive(validated: ValidatedRun, attachmentsVerified: boolean): RunArchive {
+export function requiredBlobs(validated: ValidatedRun): RequiredBlob[] {
+  const sizes = new Map<string, number>();
+  for (const event of validated.events) {
+    if (event.eventType !== 'attachment.added') continue;
+    const { sha256, sizeBytes } = event.payload;
+    const known = sizes.get(sha256);
+    if (known !== undefined && known !== sizeBytes) {
+      throw new BlobSizeConflictError(sha256, known, sizeBytes, 'the run declares');
+    }
+    sizes.set(sha256, sizeBytes);
+  }
+  return [...sizes.entries()]
+    .map(([sha256, sizeBytes]) => ({ sha256, sizeBytes }))
+    .sort((a, b) => compare(a.sha256, b.sha256));
+}
+
+/**
+ * Builds the immutable archive of a validated run. The caller has checked validity and
+ * completeness, and validated the run directory with its bytes: the store's only writer does,
+ * so the archive records that the source attachments were verified. The events must have been
+ * retained, so that the required blobs can be derived.
+ */
+export function buildArchive(validated: ValidatedRun): RunArchive {
   const lines = orderLines(validated.sourceLines);
   const first = lines[0];
   if (first === undefined) throw new Error('a valid run has at least one source line');
+  if (validated.report.summary.attachments > 0 && validated.events.length === 0) {
+    throw new Error('the validated run carries no events; validate with retainEvents');
+  }
   return {
     runId: first.runId,
     lines,
@@ -78,6 +112,7 @@ export function buildArchive(validated: ValidatedRun, attachmentsVerified: boole
     fingerprintVersion: FINGERPRINT_VERSION,
     protocolVersions: [...new Set(lines.map((l) => l.protocolVersion))].sort(compare),
     summary: validated.report.summary,
-    attachmentsVerified,
+    sourceAttachmentsVerified: true,
+    requiredBlobs: requiredBlobs(validated),
   };
 }

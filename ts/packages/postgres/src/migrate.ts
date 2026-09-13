@@ -13,6 +13,15 @@ export interface AppliedMigration {
   readonly appliedNow: boolean;
 }
 
+/** The bookkeeping table; created before the first migration and never migrated itself. */
+export const SCHEMA_MIGRATIONS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS qe_schema_migrations (
+    version     integer     PRIMARY KEY,
+    name        text        NOT NULL,
+    checksum    text        NOT NULL,
+    applied_at  timestamptz NOT NULL DEFAULT now()
+  )`;
+
 export function migrationChecksum(migration: Migration): string {
   return createHash('sha256')
     .update(`${migration.version}:${migration.name}\n`, 'utf8')
@@ -31,13 +40,7 @@ export async function migrate(pool: Pool): Promise<readonly AppliedMigration[]> 
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
     try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS qe_schema_migrations (
-          version     integer     PRIMARY KEY,
-          name        text        NOT NULL,
-          checksum    text        NOT NULL,
-          applied_at  timestamptz NOT NULL DEFAULT now()
-        )`);
+      await client.query(SCHEMA_MIGRATIONS_TABLE_SQL);
       const recorded = new Map<number, { name: string; checksum: string }>();
       const rows = await client.query<{ version: number; name: string; checksum: string }>(
         'SELECT version, name, checksum FROM qe_schema_migrations ORDER BY version',
