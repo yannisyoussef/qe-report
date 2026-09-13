@@ -100,6 +100,9 @@ jobs:
         run: |
           pnpm build
           pnpm test:playwright-consumer
+      - name: Project real Playwright runs into the read model
+        working-directory: ts
+        run: pnpm test:read-model-playwright
 
   equivalence:
     name: Cross-language equivalence
@@ -132,3 +135,6 @@ jobs:
       - name: Validate the Gradle and Maven consumer runs
         working-directory: ts
         run: pnpm test:consumer-runs
+      - name: Project the Gradle and Maven consumer runs into the read model
+        working-directory: ts
+        run: pnpm test:read-model-junit

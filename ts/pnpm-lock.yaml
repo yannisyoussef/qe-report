@@ -234,6 +234,15 @@ importers:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
 
+  packages/read-model:
+    dependencies:
+      qe-report-protocol:
+        specifier: workspace:*
+        version: link:../protocol
+      qe-report-validator:
+        specifier: workspace:*
+        version: link:../validator
+
   packages/sdk:
     dependencies:
       qe-report-protocol:

@@ -7,8 +7,10 @@ ecosystem architecture and decision records apply here.
 
 Status: protocol compatibility line 0.3 is defined and implemented in both
 languages; a JUnit Platform adapter produces it from real Gradle and Maven
-builds, and a Playwright Test reporter from real Playwright runs. No HTTP
-transport and no reporting server exist yet. Nothing is published.
+builds, and a Playwright Test reporter from real Playwright runs; an
+in-memory read model projects validated runs into runs, test histories,
+and flakiness. No HTTP transport, no persistence, and no reporting server
+exist yet. Nothing is published.
 
 ## What is here
 
@@ -17,7 +19,7 @@ transport and no reporting server exist yet. Nothing is published.
 | [`protocol/`](protocol/README.md) | The protocol: JSON Schema (source of truth), fixture corpus, redaction cases, documentation. |
 | [`java/`](java/) | Gradle build. `protocol` (model and codec), `sdk` (session writer, file sink, redaction), and [`junit-platform`](java/junit-platform/README.md) (a `TestExecutionListener` discovered through ServiceLoader). Library bytecode targets Java 17. |
 | [`java/consumer-fixtures/`](java/consumer-fixtures/README.md) | Gradle and Maven Surefire projects that consume the adapter as a published artifact; run by the adapter's tests, not part of the build. |
-| [`ts/`](ts/) | pnpm workspace. `protocol` (types and codec), `sdk` (session writer, file sink, redaction), `validator` (library and `qe-report-validate` CLI), [`playwright`](ts/packages/playwright/README.md) (a Playwright Test reporter), and a test-only `equivalence` harness. Node 22 or newer. |
+| [`ts/`](ts/) | pnpm workspace. `protocol` (types and codec), `sdk` (session writer, file sink, redaction), `validator` (library and `qe-report-validate` CLI), [`playwright`](ts/packages/playwright/README.md) (a Playwright Test reporter), [`read-model`](ts/packages/read-model/README.md) (validation-first projection of run directories into runs, histories, and flakiness), and a test-only `equivalence` harness. Node 22 or newer. |
 | [`ts/consumer-fixtures/`](ts/consumer-fixtures/playwright/README.md) | A Playwright project that consumes the reporter as a package; run by the reporter's consumer tests, not part of the build. |
 
 Read [`protocol/README.md`](protocol/README.md) first: it explains the

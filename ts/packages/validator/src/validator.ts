@@ -114,6 +114,24 @@ export interface ValidateOptions {
   /** Report an incomplete run as an error instead of an info. */
   readonly requireComplete?: boolean;
   readonly maxEventBytes?: number;
+  /**
+   * Keep every accepted known event for {@link RunValidator.acceptedEvents}. Off by default, so plain
+   * validation retains nothing but its bookkeeping.
+   */
+  readonly retainEvents?: boolean;
+}
+
+/** A validated run: the report, and the events validation accepted when they were retained. */
+export interface ValidatedRun {
+  readonly report: Report;
+  /**
+   * The known events that passed decoding, the schema, and the duplicate check, in the order
+   * they were fed (file by file, each file in line order). Identical duplicates appear once;
+   * unknown ignorable events are counted in the summary and not listed. Empty when events were
+   * not retained. When the report is invalid the list is what was accepted before or beside the
+   * errors and carries no guarantee of lifecycle consistency.
+   */
+  readonly events: readonly Event[];
 }
 
 const SCHEMA_PATH = new URL('../schema/event.schema.json', import.meta.url);
@@ -221,6 +239,7 @@ export class RunValidator {
   private readonly attempts = new Map<string, AttemptState>();
   private readonly executions = new Map<string, ExecutionState>();
   private readonly attachments: (Location & { sha256: string; sizeBytes: number })[] = [];
+  private readonly accepted: Event[] = [];
   private runId: string | undefined;
   private runFinished: Location | undefined;
   private files = 0;
@@ -406,6 +425,7 @@ export class RunValidator {
         });
         continue;
       }
+      if (this.options.retainEvents) this.accepted.push(event);
       switch (event.eventType) {
         case 'session.started':
           break;
@@ -628,6 +648,14 @@ export class RunValidator {
     }
   }
 
+  /**
+   * The accepted known events so far, when `retainEvents` is set; see {@link ValidatedRun}. The
+   * live list: it grows with every further `feed`.
+   */
+  acceptedEvents(): readonly Event[] {
+    return this.accepted;
+  }
+
   /** Applies the run-level rules, checks attachment bytes, and produces the report. */
   async finish(): Promise<Report> {
     if (this.runFinished) {
@@ -769,11 +797,24 @@ export async function validateRunDirectory(
   dir: string,
   options: ValidateOptions = {},
 ): Promise<Report> {
+  return (await validateRunDirectorySnapshot(dir, { ...options, retainEvents: false })).report;
+}
+
+/**
+ * Validates a run directory exactly as {@link validateRunDirectory} does and also returns the
+ * accepted decoded events, so a consumer can project the run without parsing it a second time.
+ * Events are retained unless `retainEvents` is explicitly false.
+ */
+export async function validateRunDirectorySnapshot(
+  dir: string,
+  options: ValidateOptions = {},
+): Promise<ValidatedRun> {
   const eventsDir = join(dir, 'events');
   if (!existsSync(eventsDir)) throw new Error(`${dir} has no events directory`);
   const run = new RunValidator({
     ...options,
     attachmentsDir: options.attachmentsDir ?? join(dir, 'attachments'),
+    retainEvents: options.retainEvents ?? true,
   });
   for (const name of readdirSync(eventsDir)
     .filter((f) => f.endsWith('.ndjson'))
@@ -781,7 +822,7 @@ export async function validateRunDirectory(
     const file = join(eventsDir, name);
     run.feed(readFileSync(file, 'utf8').split('\n'), file, true);
   }
-  return run.finish();
+  return { report: await run.finish(), events: run.acceptedEvents() };
 }
 
 function describeIdentity(historicalId: string | undefined, stability: string): string {
