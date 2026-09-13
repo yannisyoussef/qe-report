@@ -19,7 +19,7 @@ import {
   type RunArchive,
 } from './archive.js';
 import { AttachmentIntegrityError, BlobSizeConflictError } from './errors.js';
-import { MAINTENANCE_LOCK_KEY, withIngestionLock } from './locks.js';
+import { withIngestionLock } from './locks.js';
 import { MATERIALISE_CONCURRENCY, eachLimited, materialiseBlobs } from './materialise.js';
 
 export interface PersistRequest {
@@ -226,7 +226,7 @@ export class PostgresRunStore {
         request.runDirectory,
         archive.requiredBlobs,
       );
-      return persistArchive(
+      return archiveWithin(
         client,
         request.projectId,
         request.runDirectory,
@@ -484,11 +484,13 @@ async function knownRun(
  * The transaction behind every persist: claim the identity, record the blobs, insert every line,
  * every run-to-blob relation, and the retention fact, commit; or read the claimant and back out.
  * `published` must cover every blob the archive requires: the database references only blobs the
- * store already holds. The caller owns the connection; the shared maintenance lock is taken on
- * it here as well as by the caller, so that this can never write while a retention pass is
- * deleting, however it is called. A session lock is counted, so nesting is harmless.
+ * store already holds.
+ *
+ * The caller owns the mutation boundary and this does not take one of its own: it must already
+ * be running on a connection that holds the shared maintenance lock, which
+ * {@link withIngestionLock} is the single way to obtain. One mutation, one lease.
  */
-export async function persistArchive(
+export async function archiveWithin(
   client: PoolClient,
   projectId: string,
   sourceLocator: string,
@@ -499,24 +501,6 @@ export async function persistArchive(
   checkProjectId(projectId);
   checkExpiresAt(expiresAt);
   const blobs = coveredBlobs(archive.requiredBlobs, published);
-  await client.query('SELECT pg_advisory_lock_shared($1)', [MAINTENANCE_LOCK_KEY]);
-  try {
-    return await archiveWithin(client, projectId, sourceLocator, archive, blobs, expiresAt);
-  } finally {
-    await client
-      .query('SELECT pg_advisory_unlock_shared($1)', [MAINTENANCE_LOCK_KEY])
-      .catch(() => undefined);
-  }
-}
-
-async function archiveWithin(
-  client: PoolClient,
-  projectId: string,
-  sourceLocator: string,
-  archive: RunArchive,
-  blobs: readonly BlobDescriptor[],
-  expiresAt: Date,
-): Promise<PersistResult> {
   try {
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
     const claimed = await client.query<{ ingestion_sequence: string }>(

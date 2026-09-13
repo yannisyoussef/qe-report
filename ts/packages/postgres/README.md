@@ -246,13 +246,31 @@ const done = await maintenance.run({
   maxRuns: 100, // DEFAULT_LIMITS.runs
   maxBlobs: 500, // DEFAULT_LIMITS.blobs, catalogued only
   maxUncataloguedBlobs: 500, // DEFAULT_LIMITS.uncataloguedBlobs
-  maxBytesExamined: 2 * 1024 ** 3, // DEFAULT_LIMITS.bytesExamined
-  lockTimeoutMs: 30_000, // give up rather than wait for the lock
+  maxBytesExamined: 2 * 1024 ** 3, // DEFAULT_LIMITS.bytesExamined, a soft budget
+  lockTimeoutMs: 30_000, // give up rather than wait for the lock; at least 1
 });
 ```
 
 Every bound has a default in `DEFAULT_LIMITS`, and every one of them is
 at least one: a pass that could do nothing could never make progress.
+`maxBytesExamined` is the one soft bound. Objects are hashed in full
+before they are removed, and the first object a pass examines is always
+examined however large it is, so that an object bigger than the whole
+budget can still be reclaimed rather than blocking every later pass. A
+pass can therefore exceed the budget by at most that one object; every
+candidate after it that would not fit ends the phase and is reported as
+truncation. A caller that wants an oversized candidate processed
+alongside others raises the budget.
+
+`lockTimeoutMs` bounds only the wait for the maintenance lock. It must be
+at least one millisecond: PostgreSQL reads a `lock_timeout` of zero as no
+timeout at all, which is the opposite of asking for one, so zero is a
+`TypeError` rather than an unlimited wait. Exceeding it raises
+`MaintenanceBusyError`, and nothing of the pass has run. The timeout is
+set with `SET LOCAL` inside a transaction that exists only to take the
+lock, so it governs the acquisition and disappears when that transaction
+commits: the connection goes back to the pool exactly as it was lent out,
+and the protected work runs under no transaction of ours.
 
 `asOf` is always the caller's: nothing inside the selection reads the
 clock, and nothing compares it with one. A pass asked about an instant in
@@ -338,9 +356,21 @@ what is unreferenced. Reading (`loadRun`, `replayRun`,
 `projectStoredRun`, `openBlob`) takes no lock at all. The lock lives on
 the connection that does the work, so a process that dies releases it
 when PostgreSQL ends its session; no process-local mutex is involved in
-any of this. A connection that cannot prove it released the lock is
-discarded rather than returned to the pool, because a leaked session lock
-would let a later ingestion re-enter it and run beside maintenance.
+any of this.
+
+One mutation owns exactly one lease. `withIngestionLock` is the only
+place a mutating ingestion takes the lock, and nothing below it acquires
+the lock again: PostgreSQL counts session acquisitions, and a lease that
+has to be counted is one nobody can reason about. The archive
+transaction assumes the boundary is already owned instead of defending
+itself with a second acquisition.
+
+A connection goes back to the pool only when its release is proven: the
+unlock statement must answer that the lock was held and is now gone. A
+thrown error, a false answer, or no answer at all discards the connection
+instead, and ending that session releases whatever it still holds. A
+connection returned while carrying a lease would let the next borrower
+re-enter it and run beside maintenance.
 
 A destructive pass holds that lock while it hashes every object it means
 to remove, so its limits are also the bound on how long ingestion can be

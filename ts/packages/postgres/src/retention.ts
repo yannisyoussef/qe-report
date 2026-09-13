@@ -53,6 +53,12 @@ export interface MaintenanceOptions {
    * Bytes a pass may read while verifying objects. Every object is hashed in full before it is
    * removed, and the pass holds the maintenance lock throughout, so this bounds how long
    * ingestion can be kept waiting.
+   *
+   * It is a soft budget with one exception: the first object a pass examines is always
+   * examined, however large it is, so that a single object bigger than the whole budget can
+   * still be reclaimed instead of blocking every later pass. A pass may therefore exceed this
+   * by at most the size of that one object, and by nothing else; after it, a candidate that
+   * would not fit ends the phase and is reported as truncation.
    */
   readonly maxBytesExamined?: number;
   readonly maxTemporaryFiles?: number;
@@ -264,7 +270,8 @@ export class RetentionMaintenance {
     }
 
     const blobs: ReclaimedBlob[] = [];
-    const budget = { bytes: maxBytes };
+    // Counted whatever the outcome, so that exactly one object may exceed the byte budget.
+    const budget = { bytes: maxBytes, examined: 0 };
     let blobsTruncated = false;
 
     // Catalogued blobs no run references anywhere: the ordinary result of a run expiring.
@@ -278,10 +285,11 @@ export class RetentionMaintenance {
     if (unreferenced.rows.length > maxBlobs) blobsTruncated = true;
     for (const row of unreferenced.rows.slice(0, maxBlobs)) {
       const size = Number(row.size_bytes);
-      if (budget.bytes < size && blobs.length > 0) {
+      if (budget.examined > 0 && budget.bytes < size) {
         blobsTruncated = true;
         break;
       }
+      budget.examined += 1;
       budget.bytes -= size;
       const reclaimed = await this.reclaim(
         db,
@@ -321,12 +329,13 @@ export class RetentionMaintenance {
         if (orphansBefore === undefined || object.modifiedAt.getTime() >= orphansBefore.getTime()) {
           continue;
         }
-        if (remaining === 0 || (budget.bytes < object.sizeBytes && blobs.length > 0)) {
+        if (remaining === 0 || (budget.examined > 0 && budget.bytes < object.sizeBytes)) {
           blobsTruncated = true;
           done = true;
           break;
         }
         remaining -= 1;
+        budget.examined += 1;
         budget.bytes -= object.sizeBytes;
         const reclaimed = await this.reclaim(
           db,

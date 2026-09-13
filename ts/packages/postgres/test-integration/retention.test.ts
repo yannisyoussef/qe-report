@@ -14,7 +14,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateRunDirectorySnapshot } from 'qe-report-validator';
 import { buildArchive, type RunArchive } from '../src/archive.js';
-import { MAINTENANCE_LOCK_KEY, RetentionMaintenance } from '../src/index.js';
+import { MAINTENANCE_LOCK_KEY, MaintenanceBusyError, RetentionMaintenance } from '../src/index.js';
 import type { MaintenanceOptions, MaintenanceReport } from '../src/index.js';
 import { freshRoot, sha256 } from '../../read-model/test/synthetic.js';
 import {
@@ -568,6 +568,98 @@ describe('coordination with ingestion', () => {
     expect((await pending).kind).toBe('inserted');
     expect(existsSync(objectPath(db.blobRoot, sha256(bytes)))).toBe(true);
     await sweeping.end();
+  });
+
+  it('gives up rather than wait beyond the time the caller allows, and changes nothing', async () => {
+    const db = await pgTest.database('lock-timeout');
+    await archiveRun(db, 'to-1', 'run-to-1', Buffer.from('still here afterwards'), T0);
+    const holder = new pg.Client({ connectionString: pgTest.connectionUriFor(db) });
+    await holder.connect();
+    await holder.query('SELECT pg_advisory_lock_shared($1)', [MAINTENANCE_LOCK_KEY]);
+    await expect(db.maintenance.run({ asOf: AFTER, lockTimeoutMs: 250 })).rejects.toThrow(
+      MaintenanceBusyError,
+    );
+    // Nothing of the pass happened: the run, its source, and its bytes are untouched.
+    expect(await rowsIn(db.pool, 'qe_runs')).toBe(1);
+    expect(await rowsIn(db.pool, 'qe_run_source_lines')).toBe(5);
+    expect(await rowsIn(db.pool, 'qe_blobs')).toBe(1);
+    await holder.query('SELECT pg_advisory_unlock_shared($1)', [MAINTENANCE_LOCK_KEY]);
+    // And once the writer is done, the same call goes through.
+    const report = await db.maintenance.run({ asOf: AFTER, lockTimeoutMs: 5_000 });
+    expect(report.expiredRuns.map((r) => r.runId)).toEqual(['run-to-1']);
+    await holder.end();
+  });
+
+  it('refuses a timeout of zero, which PostgreSQL would read as no timeout at all', async () => {
+    const db = await pgTest.database('lock-zero');
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      await expect(db.maintenance.run({ asOf: AFTER, lockTimeoutMs: bad })).rejects.toThrow(
+        TypeError,
+      );
+    }
+    expect(await db.maintenance.run({ asOf: AFTER, lockTimeoutMs: 1_000 })).toMatchObject({
+      dryRun: false,
+    });
+  });
+
+  it('leaves no trace of the timeout on the connection it borrowed', async () => {
+    const db = await pgTest.database('lock-setting');
+    await archiveRun(db, 'ls-1', 'run-ls-1', Buffer.from('swept under a timeout'), T0);
+    // One connection, so the very session the pass used is the one borrowed again afterwards.
+    const single = pgTest.anotherPool(db, 1);
+    const before = await single.query<{ lock_timeout: string; pid: number }>(
+      'SELECT current_setting($1) AS lock_timeout, pg_backend_pid() AS pid',
+      ['lock_timeout'],
+    );
+    const maintenance = new RetentionMaintenance(single, db.blobs);
+    const report = await maintenance.run({ asOf: AFTER, lockTimeoutMs: 750 });
+    expect(report.expiredRuns.map((r) => r.runId)).toEqual(['run-ls-1']);
+    const after = await single.query<{ lock_timeout: string; pid: number }>(
+      'SELECT current_setting($1) AS lock_timeout, pg_backend_pid() AS pid',
+      ['lock_timeout'],
+    );
+    // The same backend came back, and it is exactly as it was lent out.
+    expect(after.rows[0]?.pid).toBe(before.rows[0]?.pid);
+    expect(after.rows[0]?.lock_timeout).toBe(before.rows[0]?.lock_timeout);
+    expect(after.rows[0]?.lock_timeout).toBe('0');
+  });
+
+  it('discards a connection whose lock it cannot prove it released', async () => {
+    const db = await pgTest.database('lock-release');
+    const dir = runWithAttachments(freshRoot('lock-release'), 'lr', 'run-lr', [
+      { bytes: Buffer.from('written through a poisoned release') },
+    ]);
+    const single = pgTest.anotherPool(db, 1);
+    const borrowed = await single.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    const lent = borrowed.rows[0]?.pid;
+    // The unlock cannot be carried out, so the session may still hold the shared lease.
+    const failing = failingPool(single, /pg_advisory_unlock_shared/u, 'the unlock could not run');
+    const result = await pgTest
+      .storeWith(db, db.blobs, failing)
+      .persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: LATER });
+    // The work itself committed; only the bookkeeping afterwards failed.
+    expect(result.kind).toBe('inserted');
+    expect(await rowsIn(db.pool, 'qe_runs')).toBe(1);
+
+    // The poisoned session was ended rather than handed back, so the pool yields a new backend.
+    const again = await single.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    expect(again.rows[0]?.pid).not.toBe(lent);
+    const gone = await db.pool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM pg_stat_activity WHERE pid = $1',
+      [lent],
+    );
+    expect(Number(gone.rows[0]?.n)).toBe(0);
+    // And nothing is left holding the lease: an exclusive acquisition succeeds at once.
+    const probe = new pg.Client({ connectionString: pgTest.connectionUriFor(db) });
+    await probe.connect();
+    const taken = await probe.query<{ got: boolean }>('SELECT pg_try_advisory_lock($1) AS got', [
+      MAINTENANCE_LOCK_KEY,
+    ]);
+    expect(taken.rows[0]?.got).toBe(true);
+    await probe.query('SELECT pg_advisory_unlock($1)', [MAINTENANCE_LOCK_KEY]);
+    await probe.end();
+    // A destructive pass on a healthy connection runs without waiting for anything.
+    expect(await db.maintenance.run({ asOf: AFTER })).toMatchObject({ dryRun: false });
   });
 
   it('lets ingestions run beside each other, because they share the lock', async () => {

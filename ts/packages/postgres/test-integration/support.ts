@@ -6,7 +6,7 @@ import pg from 'pg';
 import { FileBlobStore, type BlobDescriptor, type BlobStore } from 'qe-report-blob-fs';
 import { PostgresRunStore, RetentionMaintenance, migrate } from '../src/index.js';
 import { withIngestionLock } from '../src/locks.js';
-import { persistArchive, type PersistResult } from '../src/store.js';
+import { archiveWithin, type PersistResult } from '../src/store.js';
 import { SCHEMA_MIGRATIONS_TABLE_SQL, migrationChecksum } from '../src/migrate.js';
 import { MIGRATIONS } from '../src/migrations.js';
 import type { RunArchive } from '../src/archive.js';
@@ -101,7 +101,7 @@ export class TestPostgres {
   }
 
   /** A second pool on an existing database, for concurrency tests. */
-  anotherPool(db: Database): pg.Pool {
+  anotherPool(db: Database, max = 8): pg.Pool {
     const c = this.started();
     const pool = new pg.Pool({
       host: c.getHost(),
@@ -109,7 +109,7 @@ export class TestPostgres {
       user: c.getUsername(),
       password: c.getPassword(),
       database: db.name,
-      max: 8,
+      max,
     });
     this.track(pool);
     return pool;
@@ -146,8 +146,8 @@ export class TestPostgres {
 }
 
 /**
- * Archives one already built archive the way the store does: on a connection that holds the
- * shared maintenance lock, with an explicit expiry.
+ * Archives one already built archive the way production does: through the one place a mutation
+ * takes its shared maintenance lease, with an explicit expiry. Nothing archives without it.
  */
 export function archiveInto(
   pool: pg.Pool,
@@ -158,7 +158,7 @@ export function archiveInto(
   expiresAt: Date = NEVER,
 ): Promise<PersistResult> {
   return withIngestionLock(pool, (client) =>
-    persistArchive(client, projectId, sourceLocator, archive, published, expiresAt),
+    archiveWithin(client, projectId, sourceLocator, archive, published, expiresAt),
   );
 }
 
