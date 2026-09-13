@@ -951,3 +951,93 @@ describe('command line on hardened inputs', () => {
     expect(r.out).not.toContain('RangeError');
   });
 });
+
+describe('source-line archive', () => {
+  it('retains every accepted line verbatim with its disposition, only when asked', async () => {
+    const dir = join(FIXTURES_DIR, 'runs/duplicate-event-identical');
+    const plain = await validateRunDirectorySnapshot(dir);
+    expect(plain.sourceLines).toEqual([]);
+    const { report, events, sourceLines } = await validateRunDirectorySnapshot(dir, {
+      retainSourceLines: true,
+    });
+    expect(report).toEqual(plain.report);
+    expect(sourceLines.map((l) => l.disposition)).toContain('duplicate');
+    expect(sourceLines.filter((l) => l.disposition === 'accepted')).toHaveLength(events.length);
+    expect(sourceLines.filter((l) => l.disposition === 'duplicate')).toHaveLength(
+      report.summary.duplicates,
+    );
+    const [file] = sessionFiles('runs/duplicate-event-identical');
+    const fileLines = readFileSync(join(FIXTURES_DIR, file ?? ''), 'utf8')
+      .split('\n')
+      .filter((l) => l !== '');
+    expect(sourceLines.map((l) => l.rawLine)).toEqual(fileLines);
+    expect(sourceLines.map((l) => l.sourceLine)).toEqual(fileLines.map((_, i) => i + 1));
+    for (const l of sourceLines) {
+      const parsed = JSON.parse(l.rawLine) as Record<string, unknown>;
+      expect([l.eventId, l.runId, l.sessionId, l.sequence, l.protocolVersion, l.eventType]).toEqual(
+        [
+          parsed['eventId'],
+          parsed['runId'],
+          parsed['sessionId'],
+          parsed['sequence'],
+          parsed['protocolVersion'],
+          parsed['eventType'],
+        ],
+      );
+      expect(l.canonicalSha256).toMatch(/^[0-9a-f]{64}$/u);
+    }
+    const duplicate = sourceLines.find((l) => l.disposition === 'duplicate');
+    const original = sourceLines.find(
+      (l) => l.disposition === 'accepted' && l.eventId === duplicate?.eventId,
+    );
+    expect(original?.canonicalSha256).toBe(duplicate?.canonicalSha256);
+  });
+
+  it('keeps an unknown ignorable event and unknown properties as raw text', async () => {
+    const { report, sourceLines } = await validateRunDirectorySnapshot(
+      join(FIXTURES_DIR, 'runs/compat/unknown-event-ignorable'),
+      { retainSourceLines: true },
+    );
+    expect(report.summary.ignored).toBe(1);
+    const ignored = sourceLines.filter((l) => l.disposition === 'ignored');
+    expect(ignored).toHaveLength(1);
+    expect(EVENT_TYPES.includes(ignored[0]?.eventType as (typeof EVENT_TYPES)[number])).toBe(false);
+    expect(ignored[0]?.rawLine).toContain(ignored[0]?.eventType ?? '');
+    const forward = new RunValidator({ retainSourceLines: true });
+    const line =
+      '{"protocolVersion":"0.3.0","eventId":"e-1","eventType":"session.started","runId":"r","sessionId":"s","sequence":1,"occurredAt":"2026-01-01T00:00:00Z","payload":{"producer":{"name":"p"},"vendor":{"__proto__":"kept","x":[1,2]}},"extraEnvelope":true}';
+    forward.feed([line], 'f', true);
+    expect(forward.sourceLines()[0]?.rawLine).toBe(line);
+    expect(forward.sourceLines()[0]?.disposition).toBe('accepted');
+  });
+
+  it('digests the canonical form, so property order and whitespace do not change it', () => {
+    const a = new RunValidator({ retainSourceLines: true });
+    a.feed(
+      [
+        '{"protocolVersion":"0.3.0","eventId":"e-1","eventType":"session.started","runId":"r","sessionId":"s","sequence":1,"occurredAt":"2026-01-01T00:00:00Z","payload":{"producer":{"name":"p"},"x":{"b":2,"a":1}}}',
+      ],
+      'f',
+      true,
+    );
+    const b = new RunValidator({ retainSourceLines: true });
+    b.feed(
+      [
+        '{ "payload": {"x": {"a": 1, "b": 2}, "producer": {"name": "p"}}, "occurredAt":"2026-01-01T00:00:00Z", "sequence":1, "sessionId":"s", "runId":"r", "eventType":"session.started", "eventId":"e-1", "protocolVersion":"0.3.0" }',
+      ],
+      'f',
+      true,
+    );
+    const c = new RunValidator({ retainSourceLines: true });
+    c.feed(
+      [
+        '{"protocolVersion":"0.3.0","eventId":"e-1","eventType":"session.started","runId":"r","sessionId":"s","sequence":1,"occurredAt":"2026-01-01T00:00:00Z","payload":{"producer":{"name":"p"},"x":{"b":2,"a":[1]}}}',
+      ],
+      'f',
+      true,
+    );
+    expect(a.sourceLines()[0]?.canonicalSha256).toBe(b.sourceLines()[0]?.canonicalSha256);
+    expect(a.sourceLines()[0]?.canonicalSha256).not.toBe(c.sourceLines()[0]?.canonicalSha256);
+    expect(a.sourceLines()[0]?.rawLine).not.toBe(b.sourceLines()[0]?.rawLine);
+  });
+});

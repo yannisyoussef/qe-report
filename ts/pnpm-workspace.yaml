@@ -1,3 +1,8 @@
 packages:
   - packages/*
   - consumer-fixtures/*
+# Optional native or postinstall builds pulled in by testcontainers; none is needed here.
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

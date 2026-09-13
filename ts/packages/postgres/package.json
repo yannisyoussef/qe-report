@@ -1,0 +1,50 @@
+{
+  "name": "qe-report-postgres",
+  "version": "0.1.0",
+  "description": "qe-report durable run store: complete validated runs archived as their original protocol source in PostgreSQL, replayed through the validator and projector",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:junit-runs": "vitest run --config vitest.runs.config.ts test-runs/junit-runs.test.ts",
+    "test:playwright-runs": "vitest run --config vitest.runs.config.ts test-runs/playwright-runs.test.ts"
+  },
+  "dependencies": {
+    "pg": "8.23.0",
+    "qe-report-protocol": "workspace:*",
+    "qe-report-read-model": "workspace:*",
+    "qe-report-validator": "workspace:*"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/pg": "8.23.1",
+    "testcontainers": "12.1.0"
+  }
+}

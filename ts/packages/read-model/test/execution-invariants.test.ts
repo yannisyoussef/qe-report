@@ -44,7 +44,7 @@ async function fabricated(
 ): Promise<ValidatedRun> {
   const snapshot = await validateRunDirectorySnapshot(join(FIXTURES_DIR, fixture));
   expect(snapshot.report.valid).toBe(true);
-  return { report: snapshot.report, events: replace(snapshot.events) };
+  return { report: snapshot.report, events: replace(snapshot.events), sourceLines: [] };
 }
 
 function attemptStarted(events: readonly Event[], attemptId: string): AttemptStartedEvent {

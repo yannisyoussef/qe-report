@@ -131,6 +131,41 @@ export interface ValidateOptions {
    * validation retains nothing but its bookkeeping.
    */
   readonly retainEvents?: boolean;
+  /**
+   * Keep the original text of every line validation accepted, with the metadata a durable store
+   * needs, for {@link RunValidator.sourceLines}. Off by default.
+   */
+  readonly retainSourceLines?: boolean;
+}
+
+/**
+ * One line of protocol source as validation accepted it: the original JSON text (without its
+ * line terminator), so unknown optional properties and unknown ignorable events survive exactly,
+ * plus the envelope facts a store indexes by and a digest of the line's canonical form.
+ */
+export interface ValidatedSourceLine {
+  /** The line as read, minus the terminator. Authoritative; the other fields are derived from it. */
+  readonly rawLine: string;
+  readonly eventId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly sequence: number;
+  readonly protocolVersion: string;
+  readonly eventType: string;
+  /**
+   * SHA-256 of the canonical form the validator compares duplicates with: object keys sorted,
+   * array order kept, so formatting and property order do not change it.
+   */
+  readonly canonicalSha256: string;
+  /**
+   * `accepted`: a known event used by current semantics; `ignored`: an unknown event the producer
+   * marked ignorable; `duplicate`: an identical repetition of an earlier event id.
+   */
+  readonly disposition: 'accepted' | 'ignored' | 'duplicate';
+  /** The event file the line came from, as given to the validator. */
+  readonly sourceFile: string;
+  /** 1-based line in that file. */
+  readonly sourceLine: number;
 }
 
 /** A validated run: the report, and the events validation accepted when they were retained. */
@@ -144,6 +179,8 @@ export interface ValidatedRun {
    * errors and carries no guarantee of lifecycle consistency.
    */
   readonly events: readonly Event[];
+  /** Every accepted source line in feed order, when `retainSourceLines` was set; otherwise empty. */
+  readonly sourceLines: readonly ValidatedSourceLine[];
 }
 
 const SCHEMA_PATH = new URL('../schema/event.schema.json', import.meta.url);
@@ -372,6 +409,7 @@ export class RunValidator {
   private readonly executions = new Map<string, ExecutionState>();
   private readonly attachments: (Location & { sha256: string; sizeBytes: number })[] = [];
   private readonly accepted: Event[] = [];
+  private readonly source: ValidatedSourceLine[] = [];
   private attachmentsDirRefused = false;
   private runId: string | undefined;
   private runFinished: Location | undefined;
@@ -469,10 +507,28 @@ export class RunValidator {
         continue;
       }
       const key = canonical(parsedJson);
+      const retain = this.options.retainSourceLines === true;
+      const archive = (disposition: ValidatedSourceLine['disposition']): void => {
+        if (!retain) return;
+        this.source.push({
+          rawLine: raw,
+          eventId: event.eventId,
+          runId: event.runId,
+          sessionId: event.sessionId,
+          sequence: event.sequence,
+          protocolVersion: event.protocolVersion,
+          eventType: event.eventType,
+          canonicalSha256: createHash('sha256').update(key, 'utf8').digest('hex'),
+          disposition,
+          sourceFile: file,
+          sourceLine: line,
+        });
+      };
       const previous = this.seen.get(event.eventId);
       if (previous !== undefined) {
         if (previous === key) {
           this.duplicates += 1;
+          archive('duplicate');
           this.diagnostics.push({
             severity: 'info',
             code: 'DUPLICATE_EVENT',
@@ -571,6 +627,7 @@ export class RunValidator {
 
       if (!isKnownEvent(event)) {
         this.ignored += 1;
+        archive('ignored');
         this.diagnostics.push({
           severity: 'info',
           code: 'IGNORED_EVENT_TYPE',
@@ -582,6 +639,7 @@ export class RunValidator {
         continue;
       }
       if (this.options.retainEvents) this.accepted.push(event);
+      archive('accepted');
       switch (event.eventType) {
         case 'session.started':
           break;
@@ -812,6 +870,11 @@ export class RunValidator {
     return this.accepted;
   }
 
+  /** The accepted source lines so far, when `retainSourceLines` is set; see {@link ValidatedSourceLine}. */
+  sourceLines(): readonly ValidatedSourceLine[] {
+    return this.source;
+  }
+
   /** Applies the run-level rules, checks attachment bytes, and produces the report. */
   async finish(): Promise<Report> {
     if (this.runFinished) {
@@ -1027,7 +1090,7 @@ export async function validateRunDirectorySnapshot(
   if (eventsKind !== 'directory') {
     // A linked or otherwise irregular events directory is not read at all.
     run.refuseEntry(eventsDir, eventsKind, 'directory');
-    return { report: await run.finish(), events: run.acceptedEvents() };
+    return { report: await run.finish(), events: run.acceptedEvents(), sourceLines: [] };
   }
   for (const name of readdirSync(eventsDir)
     .filter((f) => f.endsWith('.ndjson'))
@@ -1052,7 +1115,11 @@ export async function validateRunDirectorySnapshot(
     }
     run.feed(text.split('\n'), file, true);
   }
-  return { report: await run.finish(), events: run.acceptedEvents() };
+  return {
+    report: await run.finish(),
+    events: run.acceptedEvents(),
+    sourceLines: run.sourceLines(),
+  };
 }
 
 function describeIdentity(historicalId: string | undefined, stability: string): string {
