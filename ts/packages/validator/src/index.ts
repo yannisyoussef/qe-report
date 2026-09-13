@@ -12,4 +12,5 @@ export {
   type Summary,
   type ValidateOptions,
   type ValidatedRun,
+  type ValidatedSourceLine,
 } from './validator.js';
