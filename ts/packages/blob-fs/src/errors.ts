@@ -17,6 +17,10 @@ export type BlobStoreErrorCode =
   | 'BLOB_HASH_MISMATCH'
   /** The entry found at the final path right after publication is not the verified file. */
   | 'PUBLISH_MISMATCH'
+  /** The object changed between being read and being removed; nothing was unlinked. */
+  | 'BLOB_CHANGED'
+  /** A maintenance caller named something that is not one of the store's temporary files. */
+  | 'INVALID_TEMPORARY_NAME'
   /** A directory the store created or expects under its root is a link or not a directory. */
   | 'ROOT_ENTRY_UNSAFE';
 

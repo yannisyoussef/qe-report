@@ -28,7 +28,6 @@ import type { ProjectedRun } from 'qe-report-read-model';
 import { buildArchive, type RunArchive } from '../src/archive.js';
 import { AttachmentIntegrityError, BlobSizeConflictError } from '../src/errors.js';
 import { PostgresRunStore, migrate } from '../src/index.js';
-import { persistArchive } from '../src/store.js';
 import { FIXTURES_DIR, manifest } from '../../protocol/test/helpers.js';
 import {
   attachment,
@@ -43,8 +42,10 @@ import {
   type EventSpec,
 } from '../../read-model/test/synthetic.js';
 import {
+  NEVER,
   TestPostgres,
   applyThrough,
+  archiveInto,
   count,
   facts,
   failingPool,
@@ -134,6 +135,7 @@ describe('durable attachment bytes', () => {
     const r = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: fixture('runs/flaky-session-passed'),
+      expiresAt: NEVER,
     });
     expect(r.kind).toBe('inserted');
     expect(await rows(db.pool, 'qe_blobs')).toBe(0);
@@ -148,9 +150,10 @@ describe('durable attachment bytes', () => {
     const bytes = Buffer.from('one attachment');
     const dir = runWith(freshRoot('one'), 'one', 'run-one', [{ bytes }]);
     const sha = sha256(bytes);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     const blob = await db.pool.query<{ sha256: string; size_bytes: string; storage_key: string }>(
       'SELECT sha256, size_bytes, storage_key FROM qe_blobs',
     );
@@ -183,9 +186,10 @@ describe('durable attachment bytes', () => {
       { bytes, extra: { name: 'first' } },
       { bytes, extra: { name: 'second', mediaType: 'application/octet-stream' } },
     ]);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     expect(await rows(db.pool, 'qe_blobs')).toBe(1);
     expect(await rows(db.pool, 'qe_run_blobs')).toBe(1);
     const projected = await db.store.projectStoredRun('A', 'run-refs');
@@ -207,9 +211,10 @@ describe('durable attachment bytes', () => {
       local.events.filter((e) => e.eventType === 'attachment.added').map((e) => e.payload.sha256),
     );
     expect(distinct.size).toBe(4);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     expect(await rows(db.pool, 'qe_blobs')).toBe(4);
     expect(await rows(db.pool, 'qe_run_blobs')).toBe(4);
     const verified = await db.store.verifyStoredRunBlobs('A', local.events[0]?.runId ?? '');
@@ -226,15 +231,18 @@ describe('durable attachment bytes', () => {
     const root = freshRoot('shared');
     const first = runWith(root, 'first', 'run-first', [{ bytes }]);
     const second = runWith(root, 'second', 'run-second', [{ bytes, extra: { name: 'other' } }]);
-    expect((await store.persistRunDirectory({ projectId: 'A', runDirectory: first })).kind).toBe(
-      'inserted',
-    );
-    expect((await store.persistRunDirectory({ projectId: 'B', runDirectory: first })).kind).toBe(
-      'inserted',
-    );
-    expect((await store.persistRunDirectory({ projectId: 'A', runDirectory: second })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await store.persistRunDirectory({ projectId: 'A', runDirectory: first, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
+    expect(
+      (await store.persistRunDirectory({ projectId: 'B', runDirectory: first, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
+    expect(
+      (await store.persistRunDirectory({ projectId: 'A', runDirectory: second, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     expect(probe.outcomes.map((o) => o.outcome)).toEqual(['stored', 'existing', 'existing']);
     expect(await rows(db.pool, 'qe_blobs')).toBe(1);
     expect(await rows(db.pool, 'qe_run_blobs')).toBe(3);
@@ -313,7 +321,7 @@ describe('durable attachment bytes', () => {
       const dir = runWith(freshRoot(name), name, `run-${name}`, [{ bytes }]);
       probe.beforePut = (source) => mutate(source.path);
       const e = await failure(
-        store.persistRunDirectory({ projectId: 'A', runDirectory: dir }),
+        store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }),
         BlobStoreError,
       );
       expect(e.code, name).toBe(code);
@@ -327,9 +335,10 @@ describe('durable attachment bytes', () => {
     }
     probe.beforePut = undefined;
     const intact = runWith(freshRoot('intact'), 'intact', 'run-intact', [{ bytes }]);
-    expect((await store.persistRunDirectory({ projectId: 'A', runDirectory: intact })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await store.persistRunDirectory({ projectId: 'A', runDirectory: intact, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
   });
 
   it('leaves only an unreferenced blob when the database fails after publication, and reuses it later', async () => {
@@ -349,7 +358,7 @@ describe('durable attachment bytes', () => {
         i === 3 ? { ...l, disposition: 'bogus' as 'accepted' } : l,
       ),
     };
-    await expect(persistArchive(db.pool, 'A', dir, broken, published)).rejects.toThrow(
+    await expect(archiveInto(db.pool, 'A', dir, broken, published)).rejects.toThrow(
       /disposition_check/u,
     );
     expect(await rows(db.pool, 'qe_runs')).toBe(0);
@@ -359,7 +368,11 @@ describe('durable attachment bytes', () => {
     // The published object is an orphan: safe, immutable, not deleted here.
     expect(existsSync(objectPath(db.blobRoot, sha))).toBe(true);
     const before = statSync(objectPath(db.blobRoot, sha));
-    const later = await store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    const later = await store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
     expect(later.kind).toBe('inserted');
     expect(probe.outcomes.map((o) => o.outcome)).toEqual(['existing']);
     expect(statSync(objectPath(db.blobRoot, sha)).ino).toBe(before.ino);
@@ -375,12 +388,25 @@ describe('durable attachment bytes', () => {
     const root = freshRoot('idem');
     const bytes = Buffer.from('idempotent bytes');
     const dir = runWith(root, 'idem', 'run-idem', [{ bytes }]);
-    const first = await store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    const first = await store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
     expect(first.kind).toBe('inserted');
     const copy = join(root, 'runs', 'copy');
     cpSync(dir, copy, { recursive: true });
-    const again = await store.persistRunDirectory({ projectId: 'A', runDirectory: copy });
-    expect(again).toEqual({ ...first, kind: 'already_present', blobRelationsAdded: 0 });
+    const again = await store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: copy,
+      expiresAt: NEVER,
+    });
+    expect(again).toEqual({
+      ...first,
+      kind: 'already_present',
+      blobRelationsAdded: 0,
+      retentionAdded: false,
+    });
     // A run already archived with its relations costs no blob work at all.
     expect(probe.outcomes.map((o) => o.outcome)).toEqual(['stored']);
     expect(await rows(db.pool, 'qe_blobs')).toBe(1);
@@ -390,7 +416,11 @@ describe('durable attachment bytes', () => {
     // any blob work, so nothing of the loser is published.
     const other = Buffer.from('different bytes');
     const conflicting = runWith(root, 'conflict', 'run-idem', [{ bytes: other }]);
-    const r = await store.persistRunDirectory({ projectId: 'A', runDirectory: conflicting });
+    const r = await store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: conflicting,
+      expiresAt: NEVER,
+    });
     expect(r).toMatchObject({ kind: 'conflict', reason: 'RUN_CONFLICT', runId: 'run-idem' });
     expect(probe.outcomes.map((o) => o.outcome)).toEqual(['stored']);
     expect(existsSync(objectPath(db.blobRoot, sha256(other)))).toBe(false);
@@ -414,7 +444,11 @@ describe('durable attachment bytes', () => {
     );
     const results = await Promise.all(
       runs.map((dir, i) =>
-        (stores[i] as PostgresRunStore).persistRunDirectory({ projectId: 'A', runDirectory: dir }),
+        (stores[i] as PostgresRunStore).persistRunDirectory({
+          projectId: 'A',
+          runDirectory: dir,
+          expiresAt: NEVER,
+        }),
       ),
     );
     expect(results.map((r) => r.kind)).toEqual(Array.from({ length: 6 }, () => 'inserted'));
@@ -439,7 +473,7 @@ describe('durable attachment bytes', () => {
     );
     const dir = runWith(freshRoot('sizes'), 'sizes', 'run-sizes', [{ bytes }]);
     const e = await failure(
-      db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir }),
+      db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }),
       BlobSizeConflictError,
     );
     expect(e).toMatchObject({
@@ -461,9 +495,10 @@ describe('durable attachment bytes', () => {
     const bytes = Buffer.from('legacy bytes');
     const sha = sha256(bytes);
     const dir = runWith(freshRoot('legacy'), 'legacy', 'run-legacy', [{ bytes }]);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     const before = await db.store.loadRun('A', 'run-legacy');
     // Stage the state migration 2 leaves a pre-existing archive in: source only, no bytes.
     await db.pool.query('DELETE FROM qe_run_blobs');
@@ -477,19 +512,28 @@ describe('durable attachment bytes', () => {
     expect(missing.code).toBe('BLOB_RECORD_MISSING');
     // The structural replay and the projection still work; only the bytes are not established.
     expect((await db.store.projectStoredRun('A', 'run-legacy'))?.attachments).toHaveLength(1);
-    const upgraded = await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    const upgraded = await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
     expect(upgraded).toEqual({
       kind: 'already_present',
       runId: 'run-legacy',
       ingestionSequence: before?.ingestionSequence,
       blobRelationsAdded: 1,
+      retentionAdded: false,
     });
     const after = await db.store.loadRun('A', 'run-legacy');
     expect(after?.blobs.map((b) => b.sha256)).toEqual([sha]);
     expect({ ...after, blobs: [] }).toEqual({ ...before, blobs: [] });
     expect(await db.store.verifyStoredRunBlobs('A', 'run-legacy')).toHaveLength(1);
-    const again = await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
-    expect(again).toEqual({ ...upgraded, blobRelationsAdded: 0 });
+    const again = await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
+    expect(again).toEqual({ ...upgraded, blobRelationsAdded: 0, retentionAdded: false });
     // Several upgraders at once: the relation is created once and counted once.
     await db.pool.query('DELETE FROM qe_run_blobs');
     await db.pool.query('DELETE FROM qe_blobs');
@@ -497,7 +541,7 @@ describe('durable attachment bytes', () => {
       Array.from({ length: 5 }, () =>
         pgTest
           .storeWith(db, db.blobs, pgTest.anotherPool(db))
-          .persistRunDirectory({ projectId: 'A', runDirectory: dir }),
+          .persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }),
       ),
     );
     expect(results.every((r) => r.kind === 'already_present')).toBe(true);
@@ -564,13 +608,28 @@ describe('durable attachment bytes', () => {
       AttachmentIntegrityError,
     );
     expect(missing.code).toBe('BLOB_RECORD_MISSING');
-    const upgraded = await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
-    expect(upgraded).toMatchObject({ kind: 'already_present', blobRelationsAdded: 1 });
+    const upgraded = await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
+    // The same call completes both storage facts the older schema had no room for.
+    expect(upgraded).toMatchObject({
+      kind: 'already_present',
+      blobRelationsAdded: 1,
+      retentionAdded: true,
+    });
     expect(await db.store.verifyStoredRunBlobs('A', 'run-v1')).toEqual([
       { sha256: sha, sizeBytes: bytes.length, storageKey: db.blobs.storageKey(sha) },
     ]);
     const after = await db.store.loadRun('A', 'run-v1');
-    expect({ ...after, blobs: [] }).toEqual({ ...legacy, blobs: [] });
+    expect(legacy?.expiresAt).toBeUndefined();
+    expect(after?.expiresAt).toEqual(NEVER);
+    expect({ ...after, blobs: [], expiresAt: undefined }).toEqual({
+      ...legacy,
+      blobs: [],
+      expiresAt: undefined,
+    });
   });
 
   it('rolls back the run when the commit itself fails after the blobs were published', async () => {
@@ -584,16 +643,17 @@ describe('durable attachment bytes', () => {
       failingPool(db.pool, /^COMMIT$/u, 'connection lost before commit'),
     );
     await expect(
-      failing.persistRunDirectory({ projectId: 'A', runDirectory: dir }),
+      failing.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }),
     ).rejects.toThrow(/connection lost/u);
     expect(await rows(db.pool, 'qe_runs')).toBe(0);
     expect(await rows(db.pool, 'qe_run_source_lines')).toBe(0);
     expect(await rows(db.pool, 'qe_run_blobs')).toBe(0);
     expect(await rows(db.pool, 'qe_blobs')).toBe(0);
     expect(existsSync(objectPath(db.blobRoot, sha))).toBe(true);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     expect(await db.store.verifyStoredRunBlobs('A', 'run-cf')).toHaveLength(1);
   });
 
@@ -601,9 +661,10 @@ describe('durable attachment bytes', () => {
     const db = await pgTest.database('emptyblob');
     const empty = Buffer.alloc(0);
     const dir = runWith(freshRoot('emptyblob'), 'e', 'run-e', [{ bytes: empty }]);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     expect(await db.store.verifyStoredRunBlobs('A', 'run-e')).toEqual([
       { sha256: sha256(empty), sizeBytes: 0, storageKey: db.blobs.storageKey(sha256(empty)) },
     ]);
@@ -616,9 +677,10 @@ describe('durable attachment bytes', () => {
     const bytes = Buffer.from('bytes that will be damaged');
     const sha = sha256(bytes);
     const dir = runWith(freshRoot('damage'), 'damage', 'run-damage', [{ bytes }]);
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     rmSync(dir, { recursive: true });
     const path = objectPath(db.blobRoot, sha);
     const damage = (content: Buffer): void => {
@@ -665,7 +727,7 @@ describe('durable attachment bytes', () => {
     const db = await pgTest.database('catalogsize');
     const bytes = Buffer.from('catalog says otherwise');
     const dir = runWith(freshRoot('catalogsize'), 'cs', 'run-cs', [{ bytes }]);
-    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER });
     await db.pool.query('UPDATE qe_blobs SET size_bytes = size_bytes + 1');
     const e = await failure(db.store.verifyStoredRunBlobs('A', 'run-cs'), AttachmentIntegrityError);
     expect(e.code).toBe('BLOB_RECORD_SIZE_MISMATCH');
@@ -683,7 +745,8 @@ describe('durable attachment bytes', () => {
     const dirs = withBytes.map((r) => fixture(r.dir));
     for (const d of dirs) {
       expect(
-        (await db.store.persistRunDirectory({ projectId: 'P', runDirectory: d })).kind,
+        (await db.store.persistRunDirectory({ projectId: 'P', runDirectory: d, expiresAt: NEVER }))
+          .kind,
         d,
       ).toBe('inserted');
     }
@@ -723,7 +786,7 @@ describe('durable attachment bytes', () => {
     const bytes = Buffer.from('planted link');
     const sha = sha256(bytes);
     const dir = runWith(freshRoot('planted'), 'planted', 'run-planted', [{ bytes }]);
-    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir, expiresAt: NEVER });
     const path = objectPath(db.blobRoot, sha);
     rmSync(path);
     symlinkSync(join(dir, 'attachments', sha), path);

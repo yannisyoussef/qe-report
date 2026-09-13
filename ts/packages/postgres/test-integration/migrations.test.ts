@@ -27,6 +27,7 @@ describe('migrations on PostgreSQL 16', () => {
     expect(tables.rows.map((r) => r.table_name)).toEqual([
       'qe_blobs',
       'qe_run_blobs',
+      'qe_run_retention',
       'qe_run_source_lines',
       'qe_runs',
       'qe_schema_migrations',
@@ -71,7 +72,7 @@ describe('migrations on PostgreSQL 16', () => {
   });
 
   it('refuse to continue when an applied migration has a different checksum', async () => {
-    for (const version of [1, 2]) {
+    for (const version of [1, 2, 3]) {
       const db = await pgTest.emptyDatabase('checksum');
       await migrate(db.pool);
       await db.pool.query('UPDATE qe_schema_migrations SET checksum = $1 WHERE version = $2', [
@@ -94,14 +95,25 @@ describe('migrations on PostgreSQL 16', () => {
        VALUES ('legacy', 'run-1', '/gone', $1, 1, '{0.3.0}', 1, true, '{}'::jsonb)`,
       ['a'.repeat(64)],
     );
+    // A child row, so that replacing the foreign key is exercised against real data.
+    await db.pool.query(
+      `INSERT INTO qe_run_source_lines (project_id, run_id, storage_ordinal, event_id, session_id,
+         sequence, event_type, protocol_version, canonical_sha256, disposition, raw_line,
+         source_file, source_line)
+       VALUES ('legacy', 'run-1', 0, 'e-1', 's', 1, 'session.started', '0.3.0', $1, 'accepted',
+               '{}', 'f', 1)`,
+      ['b'.repeat(64)],
+    );
     const applied = await migrate(db.pool);
     expect(applied.map((m) => [m.version, m.appliedNow])).toEqual([
       [1, false],
       [2, true],
+      [3, true],
     ]);
     expect(await tableNames(db.pool)).toEqual([
       'qe_blobs',
       'qe_run_blobs',
+      'qe_run_retention',
       'qe_run_source_lines',
       'qe_runs',
       'qe_schema_migrations',
@@ -111,6 +123,23 @@ describe('migrations on PostgreSQL 16', () => {
     );
     expect(columns.rows.map((c) => c.column_name)).toContain('source_attachments_verified');
     expect(columns.rows.map((c) => c.column_name)).not.toContain('attachments_verified');
+    // Deleting the run now takes its source with it, which migration 1's key would have refused.
+    expect(
+      (await db.pool.query(`DELETE FROM qe_runs WHERE project_id = 'legacy' RETURNING run_id`))
+        .rowCount,
+    ).toBe(1);
+    expect(
+      Number(
+        (await db.pool.query<{ n: string }>('SELECT count(*)::text AS n FROM qe_run_source_lines'))
+          .rows[0]?.n,
+      ),
+    ).toBe(0);
+    await db.pool.query(
+      `INSERT INTO qe_runs (project_id, run_id, source_locator, content_fingerprint, fingerprint_version,
+         protocol_versions, source_line_count, source_attachments_verified, validation_summary)
+       VALUES ('legacy', 'run-1', '/gone', $1, 1, '{0.3.0}', 1, true, '{}'::jsonb)`,
+      ['a'.repeat(64)],
+    );
     const legacy = await db.pool.query<{ source_attachments_verified: boolean; blobs: string }>(
       `SELECT r.source_attachments_verified,
               (SELECT count(*) FROM qe_run_blobs b WHERE b.project_id = r.project_id AND b.run_id = r.run_id)::text AS blobs
@@ -180,7 +209,8 @@ describe('migrations on PostgreSQL 16', () => {
       (
         await pool.query<{ conname: string }>(
           `SELECT conname FROM pg_constraint
-            WHERE conrelid IN ('qe_runs'::regclass, 'qe_run_source_lines'::regclass, 'qe_blobs'::regclass, 'qe_run_blobs'::regclass)
+            WHERE conrelid IN ('qe_runs'::regclass, 'qe_run_source_lines'::regclass, 'qe_blobs'::regclass,
+                               'qe_run_blobs'::regclass, 'qe_run_retention'::regclass)
             ORDER BY conname`,
         )
       ).rows.map((r) => r.conname);
@@ -197,8 +227,28 @@ describe('migrations on PostgreSQL 16', () => {
         'qe_run_blobs_pkey',
         'qe_run_blobs_run_fkey',
         'qe_run_blobs_blob_fkey',
+        'qe_run_retention_pkey',
+        'qe_run_retention_run_fkey',
       ]),
     );
+    // What a run takes with it, and what it must not: the blob catalog is global and stays.
+    const actions = await a.pool.query<{
+      conname: string;
+      confdeltype: string;
+      convalidated: boolean;
+    }>(
+      `SELECT conname, confdeltype, convalidated FROM pg_constraint
+        WHERE contype = 'f' AND conrelid IN ('qe_run_source_lines'::regclass,
+                                             'qe_run_blobs'::regclass,
+                                             'qe_run_retention'::regclass)
+        ORDER BY conname`,
+    );
+    expect(actions.rows).toEqual([
+      { conname: 'qe_run_blobs_blob_fkey', confdeltype: 'a', convalidated: true },
+      { conname: 'qe_run_blobs_run_fkey', confdeltype: 'c', convalidated: true },
+      { conname: 'qe_run_retention_run_fkey', confdeltype: 'c', convalidated: true },
+      { conname: 'qe_run_source_lines_run_fkey', confdeltype: 'c', convalidated: true },
+    ]);
   });
 });
 

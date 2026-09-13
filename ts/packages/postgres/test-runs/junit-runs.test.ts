@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ReadModel, buildReadModel } from 'qe-report-read-model';
 import type { ProjectedRun } from 'qe-report-read-model';
-import { TestPostgres, facts } from '../test-integration/support.js';
+import { NEVER, TestPostgres, facts, rowsIn } from '../test-integration/support.js';
 
 /**
  * Real JUnit Platform adapter output, written by the Gradle and Maven consumer fixtures under
@@ -57,6 +57,8 @@ describe('real JUnit runs in PostgreSQL', () => {
       { projectId: 'gradle-isolated', runDirectory: isolated },
     ]);
     expect(local.problems).toEqual([]);
+    const gradleIsolatedRunId =
+      local.model.runs().find((r) => r.projectId === 'gradle-isolated')?.runId ?? '';
     const gradleLocal = local.model.getRun('gradle', 'run-gradle-consumer');
     const entry = gradleLocal?.attachments.find((a) => a.name === 'junit-report-entry');
     expect(entry, 'BravoTest publishes a TestReporter entry').toBeDefined();
@@ -73,11 +75,31 @@ describe('real JUnit runs in PostgreSQL', () => {
     cpSync(isolated, copies['gradle-isolated'], { recursive: true });
     const db = await pgTest.database('junit');
     for (const [projectId, runDirectory] of Object.entries(copies)) {
-      const result = await db.store.persistRunDirectory({ projectId, runDirectory });
+      const result = await db.store.persistRunDirectory({
+        projectId,
+        runDirectory,
+        expiresAt: NEVER,
+      });
       expect(result.kind, runDirectory).toBe('inserted');
-      const again = await db.store.persistRunDirectory({ projectId, runDirectory });
+      const again = await db.store.persistRunDirectory({
+        projectId,
+        runDirectory,
+        expiresAt: NEVER,
+      });
       expect(again.kind, runDirectory).toBe('already_present');
     }
+    // A second ingestion of the shared Gradle run, in another project and expiring at once: its
+    // attachment bytes are the very bytes the retained copy references.
+    const EXPIRED = new Date('2026-01-01T00:00:00.000Z');
+    expect(
+      (
+        await db.store.persistRunDirectory({
+          projectId: 'gradle-expiring',
+          runDirectory: copies.gradle,
+          expiresAt: EXPIRED,
+        })
+      ).kind,
+    ).toBe('inserted');
     rmSync(scratch, { recursive: true, force: true });
 
     const fromDb: ProjectedRun[] = [];
@@ -130,5 +152,45 @@ describe('real JUnit runs in PostgreSQL', () => {
         ).toEqual(local.model.getTestHistory(run.projectId, e.runnerName, e.test.historicalId));
       }
     }
+
+    // Retention on real output: the expiring copy goes, the run that shares its bytes keeps them.
+    const sharedSha = reference.sha256;
+    const isolatedRun = local.model.getRun('gradle-isolated', gradleIsolatedRunId);
+    const isolatedSha = isolatedRun?.attachments[0]?.sha256;
+    if (isolatedSha === undefined) throw new Error('the isolated run carries no attachment');
+    expect(isolatedSha).not.toBe(sharedSha);
+    await db.pool.query('UPDATE qe_run_retention SET expires_at = $1 WHERE project_id = $2', [
+      EXPIRED,
+      'gradle-isolated',
+    ]);
+    const report = await db.maintenance.run({ asOf: new Date('2026-06-01T00:00:00.000Z') });
+    expect(report.expiredRuns.map((r) => r.projectId).sort()).toEqual([
+      'gradle-expiring',
+      'gradle-isolated',
+    ]);
+    expect(report.problems).toEqual([]);
+    // The isolated run is gone from the archive entirely, and its own bytes with it.
+    expect(await db.store.loadRun('gradle-isolated', gradleIsolatedRunId)).toBeUndefined();
+    expect(await db.store.projectStoredRun('gradle-isolated', gradleIsolatedRunId)).toBeUndefined();
+    expect(
+      await rowsIn(db.pool, 'qe_run_source_lines', 'project_id = $1', ['gradle-isolated']),
+    ).toBe(0);
+    expect(await rowsIn(db.pool, 'qe_run_blobs', 'project_id = $1', ['gradle-isolated'])).toBe(0);
+    expect(report.blobs.map((b) => b.sha256)).toEqual([isolatedSha]);
+    expect(
+      await db.store.openBlob('gradle-isolated', gradleIsolatedRunId, isolatedSha),
+    ).toBeUndefined();
+    // The retained Gradle run still replays, projects, and resolves its bytes.
+    const retained = await db.store.projectStoredRun('gradle', 'run-gradle-consumer');
+    expect(retained && facts(retained)).toEqual(facts(gradle as ProjectedRun));
+    expect(await db.store.verifyStoredRunBlobs('gradle', 'run-gradle-consumer')).toEqual([
+      {
+        sha256: sharedSha,
+        sizeBytes: reference.sizeBytes,
+        storageKey: db.blobs.storageKey(sharedSha),
+      },
+    ]);
+    const stillThere = await db.store.openBlob('gradle', 'run-gradle-consumer', sharedSha);
+    expect(stillThere && (await readAll(stillThere.stream)).length).toBe(reference.sizeBytes);
   });
 });

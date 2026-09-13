@@ -4,7 +4,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ReadModel, buildReadModel } from 'qe-report-read-model';
 import type { ProjectedRun } from 'qe-report-read-model';
 import { runPlaywright, type RunOutcome } from '../../playwright/test-consumer/harness.js';
-import { TestPostgres, facts } from '../test-integration/support.js';
+import { NEVER, TestPostgres, facts, rowsIn } from '../test-integration/support.js';
+
+/** Already past when maintenance is asked about "now"; the flaky run is ingested to expire. */
+const EXPIRED = new Date('2026-01-01T00:00:00.000Z');
+const MAINTENANCE_AT = new Date('2026-06-01T00:00:00.000Z');
 
 /** Fresh Playwright reporter output archived in PostgreSQL with its attachment bytes and replayed: ordinary, flaky, and fail-on-flaky runs. */
 const pgTest = new TestPostgres();
@@ -37,12 +41,13 @@ describe('real Playwright runs in PostgreSQL', () => {
     expect(local.problems).toEqual([]);
     expect(local.model.runs()).toHaveLength(3);
     const db = await pgTest.database('playwright');
-    for (const o of Object.values(outcomes)) {
+    for (const [name, o] of Object.entries(outcomes)) {
       const result = await db.store.persistRunDirectory({
         projectId: 'web',
         runDirectory: o.runDir,
+        expiresAt: name === 'flaky' ? EXPIRED : NEVER,
       });
-      expect(result.kind).toBe('inserted');
+      expect(result.kind, name).toBe('inserted');
       rmSync(o.runDir, { recursive: true, force: true });
       expect(existsSync(o.runDir)).toBe(false);
     }
@@ -86,5 +91,30 @@ describe('real Playwright runs in PostgreSQL', () => {
     expect(rebuilt.model.getFlakiness('web', 'playwright', historicalId)).toEqual(
       local.model.getFlakiness('web', 'playwright', historicalId),
     );
+
+    // Retention on real output: the run ingested with a past expiry goes, and the runs that were
+    // not ingested to expire keep their source, their projection, and their bytes.
+    const flakyId = outcomes['flaky']?.events[0]?.runId ?? '';
+    const flakyBlobs = (await db.store.loadRun('web', flakyId))?.blobs.map((b) => b.sha256) ?? [];
+    const report = await db.maintenance.run({ asOf: MAINTENANCE_AT });
+    expect(report.expiredRuns.map((r) => r.runId)).toEqual([flakyId]);
+    expect(report.problems).toEqual([]);
+    expect(await db.store.loadRun('web', flakyId)).toBeUndefined();
+    expect(await db.store.projectStoredRun('web', flakyId)).toBeUndefined();
+    expect(await rowsIn(db.pool, 'qe_run_source_lines', 'run_id = $1', [flakyId])).toBe(0);
+    expect(await rowsIn(db.pool, 'qe_run_blobs', 'run_id = $1', [flakyId])).toBe(0);
+    for (const sha of flakyBlobs) {
+      expect(await db.store.openBlob('web', flakyId, sha), sha).toBeUndefined();
+    }
+    // Every blob a retained run still references is still there, whoever else referenced it.
+    for (const name of ['ordinary', 'policy']) {
+      const id = outcomes[name]?.events[0]?.runId ?? '';
+      const projected = await db.store.projectStoredRun('web', id);
+      expect(projected && facts(projected), name).toEqual(facts(runOf(name)));
+      const verified = await db.store.verifyStoredRunBlobs('web', id);
+      expect(verified?.map((b) => b.sha256).sort(), name).toEqual(
+        [...new Set(runOf(name).attachments.map((a) => a.sha256))].sort(),
+      );
+    }
   });
 });

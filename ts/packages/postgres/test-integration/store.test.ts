@@ -7,7 +7,7 @@ import { validateRunDirectorySnapshot } from 'qe-report-validator';
 import { ReadModel, buildReadModel, projectRun } from 'qe-report-read-model';
 import type { ProjectedRun } from 'qe-report-read-model';
 import { buildArchive, type RunArchive } from '../src/archive.js';
-import { ReplayMismatchError, persistArchive, type PersistResult } from '../src/store.js';
+import { ReplayMismatchError, type PersistResult } from '../src/store.js';
 import type { ValidatedRun } from 'qe-report-validator';
 import { FIXTURES_DIR, manifest } from '../../protocol/test/helpers.js';
 import {
@@ -21,7 +21,7 @@ import {
   testCase,
   writeRun,
 } from '../../read-model/test/synthetic.js';
-import { TestPostgres, count, facts, publish, waitFor } from './support.js';
+import { NEVER, TestPostgres, archiveInto, count, facts, publish, waitFor } from './support.js';
 
 const pgTest = new TestPostgres();
 beforeAll(() => pgTest.start());
@@ -63,7 +63,11 @@ describe('persisting runs', () => {
     for (const run of manifest().runs) {
       results.set(
         run.dir,
-        await db.store.persistRunDirectory({ projectId: 'P', runDirectory: fixture(run.dir) }),
+        await db.store.persistRunDirectory({
+          projectId: 'P',
+          runDirectory: fixture(run.dir),
+          expiresAt: NEVER,
+        }),
       );
     }
     for (const run of manifest().runs) {
@@ -106,13 +110,20 @@ describe('persisting runs', () => {
     const first = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: fixture('runs/karate'),
+      expiresAt: NEVER,
     });
     expect(first.kind).toBe('inserted');
     const again = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: fixture('runs/karate'),
+      expiresAt: NEVER,
     });
-    expect(again).toEqual({ ...first, kind: 'already_present', blobRelationsAdded: 0 });
+    expect(again).toEqual({
+      ...first,
+      kind: 'already_present',
+      blobRelationsAdded: 0,
+      retentionAdded: false,
+    });
     const root = freshRoot('other-copy');
     const copy = join(root, 'runs', 'elsewhere');
     mkdirSync(join(root, 'runs'), { recursive: true });
@@ -120,6 +131,7 @@ describe('persisting runs', () => {
     const fromElsewhere = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: copy,
+      expiresAt: NEVER,
     });
     expect(fromElsewhere.kind).toBe('already_present');
     const stored = await db.store.loadRun('A', 'run-karate-0001');
@@ -133,10 +145,10 @@ describe('persisting runs', () => {
     });
     const archiveA = archiveOf(a);
     const archiveB: RunArchive = { ...archiveOf(b), runId: archiveA.runId };
-    expect(await persistArchive(db.pool, 'A', 'first', archiveA, [])).toMatchObject({
+    expect(await archiveInto(db.pool, 'A', 'first', archiveA, [])).toMatchObject({
       kind: 'inserted',
     });
-    const conflict = await persistArchive(db.pool, 'A', 'second', archiveB, []);
+    const conflict = await archiveInto(db.pool, 'A', 'second', archiveB, []);
     expect(conflict).toMatchObject({
       kind: 'conflict',
       reason: 'RUN_CONFLICT',
@@ -158,10 +170,12 @@ describe('persisting runs', () => {
     const a = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: fixture('runs/forked'),
+      expiresAt: NEVER,
     });
     const b = await db.store.persistRunDirectory({
       projectId: 'B',
       runDirectory: fixture('runs/forked'),
+      expiresAt: NEVER,
     });
     expect(a.kind).toBe('inserted');
     expect(b.kind).toBe('inserted');
@@ -208,13 +222,20 @@ describe('persisting runs', () => {
     const first = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: writeRawRun(root, 'compact', compact),
+      expiresAt: NEVER,
     });
     expect(first.kind).toBe('inserted');
     const second = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: writeRawRun(root, 'spaced', spaced),
+      expiresAt: NEVER,
     });
-    expect(second).toEqual({ ...first, kind: 'already_present', blobRelationsAdded: 0 });
+    expect(second).toEqual({
+      ...first,
+      kind: 'already_present',
+      blobRelationsAdded: 0,
+      retentionAdded: false,
+    });
     const stored = await db.store.loadRun('A', 'run-fwd');
     expect(stored?.sourceLines.map((l) => l.rawLine)).toEqual(compact);
     expect(stored?.sourceLines.filter((l) => l.disposition === 'duplicate')).toEqual([]);
@@ -230,6 +251,7 @@ describe('persisting runs', () => {
     const conflict = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: writeRawRun(root, 'forward', forward),
+      expiresAt: NEVER,
     });
     expect(conflict).toMatchObject({ kind: 'conflict', reason: 'RUN_CONFLICT' });
     expect((await db.store.loadRun('A', 'run-fwd'))?.sourceLines.map((l) => l.rawLine)).toEqual(
@@ -241,6 +263,7 @@ describe('persisting runs', () => {
         await db.store.persistRunDirectory({
           projectId: 'B',
           runDirectory: writeRawRun(root, 'forward-b', forward),
+          expiresAt: NEVER,
         })
       ).kind,
     ).toBe('inserted');
@@ -281,7 +304,11 @@ describe('persisting runs', () => {
       summary: { ignored: 1, duplicates: 1, attachments: 1 },
     });
     const localProjection = projectRun('A', dir, local);
-    const persisted = await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    const persisted = await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
     expect(persisted.kind).toBe('inserted');
     rmSync(root, { recursive: true, force: true });
 
@@ -360,7 +387,7 @@ describe('persisting runs', () => {
       ),
     };
     const published = await publish(db, fixture('runs/karate'), archive);
-    await expect(persistArchive(db.pool, 'A', 'broken', broken, published)).rejects.toThrow(
+    await expect(archiveInto(db.pool, 'A', 'broken', broken, published)).rejects.toThrow(
       /disposition_check/u,
     );
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_runs')).toBe(0);
@@ -368,9 +395,7 @@ describe('persisting runs', () => {
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_run_blobs')).toBe(0);
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_blobs')).toBe(0);
     // The identity was released: the intact archive can still be stored.
-    expect((await persistArchive(db.pool, 'A', 'intact', archive, published)).kind).toBe(
-      'inserted',
-    );
+    expect((await archiveInto(db.pool, 'A', 'intact', archive, published)).kind).toBe('inserted');
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_run_source_lines')).toBe(
       archive.lines.length,
     );
@@ -384,7 +409,7 @@ describe('persisting runs', () => {
     const pools = [db.pool, ...Array.from({ length: 5 }, () => pgTest.anotherPool(db))];
     const samePublished = await publish(db, fixture('runs/junit'), same);
     const results = await Promise.all(
-      pools.map((p, i) => persistArchive(p, 'A', `copy-${i}`, same, samePublished)),
+      pools.map((p, i) => archiveInto(p, 'A', `copy-${i}`, same, samePublished)),
     );
     expect(results.filter((r) => r.kind === 'inserted')).toHaveLength(1);
     expect(results.filter((r) => r.kind === 'already_present')).toHaveLength(pools.length - 1);
@@ -412,7 +437,7 @@ describe('persisting runs', () => {
     const contenders = Array.from({ length: 8 }, (_, i) => (i % 2 === 0 ? passed : failed));
     const outcomes = await Promise.all(
       contenders.map((archive, i) =>
-        persistArchive(pools[i % pools.length] as pg.Pool, 'A', `contender-${i}`, archive, []),
+        archiveInto(pools[i % pools.length] as pg.Pool, 'A', `contender-${i}`, archive, []),
       ),
     );
     const inserted = outcomes.filter((r) => r.kind === 'inserted');
@@ -435,7 +460,11 @@ describe('persisting runs', () => {
 
   it('fails visibly when the stored audit summary disagrees with the replay', async () => {
     const db = await pgTest.database('audit');
-    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: fixture('runs/forked') });
+    await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: fixture('runs/forked'),
+      expiresAt: NEVER,
+    });
     await db.pool.query(
       `UPDATE qe_runs SET validation_summary = validation_summary || '{"verdict":"failed"}'::jsonb WHERE project_id = $1 AND run_id = $2`,
       ['A', 'run-fork-0001'],
@@ -460,7 +489,13 @@ describe('persisting runs', () => {
     ];
     for (const d of dirs)
       expect(
-        (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: fixture(d) })).kind,
+        (
+          await db.store.persistRunDirectory({
+            projectId: 'A',
+            runDirectory: fixture(d),
+            expiresAt: NEVER,
+          })
+        ).kind,
       ).toBe('inserted');
     const local = await buildReadModel(
       dirs.map((d) => ({ projectId: 'A', runDirectory: fixture(d) })),
@@ -519,16 +554,21 @@ describe('persisting runs', () => {
       ],
       [bytes],
     );
-    expect((await db.store.persistRunDirectory({ projectId: 'A', runDirectory: open })).kind).toBe(
-      'inserted',
-    );
+    expect(
+      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: open, expiresAt: NEVER }))
+        .kind,
+    ).toBe('inserted');
     const unfinished = writeRun(root, 'unfinished', 'run-unfinished', [
       {
         sessionId: 's',
         events: [started('pw'), ...execution(testCase('e', 'h'), [['passed']]).slice(0, 1)],
       },
     ]);
-    const r = await db.store.persistRunDirectory({ projectId: 'A', runDirectory: unfinished });
+    const r = await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: unfinished,
+      expiresAt: NEVER,
+    });
     expect(r).toMatchObject({
       kind: 'rejected',
       reason: 'RUN_INCOMPLETE',
@@ -565,7 +605,11 @@ describe('persisting runs', () => {
       const local = await validateRunDirectorySnapshot(dir, { retainSourceLines: true });
       expect(local.report.valid, name).toBe(true);
       expect(local.report.summary.files, name).toBe(2);
-      const result = await db.store.persistRunDirectory({ projectId: name, runDirectory: dir });
+      const result = await db.store.persistRunDirectory({
+        projectId: name,
+        runDirectory: dir,
+        expiresAt: NEVER,
+      });
       expect(result.kind, name).toBe('inserted');
       const replayed = await db.store.replayRun(name, 'run-karate-0001');
       expect(replayed?.validated.report.summary.duplicates, name).toBe(
@@ -586,14 +630,22 @@ describe('persisting runs', () => {
     const root = freshRoot('empty');
     const dir = join(root, 'runs', 'empty');
     mkdirSync(join(dir, 'events'), { recursive: true });
-    const r = await db.store.persistRunDirectory({ projectId: 'A', runDirectory: dir });
+    const r = await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: dir,
+      expiresAt: NEVER,
+    });
     expect(r).toEqual({ kind: 'rejected', reason: 'RUN_EMPTY', runId: undefined, diagnostics: [] });
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_runs')).toBe(0);
   });
 
   it('records the source validation claim itself and offers no caller-supplied verification', async () => {
     const db = await pgTest.database('verified');
-    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: fixture('runs/karate') });
+    await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: fixture('runs/karate'),
+      expiresAt: NEVER,
+    });
     const stored = await db.store.loadRun('A', 'run-karate-0001');
     expect(stored?.sourceAttachmentsVerified).toBe(true);
     // Durable presence is a catalog fact, not the claim: both blobs are related and verifiable.
@@ -627,12 +679,12 @@ describe('persisting runs', () => {
         i === 1300 ? { ...l, disposition: 'bogus' as 'accepted' } : l,
       ),
     };
-    await expect(persistArchive(db.pool, 'A', 'broken', broken, [])).rejects.toThrow(
+    await expect(archiveInto(db.pool, 'A', 'broken', broken, [])).rejects.toThrow(
       /disposition_check/u,
     );
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_run_source_lines')).toBe(0);
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_runs')).toBe(0);
-    expect((await persistArchive(db.pool, 'A', dir, archive, [])).kind).toBe('inserted');
+    expect((await archiveInto(db.pool, 'A', dir, archive, [])).kind).toBe('inserted');
     const stored = await db.store.loadRun('A', 'run-big');
     expect(stored?.sourceLines).toHaveLength(1402);
     expect(stored?.sourceLines.map((l) => l.storageOrdinal)).toEqual(
@@ -650,7 +702,13 @@ describe('persisting runs', () => {
     )) {
       const dir = fixture(run.dir);
       expect(
-        (await db.store.persistRunDirectory({ projectId: 'P', runDirectory: dir })).kind,
+        (
+          await db.store.persistRunDirectory({
+            projectId: 'P',
+            runDirectory: dir,
+            expiresAt: NEVER,
+          })
+        ).kind,
         run.dir,
       ).toBe('inserted');
       const local = await validateRunDirectorySnapshot(dir);
@@ -698,7 +756,7 @@ describe('persisting runs', () => {
       });
     const karateBlobs = await publish(db, fixture('runs/karate'), archive);
     await claim(archive);
-    const pending = persistArchive(pgTest.anotherPool(db), 'A', 'contender', archive, karateBlobs);
+    const pending = archiveInto(pgTest.anotherPool(db), 'A', 'contender', archive, karateBlobs);
     await waiting(1);
     expect(await count(db.pool, 'SELECT count(*)::text AS n FROM qe_run_source_lines')).toBe(0);
     await holder.query('ROLLBACK');
@@ -710,8 +768,8 @@ describe('persisting runs', () => {
     );
     const forkedBlobs = await publish(db, fixture('runs/forked'), other);
     await claim(other);
-    const same = persistArchive(pgTest.anotherPool(db), 'A', 'same', other, forkedBlobs);
-    const different = persistArchive(
+    const same = archiveInto(pgTest.anotherPool(db), 'A', 'same', other, forkedBlobs);
+    const different = archiveInto(
       pgTest.anotherPool(db),
       'A',
       'different',
@@ -728,8 +786,13 @@ describe('persisting runs', () => {
   it('recognises the same content archived under an older fingerprint rule', async () => {
     const db = await pgTest.database('fpversion');
     expect(
-      (await db.store.persistRunDirectory({ projectId: 'A', runDirectory: fixture('runs/karate') }))
-        .kind,
+      (
+        await db.store.persistRunDirectory({
+          projectId: 'A',
+          runDirectory: fixture('runs/karate'),
+          expiresAt: NEVER,
+        })
+      ).kind,
     ).toBe('inserted');
     await db.pool.query(
       'UPDATE qe_runs SET fingerprint_version = 0, content_fingerprint = $3 WHERE project_id = $1 AND run_id = $2',
@@ -738,12 +801,13 @@ describe('persisting runs', () => {
     const again = await db.store.persistRunDirectory({
       projectId: 'A',
       runDirectory: fixture('runs/karate'),
+      expiresAt: NEVER,
     });
     expect(again).toMatchObject({ kind: 'already_present', runId: 'run-karate-0001' });
     const forkedArchive = archiveOf(
       await validateRunDirectorySnapshot(fixture('runs/forked'), { retainSourceLines: true }),
     );
-    const conflict = await persistArchive(
+    const conflict = await archiveInto(
       db.pool,
       'A',
       'x',
@@ -755,7 +819,11 @@ describe('persisting runs', () => {
 
   it('fails visibly when a stored line no longer matches the archived content', async () => {
     const db = await pgTest.database('tamper');
-    await db.store.persistRunDirectory({ projectId: 'A', runDirectory: fixture('runs/karate') });
+    await db.store.persistRunDirectory({
+      projectId: 'A',
+      runDirectory: fixture('runs/karate'),
+      expiresAt: NEVER,
+    });
     await db.pool.query(
       `UPDATE qe_run_source_lines SET raw_line = replace(raw_line, '"status":"failed"', '"status":"passed"')
         WHERE project_id = $1 AND run_id = $2 AND event_type = 'attempt.finished'`,

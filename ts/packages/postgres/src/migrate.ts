@@ -37,6 +37,7 @@ export function migrationChecksum(migration: Migration): string {
  */
 export async function migrate(pool: Pool): Promise<readonly AppliedMigration[]> {
   const client = await pool.connect();
+  let broken: Error | undefined;
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
     try {
@@ -85,13 +86,23 @@ export async function migrate(pool: Pool): Promise<readonly AppliedMigration[]> 
       }
       return result;
     } finally {
-      // Releasing on a broken connection must not hide the error that broke it; the lock dies
-      // with the session anyway.
-      await client
-        .query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY])
-        .catch(() => undefined);
+      // A connection that may still hold the lock must not go back to the pool, where the next
+      // caller would re-enter it; releasing it with an error discards it instead.
+      try {
+        const released = await client.query<{ released: boolean }>(
+          'SELECT pg_advisory_unlock($1) AS released',
+          [MIGRATION_LOCK_KEY],
+        );
+        broken =
+          released.rows[0]?.released === true
+            ? undefined
+            : new Error('the migration lock was not held when it was released');
+      } catch (e) {
+        broken = e instanceof Error ? e : new Error(String(e));
+      }
     }
   } finally {
-    client.release();
+    if (broken === undefined) client.release();
+    else client.release(broken);
   }
 }
