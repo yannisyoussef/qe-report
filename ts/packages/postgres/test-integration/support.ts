@@ -56,7 +56,7 @@ export class TestPostgres {
       database: name,
       max: 8,
     });
-    this.pools.push(pool);
+    this.track(pool);
     const blobRoot = mkdtempSync(join(tmpdir(), `qe-pg-blobs-${prefix}-`));
     this.roots.push(blobRoot);
     const blobs = new FileBlobStore(blobRoot);
@@ -86,8 +86,17 @@ export class TestPostgres {
       database: db.name,
       max: 8,
     });
-    this.pools.push(pool);
+    this.track(pool);
     return pool;
+  }
+
+  /**
+   * Keeps a pool for teardown and gives it an error listener: an idle client the server drops
+   * while the container stops reports through the pool, and an unheard error fails the suite.
+   */
+  private track(pool: pg.Pool): void {
+    pool.on('error', () => undefined);
+    this.pools.push(pool);
   }
 
   /** A fresh directory removed at stop, for run copies a test deletes or mutates. */
