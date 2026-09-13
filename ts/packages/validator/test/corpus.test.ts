@@ -4,10 +4,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  RunValidator,
   formatDiagnostic,
   validateFile,
   validateLines,
   validateRunDirectory,
+  type Report,
 } from '../src/index.js';
 import { FIXTURES_DIR, manifest, sessionFiles } from '../../protocol/test/helpers.js';
 
@@ -229,5 +231,305 @@ describe('cli', () => {
     expect(run().status).toBe(2);
     expect(run('--bogus').status).toBe(2);
     expect(run('/nonexistent/run').status).toBe(2);
+  });
+});
+
+describe('execution invariants', () => {
+  const line = (
+    seq: number,
+    type: string,
+    payload: unknown,
+    session = 's',
+    runId = 'r',
+    eventId = `${session}-${seq}`,
+  ): string =>
+    JSON.stringify({
+      protocolVersion: '0.3.0',
+      eventId,
+      eventType: type,
+      runId,
+      sessionId: session,
+      sequence: seq,
+      occurredAt: '2026-01-01T00:00:00Z',
+      payload,
+    });
+  const test = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    executionId: 'e',
+    historicalId: 'h',
+    historicalIdStability: 'stable',
+    displayName: 't',
+    path: [],
+    ...extra,
+  });
+  const session = (runner: string | undefined, producer = 'p'): Record<string, unknown> => ({
+    producer: { name: producer },
+    ...(runner === undefined ? {} : { runner: { name: runner } }),
+  });
+  const details = (report: Report): (string | undefined)[] =>
+    report.diagnostics.filter((d) => d.severity === 'error').map((d) => d.detail);
+
+  it('allows a gap in attempt numbers and a single attempt numbered above one', async () => {
+    const gap = await validateLines([
+      line(1, 'session.started', session('pw')),
+      line(2, 'attempt.started', { attemptId: 'a', attemptNumber: 1, test: test() }),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }),
+      line(4, 'attempt.started', { attemptId: 'b', attemptNumber: 3, test: test() }),
+      line(5, 'attempt.finished', { attemptId: 'b', status: 'passed' }),
+      line(6, 'session.finished', {}),
+    ]);
+    expect(details(gap)).toEqual([]);
+    expect(gap.summary.verdict).toBe('passed');
+    const lone = await validateLines([
+      line(1, 'session.started', session('pw')),
+      line(2, 'attempt.started', { attemptId: 'a', attemptNumber: 2, test: test() }),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'passed' }),
+      line(4, 'session.finished', {}),
+    ]);
+    expect(lone.valid).toBe(true);
+  });
+
+  it('allows retries across sessions of one runner from different producers, with different labels and tags', async () => {
+    const run = new RunValidator();
+    run.feed(
+      [
+        line(1, 'session.started', session('pw', 'adapter-a'), 's1'),
+        line(
+          2,
+          'attempt.started',
+          {
+            attemptId: 'a',
+            attemptNumber: 1,
+            test: test({ labels: { worker: '1' }, tags: ['x'] }),
+          },
+          's1',
+        ),
+        line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }, 's1'),
+        line(4, 'session.finished', {}, 's1'),
+      ],
+      's1',
+      true,
+    );
+    run.feed(
+      [
+        line(1, 'session.started', session('pw', 'adapter-b'), 's2'),
+        line(
+          2,
+          'attempt.started',
+          {
+            attemptId: 'b',
+            attemptNumber: 2,
+            test: test({ labels: { worker: '2' }, tags: ['y'], displayName: 'renamed' }),
+          },
+          's2',
+        ),
+        line(3, 'attempt.finished', { attemptId: 'b', status: 'passed' }, 's2'),
+        line(4, 'session.finished', {}, 's2'),
+      ],
+      's2',
+      true,
+    );
+    const report = await run.finish();
+    expect(details(report)).toEqual([]);
+    expect(report.summary).toMatchObject({ sessions: 2, attempts: 2, verdict: 'passed' });
+  });
+
+  it('keeps repeat-each repetitions apart because they use distinct execution ids', async () => {
+    const report = await validateLines([
+      line(1, 'session.started', session('pw')),
+      line(2, 'attempt.started', {
+        attemptId: 'a',
+        attemptNumber: 1,
+        test: test({ executionId: 'e-1' }),
+      }),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'passed' }),
+      line(4, 'attempt.started', {
+        attemptId: 'b',
+        attemptNumber: 1,
+        test: test({ executionId: 'e-2' }),
+      }),
+      line(5, 'attempt.finished', { attemptId: 'b', status: 'passed' }),
+      line(6, 'session.finished', {}),
+    ]);
+    expect(details(report)).toEqual([]);
+  });
+
+  it('rejects a reused attempt number and names the execution, the number, and the event', async () => {
+    const report = await validateLines([
+      line(1, 'session.started', session('pw')),
+      line(2, 'attempt.started', { attemptId: 'a', attemptNumber: 1, test: test() }),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }),
+      line(4, 'attempt.started', { attemptId: 'b', attemptNumber: 1, test: test() }),
+      line(5, 'attempt.finished', { attemptId: 'b', status: 'passed' }),
+      line(6, 'session.finished', {}),
+    ]);
+    expect(report.valid).toBe(false);
+    const d = report.diagnostics.find((x) => x.detail === 'DUPLICATE_ATTEMPT_NUMBER');
+    expect(d).toMatchObject({ code: 'LIFECYCLE_INVALID', line: 4, eventId: 's-4' });
+    expect(d?.message).toBe('execution e has attempts a (<stream>:2) and b both numbered 1');
+  });
+
+  it('rejects every change of history identity between attempts', async () => {
+    const changed = async (
+      first: Record<string, unknown>,
+      second: Record<string, unknown>,
+    ): Promise<(string | undefined)[]> =>
+      details(
+        await validateLines([
+          line(1, 'session.started', session('pw')),
+          line(2, 'attempt.started', { attemptId: 'a', attemptNumber: 1, test: test(first) }),
+          line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }),
+          line(4, 'attempt.started', { attemptId: 'b', attemptNumber: 2, test: test(second) }),
+          line(5, 'attempt.finished', { attemptId: 'b', status: 'passed' }),
+          line(6, 'session.finished', {}),
+        ]),
+      );
+    expect(await changed({}, { historicalId: 'h2' })).toEqual(['HISTORICAL_IDENTITY_CHANGED']);
+    expect(await changed({}, { historicalIdStability: 'uncertain' })).toEqual([
+      'HISTORICAL_IDENTITY_CHANGED',
+    ]);
+    const unavailable = { historicalId: undefined, historicalIdStability: 'unavailable' };
+    expect(await changed(unavailable, {})).toEqual(['HISTORICAL_IDENTITY_CHANGED']);
+    expect(await changed({}, unavailable)).toEqual(['HISTORICAL_IDENTITY_CHANGED']);
+    expect(await changed(unavailable, unavailable)).toEqual([]);
+  });
+
+  it('rejects a duplicate attempt number across sessions whatever the feed order, naming the other attempt', async () => {
+    const s1 = [
+      line(1, 'session.started', session('pw'), 's1'),
+      line(2, 'attempt.started', { attemptId: 'a', attemptNumber: 2, test: test() }, 's1'),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }, 's1'),
+      line(4, 'session.finished', {}, 's1'),
+    ];
+    const s2 = [
+      line(1, 'session.started', session('pw'), 's2'),
+      line(2, 'attempt.started', { attemptId: 'b', attemptNumber: 2, test: test() }, 's2'),
+      line(3, 'attempt.finished', { attemptId: 'b', status: 'passed' }, 's2'),
+      line(4, 'session.finished', {}, 's2'),
+    ];
+    const feed = async (order: [string[], string][]): Promise<Report> => {
+      const run = new RunValidator();
+      for (const [lines, file] of order) run.feed(lines, file, true);
+      return run.finish();
+    };
+    const forward = await feed([
+      [s1, 's1'],
+      [s2, 's2'],
+    ]);
+    const backward = await feed([
+      [s2, 's2'],
+      [s1, 's1'],
+    ]);
+    for (const report of [forward, backward]) {
+      expect(report.valid).toBe(false);
+      expect(details(report)).toEqual(['DUPLICATE_ATTEMPT_NUMBER']);
+    }
+    const f = forward.diagnostics.find((d) => d.detail === 'DUPLICATE_ATTEMPT_NUMBER');
+    const b = backward.diagnostics.find((d) => d.detail === 'DUPLICATE_ATTEMPT_NUMBER');
+    expect([f?.file, f?.line, f?.message]).toEqual([
+      's2',
+      2,
+      'execution e has attempts a (s1:2) and b both numbered 2',
+    ]);
+    expect([b?.file, b?.line, b?.message]).toEqual([
+      's1',
+      2,
+      'execution e has attempts b (s2:2) and a both numbered 2',
+    ]);
+  });
+
+  it('describes both identities and the other attempt when the history identity changes', async () => {
+    const report = await validateLines([
+      line(1, 'session.started', session('pw')),
+      line(2, 'attempt.started', {
+        attemptId: 'a',
+        attemptNumber: 1,
+        test: test({ historicalId: undefined, historicalIdStability: 'unavailable' }),
+      }),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }),
+      line(4, 'attempt.started', { attemptId: 'b', attemptNumber: 2, test: test() }),
+      line(5, 'attempt.finished', { attemptId: 'b', status: 'passed' }),
+      line(6, 'session.finished', {}),
+    ]);
+    const d = report.diagnostics.find((x) => x.detail === 'HISTORICAL_IDENTITY_CHANGED');
+    expect(d?.message).toBe(
+      'execution e changes history identity between attempts a (unavailable, <stream>:2) and b (h, stable)',
+    );
+  });
+
+  it('does not blame a runner change on a session that was never started', async () => {
+    const report = await validateLines([
+      line(1, 'session.started', session('pw'), 's1'),
+      line(
+        2,
+        'attempt.started',
+        {
+          attemptId: 'a',
+          attemptNumber: 1,
+          test: test({ historicalId: undefined, historicalIdStability: 'unavailable' }),
+        },
+        's1',
+      ),
+      line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }, 's1'),
+      line(4, 'session.finished', {}, 's1'),
+      line(
+        2,
+        'attempt.started',
+        {
+          attemptId: 'b',
+          attemptNumber: 2,
+          test: test({ historicalId: undefined, historicalIdStability: 'unavailable' }),
+        },
+        's2',
+      ),
+      line(3, 'attempt.finished', { attemptId: 'b', status: 'passed' }, 's2'),
+      line(4, 'session.finished', {}, 's2'),
+    ]);
+    expect(details(report)).toEqual(['SESSION_NOT_STARTED']);
+  });
+
+  it('rejects an execution whose sessions declare different runners, or a runner in only one', async () => {
+    const spanning = async (
+      first: string | undefined,
+      second: string | undefined,
+    ): Promise<Report> => {
+      const run = new RunValidator();
+      const t =
+        first === undefined || second === undefined
+          ? { historicalId: undefined, historicalIdStability: 'unavailable' }
+          : {};
+      run.feed(
+        [
+          line(1, 'session.started', session(first), 's1'),
+          line(2, 'attempt.started', { attemptId: 'a', attemptNumber: 1, test: test(t) }, 's1'),
+          line(3, 'attempt.finished', { attemptId: 'a', status: 'failed' }, 's1'),
+          line(4, 'session.finished', {}, 's1'),
+        ],
+        's1',
+        true,
+      );
+      run.feed(
+        [
+          line(1, 'session.started', session(second), 's2'),
+          line(2, 'attempt.started', { attemptId: 'b', attemptNumber: 2, test: test(t) }, 's2'),
+          line(3, 'attempt.finished', { attemptId: 'b', status: 'passed' }, 's2'),
+          line(4, 'session.finished', {}, 's2'),
+        ],
+        's2',
+        true,
+      );
+      return run.finish();
+    };
+    expect(details(await spanning('junit-platform', 'playwright'))).toEqual([
+      'EXECUTION_RUNNER_CHANGED',
+    ]);
+    expect(details(await spanning(undefined, 'playwright'))).toEqual(['EXECUTION_RUNNER_CHANGED']);
+    expect(details(await spanning('playwright', undefined))).toEqual(['EXECUTION_RUNNER_CHANGED']);
+    expect(details(await spanning('playwright', 'playwright'))).toEqual([]);
+    const d = (await spanning('junit-platform', 'playwright')).diagnostics.find(
+      (x) => x.detail === 'EXECUTION_RUNNER_CHANGED',
+    );
+    expect(d).toMatchObject({ file: 's2', line: 2, eventId: 's2-2' });
+    expect(d?.message).toContain('junit-platform');
+    expect(d?.message).toContain('playwright');
   });
 });

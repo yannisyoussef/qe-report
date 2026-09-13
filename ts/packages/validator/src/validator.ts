@@ -39,6 +39,9 @@ export type LifecycleDetail =
   | 'DUPLICATE_RUN_FINISHED'
   | 'SESSION_NOT_FINISHED_AT_RUN_END'
   | 'DUPLICATE_ATTEMPT_ID'
+  | 'DUPLICATE_ATTEMPT_NUMBER'
+  | 'HISTORICAL_IDENTITY_CHANGED'
+  | 'EXECUTION_RUNNER_CHANGED'
   | 'ATTEMPT_NOT_STARTED'
   | 'DUPLICATE_ATTEMPT_FINISHED'
   | 'ATTEMPT_NOT_FINISHED_AT_SESSION_END'
@@ -170,6 +173,8 @@ interface SessionState {
   finished: boolean;
   lastSequence: number;
   runnerName: string | undefined;
+  /** Created for an event that arrived before session.started; its runner is unknown, not absent. */
+  synthesized: boolean;
 }
 interface AttemptState {
   session: string;
@@ -185,11 +190,27 @@ interface Location {
   line: number;
   eventId: string;
 }
+/**
+ * What every attempt of one execution must agree on: one attempt per attempt number, one history
+ * identity, one runner family. Run-wide, because an execution may span sessions.
+ */
+interface ExecutionState {
+  attemptNumbers: Map<number, Location & { attemptId: string }>;
+  historicalId: string | undefined;
+  historicalIdStability: string;
+  /** The runner of the reference attempt's session; undefined when unknown or absent. */
+  runnerName: string | undefined;
+  /** Whether the reference attempt's session was started properly, so its runner is known. */
+  runnerKnown: boolean;
+  /** The attempt that fixed the execution's identity: the first one fed, not attempt number 1. */
+  reference: Location & { attemptId: string };
+}
 
 /**
  * Validates one run, fed one event file at a time. Ordering is defined only inside a session,
  * so files are independent except for run-level facts: one runId, unique event and session ids,
- * at most one run.finished, and every session finished when the run is closed.
+ * at most one run.finished, every session finished when the run is closed, and one meaning per
+ * execution (attempt numbers, history identity, runner family) across all its attempts.
  */
 export class RunValidator {
   private readonly v = validators();
@@ -198,6 +219,7 @@ export class RunValidator {
   private readonly seen = new Map<string, string>();
   private readonly sessions = new Map<string, SessionState>();
   private readonly attempts = new Map<string, AttemptState>();
+  private readonly executions = new Map<string, ExecutionState>();
   private readonly attachments: (Location & { sha256: string; sizeBytes: number })[] = [];
   private runId: string | undefined;
   private runFinished: Location | undefined;
@@ -338,6 +360,7 @@ export class RunValidator {
             isKnownEvent(event) && event.eventType === 'session.started'
               ? event.payload.runner?.name
               : undefined,
+          synthesized: false,
         };
         this.sessions.set(event.sessionId, session);
       } else if (!session) {
@@ -350,6 +373,7 @@ export class RunValidator {
           finished: false,
           lastSequence: event.sequence - 1,
           runnerName: undefined,
+          synthesized: true,
         };
         this.sessions.set(event.sessionId, session);
       }
@@ -422,7 +446,7 @@ export class RunValidator {
           }
           if (this.attempts.has(id))
             lifecycle('DUPLICATE_ATTEMPT_ID', `attempt ${id} started twice`, event.eventId);
-          else
+          else {
             this.attempts.set(id, {
               session: event.sessionId,
               executionId: event.payload.test.executionId,
@@ -432,6 +456,8 @@ export class RunValidator {
               inconclusive: false,
               steps: new Map(),
             });
+            this.checkExecution(event, session, { file, line }, lifecycle);
+          }
           break;
         }
         case 'attempt.finished': {
@@ -547,6 +573,61 @@ export class RunValidator {
     }
   }
 
+  /**
+   * The relational rules of one execution: the attempts sharing an executionId are one logical
+   * test, so they cannot share an attempt number (the final attempt would be undefined), change
+   * their history identity (historicalId and its stability, absence included), or come from
+   * sessions of different runner families (the history key would be undefined). Gaps in the
+   * numbering, several sessions of one runner, and differing presentation fields are allowed.
+   * Which attempt is the reference depends on feed order; which rule fires does not.
+   */
+  private checkExecution(
+    event: Extract<Event, { eventType: 'attempt.started' }>,
+    session: SessionState,
+    at: { file: string; line: number },
+    lifecycle: (detail: LifecycleDetail, message: string, eventId: string) => void,
+  ): void {
+    const { attemptId, attemptNumber, test } = event.payload;
+    const here = { ...at, eventId: event.eventId, attemptId };
+    const known = this.executions.get(test.executionId);
+    if (!known) {
+      this.executions.set(test.executionId, {
+        attemptNumbers: new Map([[attemptNumber, here]]),
+        historicalId: test.historicalId,
+        historicalIdStability: test.historicalIdStability,
+        runnerName: session.runnerName,
+        runnerKnown: !session.synthesized,
+        reference: here,
+      });
+      return;
+    }
+    const sameNumber = known.attemptNumbers.get(attemptNumber);
+    if (sameNumber) {
+      lifecycle(
+        'DUPLICATE_ATTEMPT_NUMBER',
+        `execution ${test.executionId} has attempts ${sameNumber.attemptId} (${where(sameNumber)}) and ${attemptId} both numbered ${attemptNumber}`,
+        event.eventId,
+      );
+    } else known.attemptNumbers.set(attemptNumber, here);
+    if (
+      known.historicalId !== test.historicalId ||
+      known.historicalIdStability !== test.historicalIdStability
+    ) {
+      lifecycle(
+        'HISTORICAL_IDENTITY_CHANGED',
+        `execution ${test.executionId} changes history identity between attempts ${known.reference.attemptId} (${describeIdentity(known.historicalId, known.historicalIdStability)}, ${where(known.reference)}) and ${attemptId} (${describeIdentity(test.historicalId, test.historicalIdStability)})`,
+        event.eventId,
+      );
+    }
+    if (known.runnerKnown && !session.synthesized && known.runnerName !== session.runnerName) {
+      lifecycle(
+        'EXECUTION_RUNNER_CHANGED',
+        `execution ${test.executionId} spans sessions of different runners: ${known.runnerName ?? 'none'} at attempt ${known.reference.attemptId} (${where(known.reference)}), ${session.runnerName ?? 'none'} at attempt ${attemptId}`,
+        event.eventId,
+      );
+    }
+  }
+
   /** Applies the run-level rules, checks attachment bytes, and produces the report. */
   async finish(): Promise<Report> {
     if (this.runFinished) {
@@ -614,7 +695,9 @@ export class RunValidator {
       });
     }
     const valid = !this.diagnostics.some((d) => d.severity === 'error');
-    // A test case's outcome is that of its final attempt (highest attemptNumber).
+    // A test case's outcome is that of its final attempt (highest attemptNumber); two attempts
+    // sharing the highest number are a DUPLICATE_ATTEMPT_NUMBER error, so the verdict of a valid
+    // run never depends on which one was fed first.
     const finalAttempts = new Map<string, AttemptState>();
     for (const a of this.attempts.values()) {
       const current = finalAttempts.get(a.executionId);
@@ -699,6 +782,14 @@ export async function validateRunDirectory(
     run.feed(readFileSync(file, 'utf8').split('\n'), file, true);
   }
   return run.finish();
+}
+
+function describeIdentity(historicalId: string | undefined, stability: string): string {
+  return historicalId === undefined ? stability : `${historicalId}, ${stability}`;
+}
+
+function where(at: Location): string {
+  return `${at.file}:${at.line}`;
 }
 
 function sha256File(path: string): Promise<string> {

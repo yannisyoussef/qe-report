@@ -62,7 +62,7 @@ export function scripted(out: string): void {
     ],
     location: { file: 'spec.ts', line: 3, column: 1 },
     tags: ['@smoke', 'token=tag'],
-    labels: { issue: 'QE-1' },
+    labels: { issue: 'QE-1', ['__proto__']: 'a label named like a prototype', constructor: 'c' },
   };
   s.emit({
     eventType: 'attempt.started',

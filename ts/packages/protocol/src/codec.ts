@@ -113,12 +113,13 @@ function stringMap(o: Obj, field: string, at: string): Record<string, string> | 
   const v = o[field];
   if (v === undefined || v === null) return undefined;
   if (!isObject(v)) throw invalid(`${at}/${field}`, 'must be an object of strings');
-  const out: Record<string, string> = {};
+  const entries: [string, string][] = [];
   for (const [k, val] of Object.entries(v)) {
     if (typeof val !== 'string') throw invalid(`${at}/${field}/${k}`, 'must be a string');
-    out[k] = val;
+    entries.push([k, val]);
   }
-  return out;
+  // Every key is data, `__proto__` included: define own properties rather than assign them.
+  return Object.fromEntries(entries);
 }
 
 function stringList(o: Obj, field: string, at: string): string[] | undefined {

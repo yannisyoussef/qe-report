@@ -12,6 +12,10 @@
         "roundTrip": "exact"
       },
       {
+        "file": "events/valid/session-started-prototype-named-keys.json",
+        "roundTrip": "exact"
+      },
+      {
         "file": "events/valid/session-finished.json",
         "roundTrip": "exact"
       },
@@ -903,6 +907,60 @@
       "reason": "LIFECYCLE_INVALID",
       "detail": "HISTORICAL_ID_WITHOUT_RUNNER",
       "line": 2
+    },
+    {
+      "dir": "runs/retry-across-sessions",
+      "outcome": "VALID",
+      "complete": true,
+      "closed": false,
+      "sessions": 2,
+      "attempts": 2,
+      "failedAttempts": 1,
+      "verdict": "passed"
+    },
+    {
+      "dir": "runs/invalid/duplicate-attempt-number",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "DUPLICATE_ATTEMPT_NUMBER",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/historical-id-changed",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "HISTORICAL_IDENTITY_CHANGED",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/historical-stability-changed",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "HISTORICAL_IDENTITY_CHANGED",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/historical-identity-appeared",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "HISTORICAL_IDENTITY_CHANGED",
+      "line": 4
+    },
+    {
+      "dir": "runs/invalid/execution-runner-changed",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "EXECUTION_RUNNER_CHANGED",
+      "line": 2,
+      "file": "s-2-450222bcc347.ndjson"
+    },
+    {
+      "dir": "runs/invalid/execution-runner-absent",
+      "outcome": "INVALID",
+      "reason": "LIFECYCLE_INVALID",
+      "detail": "EXECUTION_RUNNER_CHANGED",
+      "line": 2,
+      "file": "s-2-450222bcc347.ndjson"
     },
     {
       "dir": "runs/invalid/mixed-sessions-in-file",

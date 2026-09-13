@@ -1,0 +1,29 @@
+{
+  "protocolVersion": "0.3.0",
+  "eventId": "sess-3-0001",
+  "eventType": "session.started",
+  "runId": "run-ev-0001",
+  "sessionId": "sess-3",
+  "sequence": 1,
+  "occurredAt": "2026-09-11T10:00:00.000+00:00",
+  "payload": {
+    "producer": {
+      "name": "fixture",
+      "version": "0.1.0"
+    },
+    "runner": {
+      "name": "fixture-runner",
+      "version": "1"
+    },
+    "environment": {
+      "__proto__": "one",
+      "constructor": "two",
+      "prototype": "three",
+      "normal": "four"
+    },
+    "labels": {
+      "__proto__": "five",
+      "toString": "six"
+    }
+  }
+}
