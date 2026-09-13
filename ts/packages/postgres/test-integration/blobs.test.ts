@@ -406,6 +406,7 @@ describe('durable attachment bytes', () => {
       kind: 'already_present',
       blobRelationsAdded: 0,
       retentionAdded: false,
+      queryIndexRebuilt: false,
     });
     // A run already archived with its relations costs no blob work at all.
     expect(probe.outcomes.map((o) => o.outcome)).toEqual(['stored']);
@@ -523,6 +524,7 @@ describe('durable attachment bytes', () => {
       ingestionSequence: before?.ingestionSequence,
       blobRelationsAdded: 1,
       retentionAdded: false,
+      queryIndexRebuilt: false,
     });
     const after = await db.store.loadRun('A', 'run-legacy');
     expect(after?.blobs.map((b) => b.sha256)).toEqual([sha]);
@@ -533,7 +535,12 @@ describe('durable attachment bytes', () => {
       runDirectory: dir,
       expiresAt: NEVER,
     });
-    expect(again).toEqual({ ...upgraded, blobRelationsAdded: 0, retentionAdded: false });
+    expect(again).toEqual({
+      ...upgraded,
+      blobRelationsAdded: 0,
+      retentionAdded: false,
+      queryIndexRebuilt: false,
+    });
     // Several upgraders at once: the relation is created once and counted once.
     await db.pool.query('DELETE FROM qe_run_blobs');
     await db.pool.query('DELETE FROM qe_blobs');

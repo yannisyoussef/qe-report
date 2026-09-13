@@ -9,6 +9,8 @@ import {
   type ValidatedRun,
 } from 'qe-report-validator';
 import { projectRun, type ProjectedRun } from 'qe-report-read-model';
+import { replaceQueryIndex } from './index-writer.js';
+import { QUERY_INDEX_VERSION, deriveQueryIndex, type DerivedQueryIndex } from './query-index.js';
 import {
   FINGERPRINT_VERSION,
   buildArchive,
@@ -52,6 +54,12 @@ export type PersistResult =
        * run archived before retention existed has none of. An established expiry is never moved.
        */
       readonly retentionAdded: boolean;
+      /**
+       * True when this call rebuilt the run's derived query index because it was missing or was
+       * written under an older interpretation of a projected run. Derived state is repaired
+       * here, never promoted to truth: the archived source is untouched.
+       */
+      readonly queryIndexRebuilt: boolean;
     }
   | {
       readonly kind: 'rejected';
@@ -143,9 +151,15 @@ export class ReplayMismatchError extends Error {
   }
 }
 
+/** An opaque partition key, bounded because the derived indexes are keyed by it. */
+const MAX_PROJECT_ID_LENGTH = 128;
+
 function checkProjectId(projectId: string): void {
   if (typeof projectId !== 'string' || projectId === '') {
     throw new TypeError('projectId must be a non-empty string');
+  }
+  if (projectId.length > MAX_PROJECT_ID_LENGTH) {
+    throw new TypeError(`projectId must be at most ${MAX_PROJECT_ID_LENGTH} characters`);
   }
 }
 
@@ -215,11 +229,17 @@ export class PostgresRunStore {
     }
     // validateRunDirectorySnapshot checked the bytes under <run>/attachments against the events.
     const archive = buildArchive(validated);
+    // The projection this archive produces, read into query-index rows now, so that the
+    // transaction below stores a run that is immediately queryable. It is derived state: the
+    // source lines beside it are what can produce it again.
+    const derived = deriveQueryIndex(
+      projectRun(request.projectId, request.runDirectory, validated),
+    );
     // From here the call may publish bytes or write rows, so it holds the maintenance lock
     // shared: destructive retention cannot interleave with the identity check, the
     // materialisation, or the transaction, and other ingestions still run beside it.
     return withIngestionLock(this.pool, async (client) => {
-      const known = await knownRun(client, request.projectId, archive, expiresAt);
+      const known = await knownRun(client, request.projectId, archive, expiresAt, derived);
       if (known !== undefined) return known;
       const published = await materialiseBlobs(
         this.blobs,
@@ -233,100 +253,14 @@ export class PostgresRunStore {
         archive,
         published,
         expiresAt,
+        derived,
       );
     });
   }
 
   /** The archived run, or nothing when the project holds no such run. */
   async loadRun(projectId: string, runId: string): Promise<StoredRun | undefined> {
-    checkProjectId(projectId);
-    const run = await this.pool.query<{
-      ingestion_sequence: string;
-      ingested_at: Date;
-      source_locator: string;
-      content_fingerprint: string;
-      fingerprint_version: number;
-      protocol_versions: string[];
-      source_line_count: number;
-      source_attachments_verified: boolean;
-      expires_at: Date | null;
-      validation_summary: Summary;
-    }>(
-      `SELECT r.ingestion_sequence, r.ingested_at, r.source_locator, r.content_fingerprint,
-              r.fingerprint_version, r.protocol_versions, r.source_line_count,
-              r.source_attachments_verified, r.validation_summary, t.expires_at
-         FROM qe_runs r
-         LEFT JOIN qe_run_retention t
-           ON t.project_id = r.project_id AND t.run_id = r.run_id
-        WHERE r.project_id = $1 AND r.run_id = $2`,
-      [projectId, runId],
-    );
-    const head = run.rows[0];
-    if (head === undefined) return undefined;
-    const lines = await this.pool.query<{
-      storage_ordinal: number;
-      event_id: string;
-      session_id: string;
-      sequence: string;
-      event_type: string;
-      protocol_version: string;
-      canonical_sha256: string;
-      disposition: 'accepted' | 'ignored' | 'duplicate';
-      raw_line: string;
-      source_file: string;
-      source_line: number;
-    }>(
-      `SELECT storage_ordinal, event_id, session_id, sequence, event_type, protocol_version,
-              canonical_sha256, disposition, raw_line, source_file, source_line
-         FROM qe_run_source_lines WHERE project_id = $1 AND run_id = $2
-        ORDER BY storage_ordinal`,
-      [projectId, runId],
-    );
-    const blobs = await this.pool.query<{
-      sha256: string;
-      size_bytes: string;
-      storage_key: string;
-      stored_at: Date;
-    }>(
-      `SELECT b.sha256, b.size_bytes, b.storage_key, b.stored_at
-         FROM qe_run_blobs rb JOIN qe_blobs b USING (sha256)
-        WHERE rb.project_id = $1 AND rb.run_id = $2
-        ORDER BY b.sha256`,
-      [projectId, runId],
-    );
-    return {
-      projectId,
-      runId,
-      ingestionSequence: BigInt(head.ingestion_sequence),
-      ingestedAt: head.ingested_at,
-      sourceLocator: head.source_locator,
-      contentFingerprint: head.content_fingerprint,
-      fingerprintVersion: head.fingerprint_version,
-      protocolVersions: head.protocol_versions,
-      sourceLineCount: head.source_line_count,
-      sourceAttachmentsVerified: head.source_attachments_verified,
-      expiresAt: head.expires_at ?? undefined,
-      validationSummary: head.validation_summary,
-      sourceLines: lines.rows.map((r) => ({
-        storageOrdinal: r.storage_ordinal,
-        eventId: r.event_id,
-        sessionId: r.session_id,
-        sequence: Number(r.sequence),
-        eventType: r.event_type,
-        protocolVersion: r.protocol_version,
-        canonicalSha256: r.canonical_sha256,
-        disposition: r.disposition,
-        rawLine: r.raw_line,
-        sourceFile: r.source_file,
-        sourceLine: r.source_line,
-      })),
-      blobs: blobs.rows.map((r) => ({
-        sha256: r.sha256,
-        sizeBytes: Number(r.size_bytes),
-        storageKey: r.storage_key,
-        storedAt: r.stored_at,
-      })),
-    };
+    return loadStoredRun(this.pool, projectId, runId);
   }
 
   /**
@@ -348,11 +282,12 @@ export class PostgresRunStore {
     return { stored, validated, verifiedBlobs };
   }
 
-  /** The stored run as today's projector sees it: replayed, then projected. No bytes are read. */
+  /**
+   * The stored run as today's projector sees it: replayed, then projected. No bytes are read.
+   * The same operation the query surface offers as `getRun`, through the same implementation.
+   */
   async projectStoredRun(projectId: string, runId: string): Promise<ProjectedRun | undefined> {
-    const replayed = await this.replayRun(projectId, runId);
-    if (replayed === undefined) return undefined;
-    return projectRun(projectId, replayed.stored.sourceLocator, replayed.validated);
+    return projectStoredRunFrom(this.pool, projectId, runId);
   }
 
   /**
@@ -440,6 +375,147 @@ export class PostgresRunStore {
 }
 
 /**
+ * One archived run as the projector sees it, rebuilt from its own stored source: the whole of
+ * the durable read path for a single run, and its only implementation.
+ */
+export async function projectStoredRunFrom(
+  pool: Pool,
+  projectId: string,
+  runId: string,
+): Promise<ProjectedRun | undefined> {
+  const stored = await loadStoredRun(pool, projectId, runId);
+  if (stored === undefined) return undefined;
+  return projectRun(projectId, stored.sourceLocator, await replayStored(stored));
+}
+
+/**
+ * Reads one archived run as of a single instant. Its head, its source lines, its retention fact,
+ * and its blob relations live in four tables that retention may be deleting from right now, so
+ * they are read on one connection inside a read-only repeatable-read transaction: a run present
+ * at the snapshot is read whole, and one deleted a moment later is simply absent. No maintenance
+ * lease is taken; this is ordinary MVCC, not writer serialisation.
+ */
+export async function loadStoredRun(
+  pool: Pool,
+  projectId: string,
+  runId: string,
+): Promise<StoredRun | undefined> {
+  checkProjectId(projectId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const stored = await readStoredRun(client, projectId, runId);
+    await client.query('COMMIT');
+    client.release();
+    return stored;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release(e instanceof Error ? e : new Error(String(e)));
+    throw e;
+  }
+}
+
+/**
+ * The four reads themselves, on a caller's connection. A caller that needs them to agree gives
+ * a connection inside a snapshot; one that already holds the maintenance lease, where nothing
+ * can delete a run underneath it, does not need one.
+ */
+export async function readStoredRun(
+  client: PoolClient,
+  projectId: string,
+  runId: string,
+): Promise<StoredRun | undefined> {
+  const run = await client.query<{
+    ingestion_sequence: string;
+    ingested_at: Date;
+    source_locator: string;
+    content_fingerprint: string;
+    fingerprint_version: number;
+    protocol_versions: string[];
+    source_line_count: number;
+    source_attachments_verified: boolean;
+    expires_at: Date | null;
+    validation_summary: Summary;
+  }>(
+    `SELECT r.ingestion_sequence, r.ingested_at, r.source_locator, r.content_fingerprint,
+                r.fingerprint_version, r.protocol_versions, r.source_line_count,
+                r.source_attachments_verified, r.validation_summary, t.expires_at
+           FROM qe_runs r
+           LEFT JOIN qe_run_retention t
+             ON t.project_id = r.project_id AND t.run_id = r.run_id
+          WHERE r.project_id = $1 AND r.run_id = $2`,
+    [projectId, runId],
+  );
+  const head = run.rows[0];
+  if (head === undefined) return undefined;
+  const lines = await client.query<{
+    storage_ordinal: number;
+    event_id: string;
+    session_id: string;
+    sequence: string;
+    event_type: string;
+    protocol_version: string;
+    canonical_sha256: string;
+    disposition: 'accepted' | 'ignored' | 'duplicate';
+    raw_line: string;
+    source_file: string;
+    source_line: number;
+  }>(
+    `SELECT storage_ordinal, event_id, session_id, sequence, event_type, protocol_version,
+                canonical_sha256, disposition, raw_line, source_file, source_line
+           FROM qe_run_source_lines WHERE project_id = $1 AND run_id = $2
+          ORDER BY storage_ordinal`,
+    [projectId, runId],
+  );
+  const blobs = await client.query<{
+    sha256: string;
+    size_bytes: string;
+    storage_key: string;
+    stored_at: Date;
+  }>(
+    `SELECT b.sha256, b.size_bytes, b.storage_key, b.stored_at
+           FROM qe_run_blobs rb JOIN qe_blobs b USING (sha256)
+          WHERE rb.project_id = $1 AND rb.run_id = $2
+          ORDER BY b.sha256`,
+    [projectId, runId],
+  );
+  const stored: StoredRun = {
+    projectId,
+    runId,
+    ingestionSequence: BigInt(head.ingestion_sequence),
+    ingestedAt: head.ingested_at,
+    sourceLocator: head.source_locator,
+    contentFingerprint: head.content_fingerprint,
+    fingerprintVersion: head.fingerprint_version,
+    protocolVersions: head.protocol_versions,
+    sourceLineCount: head.source_line_count,
+    sourceAttachmentsVerified: head.source_attachments_verified,
+    expiresAt: head.expires_at ?? undefined,
+    validationSummary: head.validation_summary,
+    sourceLines: lines.rows.map((r) => ({
+      storageOrdinal: r.storage_ordinal,
+      eventId: r.event_id,
+      sessionId: r.session_id,
+      sequence: Number(r.sequence),
+      eventType: r.event_type,
+      protocolVersion: r.protocol_version,
+      canonicalSha256: r.canonical_sha256,
+      disposition: r.disposition,
+      rawLine: r.raw_line,
+      sourceFile: r.source_file,
+      sourceLine: r.source_line,
+    })),
+    blobs: blobs.rows.map((r) => ({
+      sha256: r.sha256,
+      sizeBytes: Number(r.size_bytes),
+      storageKey: r.storage_key,
+      storedAt: r.stored_at,
+    })),
+  };
+  return stored;
+}
+
+/**
  * An advisory look before any blob work: a run already archived with the same content, every
  * required relation, and its retention fact is `already_present`, and different content is
  * `conflict`, without copying a byte. Anything else (absent, or an archive missing relations or
@@ -450,6 +526,7 @@ async function knownRun(
   projectId: string,
   archive: RunArchive,
   expiresAt: Date,
+  derived: DerivedQueryIndex,
 ): Promise<PersistResult | undefined> {
   const stored = await storedFingerprint(client, projectId, archive);
   if (stored === undefined) return undefined;
@@ -468,15 +545,47 @@ async function knownRun(
   );
   const known = new Set(related.rows.map((r) => r.sha256));
   if (archive.requiredBlobs.some((b) => !known.has(b.sha256))) return undefined;
-  // Its bytes are all accounted for, so only the lifecycle fact can still be missing, and that
-  // needs no blob work at all: one row completes a run archived before retention existed.
-  const retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
+  // Its bytes are all accounted for, so only derived state can still be missing, and none of it
+  // needs blob work: a run archived before retention or before query indexes existed is
+  // completed from what has just been validated, in one transaction, without the archive itself
+  // changing in any way.
+  await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+  let retentionAdded = false;
+  let queryIndexRebuilt = false;
+  try {
+    // Whoever repairs derived state holds the run's own row while deciding what is missing, so
+    // that a rebuild and a re-ingestion of one run cannot both write its occurrences.
+    const locked = await client.query(
+      'SELECT 1 FROM qe_runs WHERE project_id = $1 AND run_id = $2 FOR UPDATE',
+      [projectId, archive.runId],
+    );
+    if (locked.rowCount === 0) {
+      // Retention took it between the fingerprint read and here; archive it afresh instead.
+      await client.query('ROLLBACK');
+      return undefined;
+    }
+    retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
+    const indexed = await client.query(
+      `SELECT 1 FROM qe_run_query_index
+        WHERE project_id = $1 AND run_id = $2 AND index_version = $3 AND source_fingerprint = $4`,
+      [projectId, archive.runId, QUERY_INDEX_VERSION, stored.storedFingerprint],
+    );
+    queryIndexRebuilt = indexed.rowCount === 0;
+    if (queryIndexRebuilt) {
+      await replaceQueryIndex(client, projectId, archive.runId, derived, stored.storedFingerprint);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw e;
+  }
   return {
     kind: 'already_present',
     runId: archive.runId,
     ingestionSequence: stored.ingestionSequence,
     blobRelationsAdded: 0,
     retentionAdded,
+    queryIndexRebuilt,
   };
 }
 
@@ -497,6 +606,7 @@ export async function archiveWithin(
   archive: RunArchive,
   published: readonly BlobDescriptor[],
   expiresAt: Date,
+  derived: DerivedQueryIndex,
 ): Promise<PersistResult> {
   checkProjectId(projectId);
   checkExpiresAt(expiresAt);
@@ -543,6 +653,11 @@ export async function archiveWithin(
       }
       // Same content. A run archived before its bytes were durable gains its blob relations now,
       // from blobs this caller has just published; its source and provenance stay as they are.
+      // The claimant's row is held first, so no rebuild replaces its index at the same moment.
+      await client.query('SELECT 1 FROM qe_runs WHERE project_id = $1 AND run_id = $2 FOR UPDATE', [
+        projectId,
+        archive.runId,
+      ]);
       const related = await client.query<{ sha256: string }>(
         'SELECT sha256 FROM qe_run_blobs WHERE project_id = $1 AND run_id = $2',
         [projectId, archive.runId],
@@ -557,6 +672,20 @@ export async function archiveWithin(
       // A run archived before retention existed gains its fact here. One already recorded is
       // left exactly as it is: an established expiry is never moved by re-ingestion.
       const retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
+      const indexed = await client.query(
+        `SELECT 1 FROM qe_run_query_index
+          WHERE project_id = $1 AND run_id = $2 AND index_version = $3 AND source_fingerprint = $4`,
+        [projectId, archive.runId, QUERY_INDEX_VERSION, stored.storedFingerprint],
+      );
+      const queryIndexRebuilt = indexed.rowCount === 0;
+      if (queryIndexRebuilt)
+        await replaceQueryIndex(
+          client,
+          projectId,
+          archive.runId,
+          derived,
+          stored.storedFingerprint,
+        );
       await client.query('COMMIT');
       return {
         kind: 'already_present',
@@ -564,13 +693,16 @@ export async function archiveWithin(
         ingestionSequence: stored.ingestionSequence,
         blobRelationsAdded: added,
         retentionAdded,
+        queryIndexRebuilt,
       };
     }
     await recordBlobs(client, blobs);
     await insertLines(client, projectId, archive.runId, archive.lines);
     await relateBlobs(client, projectId, archive.runId, blobs);
-    // In the same transaction as the run: this writer never leaves a run without its expiry.
+    // In the same transaction as the run: this writer never leaves a run without its expiry,
+    // and never leaves one that nothing can query until an operator rebuilds it.
     await recordRetention(client, projectId, archive.runId, expiresAt);
+    await replaceQueryIndex(client, projectId, archive.runId, derived, archive.contentFingerprint);
     await client.query('COMMIT');
     return {
       kind: 'inserted',
@@ -608,7 +740,9 @@ async function storedFingerprint(
   db: Pool | PoolClient,
   projectId: string,
   archive: RunArchive,
-): Promise<{ fingerprint: string; ingestionSequence: bigint } | undefined> {
+): Promise<
+  { fingerprint: string; storedFingerprint: string; ingestionSequence: bigint } | undefined
+> {
   const existing = await db.query<{
     content_fingerprint: string;
     fingerprint_version: number;
@@ -633,7 +767,11 @@ async function storedFingerprint(
             )
           ).rows.map((r) => ({ canonicalSha256: r.canonical_sha256, disposition: r.disposition })),
         );
-  return { fingerprint, ingestionSequence: BigInt(stored.ingestion_sequence) };
+  return {
+    fingerprint,
+    storedFingerprint: stored.content_fingerprint,
+    ingestionSequence: BigInt(stored.ingestion_sequence),
+  };
 }
 
 /** The published descriptors for exactly the blobs the archive requires, sizes agreeing. */

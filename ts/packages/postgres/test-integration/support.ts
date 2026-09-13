@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { FileBlobStore, type BlobDescriptor, type BlobStore } from 'qe-report-blob-fs';
+import { projectRun } from 'qe-report-read-model';
+import { RunValidator } from 'qe-report-validator';
 import { PostgresRunStore, RetentionMaintenance, migrate } from '../src/index.js';
 import { withIngestionLock } from '../src/locks.js';
 import { archiveWithin, type PersistResult } from '../src/store.js';
+import { deriveQueryIndex, type DerivedQueryIndex } from '../src/query-index.js';
 import { SCHEMA_MIGRATIONS_TABLE_SQL, migrationChecksum } from '../src/migrate.js';
 import { MIGRATIONS } from '../src/migrations.js';
 import type { RunArchive } from '../src/archive.js';
@@ -149,7 +152,7 @@ export class TestPostgres {
  * Archives one already built archive the way production does: through the one place a mutation
  * takes its shared maintenance lease, with an explicit expiry. Nothing archives without it.
  */
-export function archiveInto(
+export async function archiveInto(
   pool: pg.Pool,
   projectId: string,
   sourceLocator: string,
@@ -157,9 +160,45 @@ export function archiveInto(
   published: readonly BlobDescriptor[],
   expiresAt: Date = NEVER,
 ): Promise<PersistResult> {
+  const derived = await derivedFromArchive(projectId, sourceLocator, archive);
   return withIngestionLock(pool, (client) =>
-    archiveWithin(client, projectId, sourceLocator, archive, published, expiresAt),
+    archiveWithin(client, projectId, sourceLocator, archive, published, expiresAt, derived),
   );
+}
+
+/**
+ * What the production path derives from the run it is about to archive, reconstructed here from
+ * the archive's own lines. A test that archives a doctored identity gets an index aimed at that
+ * identity, exactly as the run row it will sit beside.
+ */
+async function derivedFromArchive(
+  projectId: string,
+  sourceLocator: string,
+  archive: RunArchive,
+): Promise<DerivedQueryIndex> {
+  const run = new RunValidator({ retainEvents: true, retainSourceLines: true });
+  const bySession = new Map<string, string[]>();
+  for (const line of archive.lines) {
+    const list = bySession.get(line.sessionId);
+    if (list === undefined) bySession.set(line.sessionId, [line.rawLine]);
+    else list.push(line.rawLine);
+  }
+  for (const [sessionId, lines] of bySession) run.feed(lines, `archive:${sessionId}`, true);
+  const report = await run.finish();
+  const projected = projectRun(projectId, sourceLocator, {
+    report,
+    events: run.acceptedEvents(),
+    sourceLines: run.sourceLines(),
+  });
+  const derived = deriveQueryIndex(projected);
+  if (derived.run.runId === archive.runId) return derived;
+  return {
+    run: { ...derived.run, runId: archive.runId },
+    occurrences: derived.occurrences.map((o) => ({
+      ...o,
+      occurrence: { ...o.occurrence, runId: archive.runId },
+    })),
+  };
 }
 
 /** Publishes an archive's required blobs from its run directory, as the store does before its transaction. */

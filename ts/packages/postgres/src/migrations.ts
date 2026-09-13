@@ -170,4 +170,117 @@ ALTER TABLE qe_run_blobs
 ALTER TABLE qe_run_blobs VALIDATE CONSTRAINT qe_run_blobs_run_fkey;
 `,
   },
+  {
+    version: 4,
+    name: 'query-indexes',
+    sql: `
+-- Everything below is derived: rebuildable from the raw source lines through the validator and
+-- the projector, and never consulted as a semantic authority. The run archive stays the truth.
+CREATE TABLE qe_run_query_index (
+  project_id             text        COLLATE "C" NOT NULL,
+  run_id                 text        COLLATE "C" NOT NULL,
+  index_version          integer     NOT NULL,
+  source_fingerprint     text        NOT NULL,
+  verdict                text        NOT NULL,
+  complete               boolean     NOT NULL,
+  closed                 boolean     NOT NULL,
+  ignored_event_count    integer     NOT NULL,
+  duplicate_event_count  integer     NOT NULL,
+  session_count          integer     NOT NULL,
+  execution_count        integer     NOT NULL,
+  scope_failure_count    integer     NOT NULL,
+  attachment_count       integer     NOT NULL,
+  indexed_at             timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT qe_run_query_index_pkey PRIMARY KEY (project_id, run_id),
+  CONSTRAINT qe_run_query_index_project_id_check CHECK (project_id <> ''),
+  CONSTRAINT qe_run_query_index_run_id_check CHECK (run_id <> ''),
+  CONSTRAINT qe_run_query_index_verdict_check
+    CHECK (verdict IN ('passed', 'failed', 'inconclusive', 'incomplete')),
+  CONSTRAINT qe_run_query_index_run_fkey FOREIGN KEY (project_id, run_id)
+    REFERENCES qe_runs (project_id, run_id) ON DELETE CASCADE,
+  CONSTRAINT qe_run_query_index_version_check CHECK (index_version >= 1),
+  CONSTRAINT qe_run_query_index_fingerprint_check CHECK (source_fingerprint ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT qe_run_query_index_counts_check CHECK (
+    ignored_event_count >= 0 AND duplicate_event_count >= 0 AND session_count >= 0
+    AND execution_count >= 0 AND scope_failure_count >= 0 AND attachment_count >= 0)
+);
+
+COMMENT ON TABLE qe_run_query_index IS
+  'One row per run whose projection has been indexed for listing: rebuildable derived state, never truth. A run with no row here, or one whose index_version or source_fingerprint no longer match, is not indexed at all as far as a query is concerned.';
+COMMENT ON COLUMN qe_run_query_index.index_version IS
+  'How the projected run was read into these rows. Not the protocol version, not the schema version, not the package version: it changes when the interpretation does, and every row written under an older one must be rebuilt before it is served.';
+COMMENT ON COLUMN qe_run_query_index.source_fingerprint IS
+  'The content fingerprint of the archived source this index was derived from; a row whose fingerprint is not the run''s current one is stale.';
+COMMENT ON COLUMN qe_run_query_index.verdict IS
+  'Copied from the projected run, which copied it from the validator. Nothing here derives a verdict.';
+
+-- What a run listing pages on: one project's runs, newest archived first.
+CREATE INDEX qe_runs_project_sequence_idx ON qe_runs (project_id, ingestion_sequence);
+
+-- Identifiers are printable ASCII (the protocol's own contract), so byte order is exactly the
+-- code-unit order the in-memory history comparator uses. The collation is declared rather than
+-- inherited so that the database's own ordering cannot drift from it.
+CREATE TABLE qe_history_occurrences (
+  project_id               text        COLLATE "C" NOT NULL,
+  history_key              bytea       NOT NULL,
+  index_version            integer     NOT NULL,
+  run_id                   text        COLLATE "C" NOT NULL,
+  execution_id             text        COLLATE "C" NOT NULL,
+  runner_name              text        COLLATE "C" NOT NULL,
+  historical_id            text        COLLATE "C" NOT NULL,
+  historical_id_stability  text        NOT NULL,
+  occurred_at_raw          text        NOT NULL,
+  occurred_at_instant      timestamptz NOT NULL,
+  session_ids              text[]      NOT NULL,
+  attempt_count            integer     NOT NULL,
+  complete                 boolean     NOT NULL,
+  final_status             text,
+  expected_status          text,
+  flaky                    boolean     NOT NULL,
+  run_verdict              text        NOT NULL,
+  run_complete             boolean     NOT NULL,
+  session_status           text,
+  CONSTRAINT qe_history_occurrences_pkey PRIMARY KEY (project_id, run_id, execution_id),
+  CONSTRAINT qe_history_occurrences_run_fkey FOREIGN KEY (project_id, run_id)
+    REFERENCES qe_runs (project_id, run_id) ON DELETE CASCADE,
+  CONSTRAINT qe_history_occurrences_attempts_check CHECK (attempt_count >= 1),
+  CONSTRAINT qe_history_occurrences_project_id_check CHECK (project_id <> ''),
+  CONSTRAINT qe_history_occurrences_ids_check
+    CHECK (run_id <> '' AND execution_id <> '' AND runner_name <> '' AND historical_id <> ''),
+  CONSTRAINT qe_history_occurrences_version_check CHECK (index_version >= 1),
+  CONSTRAINT qe_history_occurrences_key_length_check CHECK (length(history_key) = 32),
+  CONSTRAINT qe_history_occurrences_sessions_check
+    CHECK (array_length(session_ids, 1) >= 1 AND array_position(session_ids, NULL) IS NULL),
+  CONSTRAINT qe_history_occurrences_stability_check
+    CHECK (historical_id_stability IN ('stable', 'uncertain', 'unavailable')),
+  CONSTRAINT qe_history_occurrences_final_status_check
+    CHECK (final_status IS NULL
+           OR final_status IN ('passed', 'failed', 'skipped', 'aborted', 'inconclusive')),
+  CONSTRAINT qe_history_occurrences_expected_status_check
+    CHECK (expected_status IS NULL OR expected_status IN ('passed', 'failed', 'skipped')),
+  CONSTRAINT qe_history_occurrences_run_verdict_check
+    CHECK (run_verdict IN ('passed', 'failed', 'inconclusive', 'incomplete')),
+  CONSTRAINT qe_history_occurrences_session_status_check
+    CHECK (session_status IS NULL
+           OR session_status IN ('passed', 'failed', 'inconclusive'))
+);
+
+COMMENT ON TABLE qe_history_occurrences IS
+  'One row per execution that qualifies as history: it carries a historical id and its session declared a runner. Derived from the projected run, rebuildable, and never the place a flakiness or identity rule is decided. An execution without a historical id is absent rather than given one.';
+COMMENT ON COLUMN qe_history_occurrences.history_key IS
+  'SHA-256 of the runner name and the historical id, which is what the history index is keyed by. The names themselves are bounded by the protocol at 512 characters each, which in multi-byte text is more than a btree key can hold; a digest of fixed width can be, and the names are still compared exactly beside it so a collision could not answer the wrong question.';
+COMMENT ON COLUMN qe_history_occurrences.occurred_at_instant IS
+  'The producer instant of the first attempt as the in-memory comparator parses it, to millisecond precision, so that ordering here and there cannot differ. The original string is kept beside it.';
+COMMENT ON COLUMN qe_history_occurrences.flaky IS
+  'Copied from the projected execution. SQL counts these; it never decides what flaky means.';
+
+-- The one ordering a history page takes: the key, then instant, then the identifier tie-breakers.
+CREATE INDEX qe_history_occurrences_key_idx ON qe_history_occurrences
+  (project_id, history_key, occurred_at_instant, run_id, execution_id)
+  INCLUDE (index_version);
+
+COMMENT ON COLUMN qe_history_occurrences.index_version IS
+  'The interpretation this row was written under, carried beside the run''s own so that a query filters stale rows out structurally rather than trusting a check made a statement earlier.';
+`,
+  },
 ];

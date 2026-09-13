@@ -392,6 +392,112 @@ The read model and the protocol know nothing about retention, and
 `expiresAt` is an operational instant: it is not a producer clock, not
 `ingested_at`, and it orders nothing a reader sees.
 
+## Querying the archive
+
+One run is answered by replaying it. Questions across runs are answered from relational indexes
+that are derived from exactly that replay, and can be thrown away and rebuilt at any time.
+
+```
+one run             ->  raw source  ->  validator  ->  projectRun
+runs, history       ->  query indexes
+```
+
+```ts
+const queries = new PostgresQueries(pool);
+await queries.getRun('web', 'run-42'); // ProjectedRun | undefined, from the source itself
+await queries.listRuns({ projectId: 'web', limit: 50 }); // newest archived first
+await queries.getTestHistoryPage({
+  projectId: 'web',
+  runnerName: 'playwright',
+  historicalId: 'spec.ts::signs in',
+  limit: 50,
+});
+await queries.getFlakinessSummary({ projectId: 'web', runnerName: 'playwright', historicalId });
+await queries.getIndexStatus('web');
+await queries.rebuildProjectIndex({ projectId: 'web', maxRuns: 100 });
+```
+
+`getRun` reconstructs one run from its own archived lines through the validator and the
+projector, and never consults an index, so it answers whether or not the project is indexed. Its
+four reads happen on one connection in a read-only repeatable-read transaction: a run present at
+that snapshot is read whole even if retention deletes it a moment later, and one already gone is
+`undefined`. No maintenance lease is taken; this is MVCC, not writer serialisation.
+
+`listRuns` pages by the archive's own `ingestion_sequence`, newest first. That is an operational
+order and nothing else: not protocol chronology, not producer time, and not the order a history
+is presented in. The sequence is a database identity, handed out before a run commits, so a run
+archived concurrently with a listing may become visible below a page boundary the listing has
+already passed; a page is a description of one snapshot, not a subscription. `getTestHistoryPage` pages ascending in the in-memory model's history order,
+producer instant then run id then execution id, through a keyset cursor rather than an offset.
+Ordering touches three columns and no others. `occurred_at_instant` holds exactly what the
+in-memory comparator reads the producer's clock to, to the millisecond, computed here rather
+than parsed by the database, which would otherwise keep the nanoseconds the protocol allows in
+the text. `run_id` and `execution_id` break its ties, and they are protocol identifiers, which
+are printable ASCII, so the declared `COLLATE "C"` byte order is exactly the code-unit order the
+comparator uses. The remaining identifier columns are declared `COLLATE "C"` for deterministic
+equality only; nothing orders by them.
+
+One clock the protocol admits is not an instant any obvious parse produces: a leap second, and
+in principle a date or offset whose shape is legal and whose value is not. Both models read them
+through one shared function, so the durable order is the in-memory order whatever that function
+does: a leap second is the second it belongs to, and a string naming no instant at all takes the
+earliest position rather than an accidental one. Tightening the protocol to reject the latter
+would be a protocol decision, not a storage one, and is not taken here.
+
+The history key stays `(projectId, runner.name, historicalId)`. Producer name, display name,
+path, location, and tags are not part of it, and an execution with no historical id or no
+declared runner is absent from history rather than given either.
+
+## What the indexes are, and what they are not
+
+They are derived. Nothing in SQL decides a verdict, a final attempt, a historical identity, a
+runner family, an expected status, a session outcome, or what flakiness means: every one of those
+is settled by the validator and the projector before a row is written, and the row copies the
+answer. `getFlakinessSummary` counts stored booleans; no aggregate is kept and updated anywhere. The
+counts are as trustworthy as the labels producers put on their tests: anything that may ingest
+into a project may also claim another test's runner name and historical id, which is inherent to
+keying history on producer-supplied identity rather than anything this layer decides.
+
+There are no relational tables for sessions, attempts, steps, scope failures, attachment
+references, or failures. A request for a whole run replays that one run. The indexes exist so
+that a question across runs does not have to replay all of them.
+
+A run is _currently indexed_ when it has an index row, written under the current
+`QUERY_INDEX_VERSION`, from the run's current `content_fingerprint`. That version is not the
+protocol version, not the schema version, and not the package version: it changes when this
+interpretation of a projected run changes.
+
+## Completeness before answers
+
+`getIndexStatus(projectId)` reports how many of the project's runs are indexed, missing, and
+stale. `listRuns`, `getTestHistoryPage`, and `getFlakinessSummary` refuse a project that is not
+completely indexed, with a `QueryIndexIncompleteError` naming the counts. Each of them checks
+and answers inside one read-only repeatable-read snapshot, so what the check saw is what the
+answer is drawn from, and each also filters on the index version itself, so a row written under
+another interpretation is unservable rather than merely unexpected. The check stops at the first
+run that is not current; only a refusal pays for the counts that describe it. There is no
+`allowPartial`: a history that quietly omitted the runs nobody had indexed yet would be wrong in
+a way its caller could not see. `getRun` is exempt, because it replays one run from the source.
+
+Runs archived by the current writer are indexed inside their own archive transaction, so a run is
+queryable the moment it exists and no backfill is needed for new data. Runs archived before this
+existed are indexed by `rebuildProjectIndex`, a bounded, explicitly invoked pass that takes the
+shared maintenance lease, reads each selected run's source, replays and projects it, and replaces
+that run's derived rows in one transaction under a row lock. Repairing a run's index during
+ingestion takes the same row lock, so a rebuild and a re-ingestion of one run serialise on the
+run itself rather than colliding. A run a pass cannot index is named in `problems` and the pass
+carries on; its cursor moves past it, so a walk of the project finishes, and a pass started
+without a cursor comes back to it. Nothing is scheduled, nothing runs in
+the background, and no rebuild ever reads a stale index as its input. Re-ingesting a run whose
+index is missing or stale repairs it and answers `already_present` with `queryIndexRebuilt`.
+
+`verifyIndexedRun` replays one indexed run and compares what it projects with what is stored. It
+is an operator's tool for looking for drift deliberately; the ordinary freshness contract is the
+index version and the source fingerprint, and no product query pays for a replay.
+
+Retention needs to know none of this. The derived tables cascade from `qe_runs`, so deleting an
+expired run removes its listing row and its occurrences with it, and the project stays complete.
+
 ## Migrations
 
 The schema is an append-only list of versioned SQL migrations embedded in
@@ -458,6 +564,18 @@ attachment.
 
 ## Limitations
 
+- No search of any kind: no display-name, tag, label, or failure-message
+  search, no date windows, no trend or pass-rate aggregates. The indexes
+  answer the three questions the read model defines and nothing else.
+- No authorisation. Every query takes a project id and answers about it,
+  including `getIndexStatus`, so whatever sits in front of this decides
+  who may name which project.
+- A history page is bounded and a run listing is bounded, but paging
+  across several of them is not one snapshot: each page is consistent in
+  itself, and a run archived or deleted between pages shows up as a
+  difference between them.
+- A project id is at most 128 characters here, because the derived
+  indexes are keyed by it.
 - No update and no incremental ingestion; a run is archived once,
   complete, and afterwards only deleted. An established expiry cannot be
   changed, and there is no hold, extension, or policy model.

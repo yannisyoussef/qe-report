@@ -18,6 +18,28 @@ export {
   type AttachmentIntegrityCode,
 } from './errors.js';
 export {
+  PostgresQueries,
+  QueryIndexIncompleteError,
+  DEFAULT_PAGE_SIZE,
+  DEFAULT_REBUILD_RUNS,
+  MAX_PAGE_SIZE,
+  MAX_REBUILD_RUNS,
+  type FlakinessSummary,
+  type HistoryCursor,
+  type HistoryKey,
+  type HistoryPage,
+  type HistoryRequest,
+  type IndexDrift,
+  type IndexStatus,
+  type ListRunsRequest,
+  type RebuildProblem,
+  type RebuildRequest,
+  type RebuildResult,
+  type RunPage,
+  type RunSummary,
+} from './queries.js';
+export { QUERY_INDEX_VERSION } from './query-index.js';
+export {
   PostgresRunStore,
   ReplayMismatchError,
   type PersistRequest,

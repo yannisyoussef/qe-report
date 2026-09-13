@@ -123,6 +123,7 @@ describe('persisting runs', () => {
       kind: 'already_present',
       blobRelationsAdded: 0,
       retentionAdded: false,
+      queryIndexRebuilt: false,
     });
     const root = freshRoot('other-copy');
     const copy = join(root, 'runs', 'elsewhere');
@@ -235,6 +236,7 @@ describe('persisting runs', () => {
       kind: 'already_present',
       blobRelationsAdded: 0,
       retentionAdded: false,
+      queryIndexRebuilt: false,
     });
     const stored = await db.store.loadRun('A', 'run-fwd');
     expect(stored?.sourceLines.map((l) => l.rawLine)).toEqual(compact);
