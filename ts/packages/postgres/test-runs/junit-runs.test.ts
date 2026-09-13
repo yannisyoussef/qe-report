@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ReadModel, buildReadModel } from 'qe-report-read-model';
 import type { ProjectedRun } from 'qe-report-read-model';
+import { PostgresQueries } from '../src/index.js';
 import { NEVER, TestPostgres, facts, rowsIn } from '../test-integration/support.js';
 
 /**
@@ -153,6 +154,65 @@ describe('real JUnit runs in PostgreSQL', () => {
       }
     }
 
+    // The durable query surface over the same real output.
+    const queries = new PostgresQueries(db.pool);
+    for (const projectId of ['gradle', 'gradle-isolated', 'gradle-expiring']) {
+      expect((await queries.getIndexStatus(projectId)).complete, projectId).toBe(true);
+    }
+    const listed = await queries.listRuns({ projectId: 'gradle' });
+    expect(listed.runs).toHaveLength(1);
+    expect(listed.runs[0]).toMatchObject({
+      runId: 'run-gradle-consumer',
+      verdict: 'failed',
+      complete: true,
+      closed: false,
+      sessionCount: 3,
+      scopeFailureCount: 1,
+    });
+    // The teardown scope failure still fails the run while its children stay passed.
+    const childHistories = (gradle as ProjectedRun).executions.filter(
+      (e) => e.runnerName !== undefined && e.test.historicalId !== undefined,
+    );
+    expect(childHistories.length).toBeGreaterThan(20);
+    for (const e of childHistories) {
+      const durable = await queries.getTestHistoryPage({
+        projectId: 'gradle',
+        runnerName: e.runnerName as string,
+        historicalId: e.test.historicalId as string,
+        limit: 50,
+      });
+      expect(durable.occurrences, e.executionId).toEqual(
+        local.model.getTestHistory('gradle', e.runnerName as string, e.test.historicalId as string)
+          .occurrences,
+      );
+      expect(
+        await queries.getFlakinessSummary({
+          projectId: 'gradle',
+          runnerName: e.runnerName as string,
+          historicalId: e.test.historicalId as string,
+        }),
+      ).toMatchObject({ flakyOccurrences: 0, everFlaky: false });
+    }
+    // The attachment the consumer publishes changes nothing about history.
+    const withAttachment = (gradle as ProjectedRun).executions.find((e) =>
+      e.attempts.some((a) => a.attachments.length > 0),
+    );
+    expect(withAttachment).toBeDefined();
+    if (
+      withAttachment?.runnerName !== undefined &&
+      withAttachment.test.historicalId !== undefined
+    ) {
+      const page = await queries.getTestHistoryPage({
+        projectId: 'gradle',
+        runnerName: withAttachment.runnerName,
+        historicalId: withAttachment.test.historicalId,
+      });
+      expect(page.occurrences.map((o) => o.executionId)).toContain(withAttachment.executionId);
+    }
+    // A full run still comes from its own source and equals the local projection.
+    const fromSource = await queries.getRun('gradle', 'run-gradle-consumer');
+    expect(fromSource && facts(fromSource)).toEqual(facts(gradle as ProjectedRun));
+
     // Retention on real output: the expiring copy goes, the run that shares its bytes keeps them.
     const sharedSha = reference.sha256;
     const isolatedRun = local.model.getRun('gradle-isolated', gradleIsolatedRunId);
@@ -164,6 +224,16 @@ describe('real JUnit runs in PostgreSQL', () => {
       'gradle-isolated',
     ]);
     const report = await db.maintenance.run({ asOf: new Date('2026-06-01T00:00:00.000Z') });
+    // The deleted runs took their derived rows with them; what remains is still fully indexed.
+    expect((await queries.getIndexStatus('gradle')).complete).toBe(true);
+    expect(await queries.getIndexStatus('gradle-isolated')).toMatchObject({
+      totalRuns: 0,
+      complete: true,
+    });
+    expect(
+      await rowsIn(db.pool, 'qe_history_occurrences', 'project_id = $1', ['gradle-isolated']),
+    ).toBe(0);
+    expect((await queries.listRuns({ projectId: 'gradle' })).runs).toHaveLength(1);
     expect(report.expiredRuns.map((r) => r.projectId).sort()).toEqual([
       'gradle-expiring',
       'gradle-isolated',
