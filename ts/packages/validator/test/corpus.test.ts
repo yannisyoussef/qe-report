@@ -1,9 +1,20 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
-import { EVENT_TYPES } from 'qe-report-protocol';
+import { afterAll, describe, expect, it } from 'vitest';
+import { EVENT_TYPES, LIMITS, type Event } from 'qe-report-protocol';
 import {
   RunValidator,
   formatDiagnostic,
@@ -577,5 +588,366 @@ describe('validated run snapshot', () => {
     const run = new RunValidator();
     run.feed(runLines('runs/forked'), 'stream', false);
     expect(run.acceptedEvents()).toEqual([]);
+  });
+});
+
+/** Links are part of the contract on every platform but Windows, where creating one needs a privilege. */
+const symlinkIt = process.platform === 'win32' ? it.skip : it;
+/** Every temporary directory made by these tests, removed when the file is done. */
+const TEMP: string[] = [];
+function temp(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  TEMP.push(d);
+  return d;
+}
+const UNREADABLE: string[] = [];
+afterAll(() => {
+  for (const t of UNREADABLE) chmodSync(t, 0o700);
+  for (const d of TEMP) rmSync(d, { recursive: true, force: true });
+});
+/** A link whose target no one may read: following it would throw, not return bytes. */
+function unreadableLink(target: string, link: string): void {
+  symlinkSync(target, link);
+  chmodSync(target, 0);
+  UNREADABLE.push(target);
+}
+
+describe('filesystem containment', () => {
+  /** A private copy of the karate fixture run (one session file, two attachments). */
+  function copyOfKarate(name: string): { dir: string; outside: string } {
+    const base = temp(`qe-fs-${name}-`);
+    const dir = join(base, 'run');
+    cpSync(join(FIXTURES_DIR, 'runs/karate'), dir, { recursive: true });
+    const outside = join(base, 'outside');
+    mkdirSync(outside);
+    return { dir, outside };
+  }
+  const OUTSIDE_MARK = 'run-OUTSIDE-never-read';
+  function outsideSessionText(): string {
+    return readFileSync(
+      join(FIXTURES_DIR, 'runs/karate/events', sessionFileOf('runs/karate')),
+      'utf8',
+    )
+      .split('run-karate-0001')
+      .join(OUTSIDE_MARK);
+  }
+  function sessionFileOf(run: string): string {
+    return sessionFiles(run).map((f) => f.split('/').pop() ?? '')[0] ?? '';
+  }
+  function unsafe(report: Report): [string, string][] {
+    return report.diagnostics
+      .filter((d) => d.code === 'UNSAFE_FILESYSTEM_ENTRY')
+      .map((d) => [d.file, d.message]);
+  }
+  async function bothReports(dir: string): Promise<{ report: Report; events: readonly Event[] }> {
+    const snapshot = await validateRunDirectorySnapshot(dir);
+    expect(await validateRunDirectory(dir)).toEqual(snapshot.report);
+    return snapshot;
+  }
+
+  it('still validates an ordinary copy of a run', async () => {
+    const { dir } = copyOfKarate('plain');
+    const { report } = await bothReports(dir);
+    expect(report.valid).toBe(true);
+    expect(report.summary.attachments).toBe(2);
+  });
+
+  symlinkIt('refuses a linked events directory and reads nothing through it', async () => {
+    const { dir, outside } = copyOfKarate('events-link');
+    mkdirSync(join(outside, 'events'));
+    writeFileSync(join(outside, 'events', 'x.ndjson'), outsideSessionText());
+    rmSync(join(dir, 'events'), { recursive: true });
+    unreadableLink(join(outside, 'events'), join(dir, 'events'));
+    const { report, events } = await bothReports(dir);
+    expect(report.valid).toBe(false);
+    expect(unsafe(report)).toEqual([
+      [
+        join(dir, 'events'),
+        'a symbolic link where a directory is required; nothing below it is read',
+      ],
+    ]);
+    expect(report.summary.files).toBe(0);
+    expect(events).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain(OUTSIDE_MARK);
+  });
+
+  symlinkIt(
+    'refuses a linked event file beside the real one, without reading its target',
+    async () => {
+      const { dir, outside } = copyOfKarate('event-link');
+      writeFileSync(join(outside, 'secret.ndjson'), outsideSessionText());
+      unreadableLink(join(outside, 'secret.ndjson'), join(dir, 'events', 'zz.ndjson'));
+      const { report, events } = await bothReports(dir);
+      expect(report.valid).toBe(false);
+      expect(unsafe(report)).toEqual([
+        [join(dir, 'events', 'zz.ndjson'), 'a symbolic link; only regular files are read'],
+      ]);
+      expect(report.summary.files).toBe(1);
+      expect(events.length).toBeGreaterThan(0);
+      expect(events.every((e) => e.runId === 'run-karate-0001')).toBe(true);
+      expect(JSON.stringify(report)).not.toContain(OUTSIDE_MARK);
+    },
+  );
+
+  it('refuses a directory named like an event file', async () => {
+    const { dir } = copyOfKarate('event-dir');
+    mkdirSync(join(dir, 'events', 'nested.ndjson'));
+    const { report } = await bothReports(dir);
+    expect(report.valid).toBe(false);
+    expect(unsafe(report)).toEqual([
+      [join(dir, 'events', 'nested.ndjson'), 'a directory; only regular files are read'],
+    ]);
+    expect(report.summary.files).toBe(1);
+  });
+
+  symlinkIt('refuses a linked attachment even when its target has the declared bytes', async () => {
+    const { dir, outside } = copyOfKarate('attachment-link');
+    const [sha] = readdirSync(join(dir, 'attachments')).sort();
+    if (sha === undefined) throw new Error('fixture has no attachment');
+    const bytes = readFileSync(join(dir, 'attachments', sha));
+    writeFileSync(join(outside, 'same-bytes'), bytes);
+    rmSync(join(dir, 'attachments', sha));
+    unreadableLink(join(outside, 'same-bytes'), join(dir, 'attachments', sha));
+    const { report } = await bothReports(dir);
+    expect(report.valid).toBe(false);
+    const codes = report.diagnostics.filter((d) => d.severity === 'error').map((d) => d.code);
+    expect(codes).toEqual(['UNSAFE_FILESYSTEM_ENTRY']);
+    expect(report.diagnostics[0]?.message).toBe(
+      `attachment ${sha} is a symbolic link; only regular files are read`,
+    );
+    expect(report.diagnostics[0]?.line).toBeGreaterThan(0);
+  });
+
+  it('refuses an attachment path that is a directory, and keeps missing, size, and hash checks', async () => {
+    const { dir } = copyOfKarate('attachment-dir');
+    const [first, second] = readdirSync(join(dir, 'attachments')).sort();
+    if (first === undefined || second === undefined) throw new Error('fixture has two attachments');
+    rmSync(join(dir, 'attachments', first));
+    mkdirSync(join(dir, 'attachments', first));
+    rmSync(join(dir, 'attachments', second));
+    const { report } = await bothReports(dir);
+    expect(
+      report.diagnostics
+        .filter((d) => d.severity === 'error')
+        .map((d) => d.code)
+        .sort(),
+    ).toEqual(['ATTACHMENT_MISSING', 'UNSAFE_FILESYSTEM_ENTRY']);
+    const { dir: tampered } = copyOfKarate('attachment-bytes');
+    writeFileSync(join(tampered, 'attachments', first), 'not the declared bytes');
+    const bad = await validateRunDirectory(tampered);
+    expect(bad.diagnostics.map((d) => d.code)).toEqual(
+      expect.arrayContaining(['ATTACHMENT_SIZE_MISMATCH', 'ATTACHMENT_HASH_MISMATCH']),
+    );
+  });
+
+  symlinkIt('refuses a linked attachments directory as a whole', async () => {
+    const { dir, outside } = copyOfKarate('attachments-dir-link');
+    cpSync(join(dir, 'attachments'), join(outside, 'attachments'), { recursive: true });
+    rmSync(join(dir, 'attachments'), { recursive: true });
+    unreadableLink(join(outside, 'attachments'), join(dir, 'attachments'));
+    const { report } = await bothReports(dir);
+    expect(report.valid).toBe(false);
+    expect(unsafe(report)).toEqual([
+      [
+        join(dir, 'attachments'),
+        'a symbolic link where a directory is required; nothing below it is read',
+      ],
+    ]);
+    expect(report.diagnostics.filter((d) => d.code.startsWith('ATTACHMENT_'))).toEqual([]);
+    // The same directory named explicitly by the caller is a trusted entry point.
+    chmodSync(join(outside, 'attachments'), 0o700);
+    const explicit = await validateRunDirectory(dir, { attachmentsDir: join(dir, 'attachments') });
+    expect(explicit.valid).toBe(true);
+  });
+
+  it('refuses a regular file where the events or attachments directory should be', async () => {
+    const { dir } = copyOfKarate('events-file');
+    rmSync(join(dir, 'events'), { recursive: true });
+    writeFileSync(join(dir, 'events'), 'not a directory');
+    const events = await bothReports(dir);
+    expect(events.report.valid).toBe(false);
+    expect(unsafe(events.report)).toEqual([
+      [
+        join(dir, 'events'),
+        'a regular file where a directory is required; nothing below it is read',
+      ],
+    ]);
+    expect(events.events).toEqual([]);
+    const { dir: other } = copyOfKarate('attachments-file');
+    rmSync(join(other, 'attachments'), { recursive: true });
+    writeFileSync(join(other, 'attachments'), 'not a directory');
+    const attachments = await bothReports(other);
+    expect(unsafe(attachments.report)).toEqual([
+      [
+        join(other, 'attachments'),
+        'a regular file where a directory is required; nothing below it is read',
+      ],
+    ]);
+  });
+
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  (process.platform === 'win32' || asRoot ? it.skip : it)(
+    'surfaces an unsearchable events directory as an I/O error, never as an empty valid run',
+    async () => {
+      const { dir } = copyOfKarate('unsearchable');
+      chmodSync(join(dir, 'events'), 0o444);
+      UNREADABLE.push(join(dir, 'events'));
+      await expect(validateRunDirectory(dir)).rejects.toThrow(/EACCES/u);
+      const { dir: other } = copyOfKarate('unsearchable-attachments');
+      chmodSync(join(other, 'attachments'), 0o444);
+      UNREADABLE.push(join(other, 'attachments'));
+      await expect(validateRunDirectory(other)).rejects.toThrow(/EACCES/u);
+    },
+  );
+
+  const fifoIt = process.platform === 'win32' ? it.skip : it;
+  fifoIt('refuses a named pipe where the platform can create one, without opening it', async () => {
+    const { dir } = copyOfKarate('fifo');
+    const fifo = join(dir, 'events', 'pipe.ndjson');
+    const made = spawnSync('mkfifo', [fifo]);
+    if (made.status !== 0) throw new Error(`mkfifo failed: ${made.stderr?.toString()}`);
+    const { report } = await bothReports(dir);
+    expect(unsafe(report)).toEqual([[fifo, 'not a regular file; only regular files are read']]);
+    expect(report.summary.files).toBe(1);
+  });
+});
+
+describe('duplicate canonicalisation', () => {
+  const envelope = (eventId: string, payload: string): string =>
+    `{"protocolVersion":"0.3.0","eventId":"${eventId}","eventType":"session.started","runId":"r","sessionId":"s","sequence":1,"occurredAt":"2026-01-01T00:00:00Z","payload":${payload}}`;
+  const finished = (seq: number): string =>
+    `{"protocolVersion":"0.3.0","eventId":"e-${seq}","eventType":"session.finished","runId":"r","sessionId":"s","sequence":${seq},"occurredAt":"2026-01-01T00:00:00Z","payload":{}}`;
+  const base = '"producer":{"name":"p"}';
+  async function classify(first: string, second: string): Promise<'identical' | 'different'> {
+    const report = await validateLines([
+      envelope('e-1', first),
+      envelope('e-1', second),
+      finished(2),
+    ]);
+    const info = report.diagnostics.some((d) => d.code === 'DUPLICATE_EVENT');
+    const error = report.diagnostics.some(
+      (d) => d.code === 'LIFECYCLE_INVALID' && d.detail === 'DUPLICATE_EVENT_ID',
+    );
+    expect(info !== error).toBe(true);
+    expect(report.summary.duplicates).toBe(info ? 1 : 0);
+    return info ? 'identical' : 'different';
+  }
+
+  it('ignores object key order at every level and keeps array order', async () => {
+    expect(await classify(`{${base},"x":{"a":1,"b":2}}`, `{"x":{"b":2,"a":1},${base}}`)).toBe(
+      'identical',
+    );
+    expect(
+      await classify(
+        `{${base},"x":{"n":{"a":[1,{"p":1,"q":2}]}}}`,
+        `{${base},"x":{"n":{"a":[1,{"q":2,"p":1}]}}}`,
+      ),
+    ).toBe('identical');
+    expect(await classify(`{${base},"x":[1,2]}`, `{${base},"x":[2,1]}`)).toBe('different');
+    expect(await classify(`{${base},"x":[[1],[2]]}`, `{${base},"x":[[2],[1]]}`)).toBe('different');
+  });
+
+  it('distinguishes primitives and keeps prototype-named keys as data', async () => {
+    expect(await classify(`{${base},"x":null}`, `{${base},"x":null}`)).toBe('identical');
+    expect(await classify(`{${base},"x":null}`, `{${base},"x":false}`)).toBe('different');
+    expect(await classify(`{${base},"x":true}`, `{${base},"x":"true"}`)).toBe('different');
+    expect(await classify(`{${base},"x":1}`, `{${base},"x":1.0}`)).toBe('identical');
+    expect(await classify(`{${base},"x":1}`, `{${base},"x":"1"}`)).toBe('different');
+    expect(await classify(`{${base},"x":"a"}`, `{${base},"x":"b"}`)).toBe('different');
+    expect(
+      await classify(
+        `{${base},"labels":{"__proto__":"one","b":"2"}}`,
+        `{${base},"labels":{"b":"2","__proto__":"one"}}`,
+      ),
+    ).toBe('identical');
+    expect(
+      await classify(
+        `{${base},"labels":{"__proto__":"one"}}`,
+        `{${base},"labels":{"__proto__":"two"}}`,
+      ),
+    ).toBe('different');
+    expect(await classify(`{${base},"x":{}}`, `{${base},"x":[]}`)).toBe('different');
+  });
+
+  const DEPTH = 100_000;
+  const deep = (leaf: string): string =>
+    `{${base},"extra":${'['.repeat(DEPTH)}${leaf}${']'.repeat(DEPTH)}}`;
+
+  it('uses a depth the old recursive walk could not survive', () => {
+    const walk = (v: unknown): number => (Array.isArray(v) ? 1 + walk(v[0]) : 0);
+    expect(() => walk((JSON.parse(deep('')) as { extra: unknown }).extra)).toThrow(RangeError);
+    expect(Buffer.byteLength(envelope('e-1', deep('1')))).toBeLessThan(LIMITS.maxEventBytes);
+  });
+
+  it('validates a deeply nested unknown property without a RangeError, and still compares duplicates', async () => {
+    const single = await validateLines([envelope('e-1', deep('')), finished(2)]);
+    expect(single.valid).toBe(true);
+    expect(single.summary.events).toBe(2);
+    expect(await classify(deep(''), deep(''))).toBe('identical');
+    expect(await classify(deep(''), deep('1'))).toBe('different');
+    const snapshotDir = temp('qe-deep-');
+    mkdirSync(join(snapshotDir, 'events'));
+    writeFileSync(
+      join(snapshotDir, 'events', 's.ndjson'),
+      `${envelope('e-1', deep(''))}\n${finished(2)}\n`,
+    );
+    const { report, events } = await validateRunDirectorySnapshot(snapshotDir);
+    expect(report).toEqual(await validateRunDirectory(snapshotDir));
+    expect(report.valid).toBe(true);
+    expect(events).toHaveLength(2);
+  });
+});
+
+describe('command line on hardened inputs', () => {
+  const cli = (dir: string): { status: number | null; out: string } => {
+    const r = spawnSync(process.execPath, [CLI, dir], { encoding: 'utf8' });
+    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+  };
+  function karateCopy(name: string): { dir: string; outside: string } {
+    const base = temp(`qe-cli-${name}-`);
+    const dir = join(base, 'run');
+    cpSync(join(FIXTURES_DIR, 'runs/karate'), dir, { recursive: true });
+    const outside = join(base, 'outside');
+    mkdirSync(outside);
+    return { dir, outside };
+  }
+  it('validates a normal run with exit 0', () => {
+    const { dir } = karateCopy('normal');
+    const r = cli(dir);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain('valid:');
+  });
+
+  symlinkIt(
+    'reports a linked event file and a linked attachment as invalid, exit 1, no crash',
+    () => {
+      const { dir, outside } = karateCopy('links');
+      writeFileSync(join(outside, 'x.ndjson'), 'not read\n');
+      unreadableLink(join(outside, 'x.ndjson'), join(dir, 'events', 'zz.ndjson'));
+      const [sha] = readdirSync(join(dir, 'attachments')).sort();
+      if (sha === undefined) throw new Error('fixture has no attachment');
+      const bytes = readFileSync(join(dir, 'attachments', sha));
+      writeFileSync(join(outside, 'bytes'), bytes);
+      rmSync(join(dir, 'attachments', sha));
+      unreadableLink(join(outside, 'bytes'), join(dir, 'attachments', sha));
+      const r = cli(dir);
+      expect(r.status).toBe(1);
+      expect(r.out.match(/UNSAFE_FILESYSTEM_ENTRY/gu)?.length).toBe(2);
+      expect(r.out).toContain('invalid:');
+      expect(r.out).not.toContain('not read');
+    },
+  );
+
+  it('validates a run with a deeply nested unknown property with exit 0', () => {
+    const base = temp('qe-cli-deep-');
+    const dir = join(base, 'run');
+    mkdirSync(join(dir, 'events'), { recursive: true });
+    const depth = 100_000;
+    const line = `{"protocolVersion":"0.3.0","eventId":"e-1","eventType":"session.started","runId":"r","sessionId":"s","sequence":1,"occurredAt":"2026-01-01T00:00:00Z","payload":{"producer":{"name":"p"},"extra":${'['.repeat(depth)}${']'.repeat(depth)}}}`;
+    const done = `{"protocolVersion":"0.3.0","eventId":"e-2","eventType":"session.finished","runId":"r","sessionId":"s","sequence":2,"occurredAt":"2026-01-01T00:00:00Z","payload":{}}`;
+    writeFileSync(join(dir, 'events', 's.ndjson'), `${line}\n${done}\n`);
+    const r = cli(dir);
+    expect(r.status).toBe(0);
+    expect(r.out).not.toContain('RangeError');
   });
 });

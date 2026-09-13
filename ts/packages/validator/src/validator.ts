@@ -1,7 +1,18 @@
 import { Ajv2020, type ErrorObject, type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  createReadStream,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  type Stats,
+} from 'node:fs';
 import { join } from 'node:path';
 import {
   EVENT_TYPES,
@@ -23,6 +34,7 @@ export type DiagnosticCode =
   | 'ATTACHMENT_MISSING'
   | 'ATTACHMENT_SIZE_MISMATCH'
   | 'ATTACHMENT_HASH_MISMATCH'
+  | 'UNSAFE_FILESYSTEM_ENTRY'
   | 'IGNORED_EVENT_TYPE'
   | 'DUPLICATE_EVENT'
   | 'INCOMPLETE_RUN';
@@ -175,16 +187,136 @@ function firstError(errors: ErrorObject[] | null | undefined): {
   };
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (typeof value === 'object' && value !== null) {
-    const o = value as Record<string, unknown>;
-    return `{${Object.keys(o)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
-      .join(',')}}`;
+/**
+ * The canonical text of a parsed JSON value: object keys sorted by code unit, array order kept,
+ * primitives as JSON.stringify writes them. Two events are the same event when their canonical
+ * texts match, whatever property order the producer used. Iterative with an explicit stack, so
+ * an unknown property nested to any depth the parser accepted cannot exhaust the call stack;
+ * the input is only read, never changed.
+ */
+function canonical(root: unknown): string {
+  type Frame =
+    | { readonly kind: 'array'; readonly items: readonly unknown[]; index: number }
+    | {
+        readonly kind: 'object';
+        readonly object: Readonly<Record<string, unknown>>;
+        readonly keys: readonly string[];
+        index: number;
+      };
+  const out: string[] = [];
+  const stack: Frame[] = [];
+  const open = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      out.push('[');
+      stack.push({ kind: 'array', items: value, index: 0 });
+    } else if (typeof value === 'object' && value !== null) {
+      const object = value as Readonly<Record<string, unknown>>;
+      out.push('{');
+      stack.push({ kind: 'object', object, keys: Object.keys(object).sort(), index: 0 });
+    } else {
+      out.push(JSON.stringify(value));
+    }
+  };
+  open(root);
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1] as Frame;
+    if (frame.kind === 'array') {
+      if (frame.index < frame.items.length) {
+        if (frame.index > 0) out.push(',');
+        open(frame.items[frame.index++]);
+      } else {
+        out.push(']');
+        stack.pop();
+      }
+    } else if (frame.index < frame.keys.length) {
+      const key = frame.keys[frame.index++] as string;
+      if (frame.index > 1) out.push(',');
+      out.push(`${JSON.stringify(key)}:`);
+      open(frame.object[key]);
+    } else {
+      out.push('}');
+      stack.pop();
+    }
   }
-  return JSON.stringify(value);
+  return out.join('');
+}
+
+/** What a path is without following it: the only question the validator asks before opening. */
+type EntryKind = 'missing' | 'file' | 'directory' | 'symlink' | 'special';
+
+/** Only a path that does not exist is "missing"; any other failure to inspect it is an I/O error. */
+function entryKind(path: string): EntryKind {
+  let stat: Stats;
+  try {
+    stat = lstatSync(path);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+    throw e;
+  }
+  return kindOf(stat);
+}
+
+function kindOf(stat: Stats): Exclude<EntryKind, 'missing'> {
+  if (stat.isSymbolicLink()) return 'symlink';
+  if (stat.isFile()) return 'file';
+  if (stat.isDirectory()) return 'directory';
+  return 'special';
+}
+
+/**
+ * A directory the caller named explicitly is a trusted entry point like the run directory: it is
+ * resolved once, so a link the caller chose is not refused below. A directory that does not
+ * exist keeps its path, so declared attachments are reported as missing.
+ */
+function trustedDirectory(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return path;
+    throw e;
+  }
+}
+
+/** Why an entry was refused, worded for the diagnostic; the entry's target is never named. */
+const REFUSAL: Record<Exclude<EntryKind, 'missing'>, string> = {
+  symlink: 'a symbolic link',
+  directory: 'a directory',
+  special: 'not a regular file',
+  file: 'a regular file',
+};
+
+/**
+ * Opens a path that `entryKind` reported as a regular file, refusing to follow a link that may
+ * have appeared since (O_NOFOLLOW where the platform has it), never blocking on a pipe that may
+ * have appeared since (O_NONBLOCK), and re-checking the open descriptor. Returns the descriptor,
+ * or the kind that was found instead.
+ */
+function openRegular(path: string): { fd: number } | { refused: Exclude<EntryKind, 'file'> } {
+  const flags = constants as { O_NOFOLLOW?: number; O_NONBLOCK?: number };
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (flags.O_NOFOLLOW ?? 0) | (flags.O_NONBLOCK ?? 0));
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'EMLINK') return { refused: 'symlink' };
+    if (code === 'ENOENT') return { refused: 'missing' };
+    throw e;
+  }
+  // Re-check the opened descriptor: a link replaced by a directory or a device between the
+  // lstat and the open is caught here; a link itself was refused by O_NOFOLLOW above.
+  let kind: Exclude<EntryKind, 'missing'>;
+  try {
+    kind = kindOf(fstatSync(fd));
+  } catch (e) {
+    closeSync(fd);
+    throw e;
+  }
+  if (kind !== 'file') {
+    closeSync(fd);
+    return { refused: kind };
+  }
+  return { fd };
 }
 
 interface SessionState {
@@ -240,6 +372,7 @@ export class RunValidator {
   private readonly executions = new Map<string, ExecutionState>();
   private readonly attachments: (Location & { sha256: string; sizeBytes: number })[] = [];
   private readonly accepted: Event[] = [];
+  private attachmentsDirRefused = false;
   private runId: string | undefined;
   private runFinished: Location | undefined;
   private files = 0;
@@ -255,6 +388,29 @@ export class RunValidator {
 
   constructor(options: ValidateOptions = {}) {
     this.options = options;
+  }
+
+  /**
+   * Records a filesystem entry the validator will not read: a symbolic link, a directory, or a
+   * special file where a regular file is required, or anything but a real directory where a
+   * directory is required. Called by the directory validators of this module for entries below
+   * the run directory; not part of the supported API. Nothing about the entry's target is read.
+   */
+  refuseEntry(
+    path: string,
+    reason: Exclude<EntryKind, 'missing'>,
+    expected: 'file' | 'directory' = 'file',
+  ): void {
+    this.diagnostics.push({
+      severity: 'error',
+      code: 'UNSAFE_FILESYSTEM_ENTRY',
+      file: path,
+      line: 0,
+      message:
+        expected === 'directory'
+          ? `${REFUSAL[reason]} where a directory is required; nothing below it is read`
+          : `${REFUSAL[reason]}; only regular files are read`,
+    });
   }
 
   /**
@@ -675,35 +831,80 @@ export class RunValidator {
     }
     const dir = this.options.attachmentsDir;
     if (dir !== undefined) {
-      for (const a of this.attachments) {
-        const at = { file: a.file, line: a.line, eventId: a.eventId };
-        const path = join(dir, a.sha256);
-        if (!existsSync(path)) {
-          this.diagnostics.push({
-            severity: 'error',
-            code: 'ATTACHMENT_MISSING',
-            message: `no file for sha256 ${a.sha256}`,
-            ...at,
-          });
-          continue;
+      const dirKind = entryKind(dir);
+      if (dirKind === 'symlink' || dirKind === 'special' || dirKind === 'file') {
+        // Declared attachments cannot be checked through an entry that is not a real directory;
+        // one refusal stands for all of them, and nothing below it is opened.
+        if (this.attachments.length > 0 && !this.attachmentsDirRefused) {
+          this.refuseEntry(dir, dirKind, 'directory');
+          this.attachmentsDirRefused = true;
         }
-        const size = statSync(path).size;
-        if (size !== a.sizeBytes) {
-          this.diagnostics.push({
-            severity: 'error',
-            code: 'ATTACHMENT_SIZE_MISMATCH',
-            message: `declared ${a.sizeBytes} bytes, file has ${size}`,
-            ...at,
-          });
-        }
-        const actual = await sha256File(path);
-        if (actual !== a.sha256) {
-          this.diagnostics.push({
-            severity: 'error',
-            code: 'ATTACHMENT_HASH_MISMATCH',
-            message: `declared ${a.sha256}, file hashes to ${actual}`,
-            ...at,
-          });
+      } else {
+        for (const a of this.attachments) {
+          const at = { file: a.file, line: a.line, eventId: a.eventId };
+          const path = join(dir, a.sha256);
+          const kind = entryKind(path);
+          if (kind === 'missing') {
+            this.diagnostics.push({
+              severity: 'error',
+              code: 'ATTACHMENT_MISSING',
+              message: `no file for sha256 ${a.sha256}`,
+              ...at,
+            });
+            continue;
+          }
+          if (kind !== 'file') {
+            this.diagnostics.push({
+              severity: 'error',
+              code: 'UNSAFE_FILESYSTEM_ENTRY',
+              message: `attachment ${a.sha256} is ${REFUSAL[kind]}; only regular files are read`,
+              ...at,
+            });
+            continue;
+          }
+          const opened = openRegular(path);
+          if ('refused' in opened) {
+            if (opened.refused === 'missing') {
+              this.diagnostics.push({
+                severity: 'error',
+                code: 'ATTACHMENT_MISSING',
+                message: `no file for sha256 ${a.sha256}`,
+                ...at,
+              });
+            } else {
+              this.diagnostics.push({
+                severity: 'error',
+                code: 'UNSAFE_FILESYSTEM_ENTRY',
+                message: `attachment ${a.sha256} is ${REFUSAL[opened.refused]}; only regular files are read`,
+                ...at,
+              });
+            }
+            continue;
+          }
+          let size: number;
+          try {
+            size = fstatSync(opened.fd).size;
+          } catch (e) {
+            closeSync(opened.fd);
+            throw e;
+          }
+          if (size !== a.sizeBytes) {
+            this.diagnostics.push({
+              severity: 'error',
+              code: 'ATTACHMENT_SIZE_MISMATCH',
+              message: `declared ${a.sizeBytes} bytes, file has ${size}`,
+              ...at,
+            });
+          }
+          const actual = await sha256Fd(opened.fd);
+          if (actual !== a.sha256) {
+            this.diagnostics.push({
+              severity: 'error',
+              code: 'ATTACHMENT_HASH_MISMATCH',
+              message: `declared ${a.sha256}, file hashes to ${actual}`,
+              ...at,
+            });
+          }
         }
       }
     }
@@ -784,7 +985,10 @@ export async function validateLines(
  */
 export async function validateFile(path: string, options: ValidateOptions = {}): Promise<Report> {
   const text = readFileSync(path, 'utf8');
-  const attachmentsDir = options.attachmentsDir ?? join(path, '..', '..', 'attachments');
+  const attachmentsDir =
+    options.attachmentsDir === undefined
+      ? join(path, '..', '..', 'attachments')
+      : trustedDirectory(options.attachmentsDir);
   return validateLines(text.split('\n'), { ...options, attachmentsDir }, path);
 }
 
@@ -810,17 +1014,43 @@ export async function validateRunDirectorySnapshot(
   options: ValidateOptions = {},
 ): Promise<ValidatedRun> {
   const eventsDir = join(dir, 'events');
-  if (!existsSync(eventsDir)) throw new Error(`${dir} has no events directory`);
+  const eventsKind = entryKind(eventsDir);
+  if (eventsKind === 'missing') throw new Error(`${dir} has no events directory`);
   const run = new RunValidator({
     ...options,
-    attachmentsDir: options.attachmentsDir ?? join(dir, 'attachments'),
+    attachmentsDir:
+      options.attachmentsDir === undefined
+        ? join(dir, 'attachments')
+        : trustedDirectory(options.attachmentsDir),
     retainEvents: options.retainEvents ?? true,
   });
+  if (eventsKind !== 'directory') {
+    // A linked or otherwise irregular events directory is not read at all.
+    run.refuseEntry(eventsDir, eventsKind, 'directory');
+    return { report: await run.finish(), events: run.acceptedEvents() };
+  }
   for (const name of readdirSync(eventsDir)
     .filter((f) => f.endsWith('.ndjson'))
     .sort()) {
     const file = join(eventsDir, name);
-    run.feed(readFileSync(file, 'utf8').split('\n'), file, true);
+    const kind = entryKind(file);
+    if (kind === 'missing') continue;
+    if (kind !== 'file') {
+      run.refuseEntry(file, kind);
+      continue;
+    }
+    const opened = openRegular(file);
+    if ('refused' in opened) {
+      if (opened.refused !== 'missing') run.refuseEntry(file, opened.refused);
+      continue;
+    }
+    let text: string;
+    try {
+      text = readFileSync(opened.fd, 'utf8');
+    } finally {
+      closeSync(opened.fd);
+    }
+    run.feed(text.split('\n'), file, true);
   }
   return { report: await run.finish(), events: run.acceptedEvents() };
 }
@@ -833,10 +1063,11 @@ function where(at: Location): string {
   return `${at.file}:${at.line}`;
 }
 
-function sha256File(path: string): Promise<string> {
+/** Hashes an already opened regular file; the stream owns and closes the descriptor. */
+function sha256Fd(fd: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash('sha256');
-    createReadStream(path)
+    createReadStream('', { fd })
       .on('data', (chunk) => hash.update(chunk))
       .on('end', () => resolve(hash.digest('hex')))
       .on('error', reject);

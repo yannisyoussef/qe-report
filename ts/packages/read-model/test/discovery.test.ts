@@ -1,8 +1,20 @@
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildReadModel, discoverRunDirectories, projectRunDirectory } from '../src/index.js';
-import { execution, freshRoot, simpleRun, testCase } from './synthetic.js';
+import {
+  attachment,
+  attemptFinished,
+  attemptStarted,
+  execution,
+  finished,
+  freshRoot,
+  sha256,
+  simpleRun,
+  started,
+  testCase,
+  writeRun,
+} from './synthetic.js';
 
 describe('run directory discovery', () => {
   it('lists real run directories one level below runs, sorted, and reports everything else', () => {
@@ -129,7 +141,57 @@ describe('entries inside a run directory', () => {
     expect(direct.kind === 'rejected' && direct.problem.diagnostics).toEqual([]);
   });
 
-  it('turns a validator failure on hostile input into a problem instead of aborting the build', async () => {
+  it("receives the validator's own refusal when a direct run directory links its attachments directory", async () => {
+    // Discovery is bypassed and the entry check sees regular files inside the linked directory,
+    // so this rejection comes from the validator itself: defence in depth, not a single gate.
+    const elsewhere = freshRoot('bytes');
+    const root = freshRoot('attachments-link');
+    const bytes = Buffer.from('linked bytes');
+    const dir = writeRun(root, 'linked', 'run-1', [
+      {
+        sessionId: 's',
+        events: [
+          started('playwright'),
+          attemptStarted('a', 1, testCase('e', 'h')),
+          attachment('a', bytes),
+          attemptFinished('a', 'passed'),
+          finished(),
+        ],
+      },
+    ]);
+    mkdirSync(join(elsewhere, 'attachments'));
+    writeFileSync(join(elsewhere, 'attachments', sha256(bytes)), bytes);
+    symlinkSync(join(elsewhere, 'attachments'), join(dir, 'attachments'));
+    const result = await projectRunDirectory({ projectId: 'A', runDirectory: dir });
+    expect(result.kind).toBe('rejected');
+    if (result.kind !== 'rejected') return;
+    expect(result.problem.code).toBe('RUN_INVALID');
+    expect(result.problem.diagnostics.map((d) => [d.code, d.file])).toEqual([
+      ['UNSAFE_FILESYSTEM_ENTRY', join(dir, 'attachments')],
+    ]);
+  });
+
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  (process.platform === 'win32' || asRoot ? it.skip : it)(
+    'reports an event file the validator cannot open as VALIDATION_ERROR (not run as root, not Windows)',
+    async () => {
+      const root = freshRoot('unreadable');
+      const dir = simpleRun(
+        root,
+        'r',
+        'run-1',
+        'playwright',
+        execution(testCase('e', 'h'), [['passed']]),
+      );
+      chmodSync(join(dir, 'events', 's-1.ndjson'), 0);
+      const { model, problems } = await buildReadModel([{ projectId: 'A', outputRoot: root }]);
+      expect(model.runs()).toEqual([]);
+      expect(problems.map((p) => [p.code, p.runDirectory])).toEqual([['VALIDATION_ERROR', dir]]);
+      expect(problems[0]?.message).toContain('EACCES');
+    },
+  );
+
+  it('projects a run with an absurdly deep unknown property: the validator survives it', async () => {
     const root = freshRoot('deep');
     const dir = simpleRun(
       root,
@@ -149,9 +211,14 @@ describe('entries inside a run directory', () => {
       occurredAt: '2026-09-12T10:00:00.000+00:00',
       payload: { producer: { name: 'p' } },
     }).replace('"payload":{', `"payload":{"extra":${deep},`);
-    writeFileSync(join(dir, 'events', 'x.ndjson'), line + '\n');
+    const done = line
+      .replace('"eventId":"x-1"', '"eventId":"x-2"')
+      .replace('"eventType":"session.started"', '"eventType":"session.finished"')
+      .replace('"sequence":1', '"sequence":2')
+      .replace(/"payload":\{.*\}$/u, '"payload":{}}');
+    writeFileSync(join(dir, 'events', 'x.ndjson'), `${line}\n${done}\n`);
     const { model, problems } = await buildReadModel([{ projectId: 'A', outputRoot: root }]);
-    expect(model.runs()).toEqual([]);
-    expect(problems.map((p) => [p.code, p.runDirectory])).toEqual([['VALIDATION_ERROR', dir]]);
+    expect(problems).toEqual([]);
+    expect(model.getRun('A', 'run-1')?.sessions.map((s) => s.sessionId)).toEqual(['s-1', 'x']);
   });
 });
