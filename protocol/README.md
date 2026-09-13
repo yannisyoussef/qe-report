@@ -526,7 +526,11 @@ A run directory is validated as a whole: every `events/*.ndjson` file as
 one session, then the run-level rules (one `runId`, unique event and
 session ids, at most one `run.finished`, every session finished when the
 run is closed, one attempt per attempt number and one history identity
-and runner family per execution) and the bytes under `attachments/`. The argument is one run
+and runner family per execution) and the bytes under `attachments/`.
+The run directory given is the trusted entry point; below it, `events`
+must be a real directory and every event file and declared attachment a
+regular file, so a symbolic link or special entry is reported and never
+opened. The argument is one run
 directory, `<output root>/runs/<run directory>`, not the output root;
 discovering the runs below a root is the read model's job, not the
 validator's. A single session file
@@ -542,8 +546,8 @@ for schema problems a JSON pointer. Codes: `MALFORMED_JSON`,
 `DUPLICATE_RUN_FINISHED`, `SESSION_FILE_MIXED`, `SEQUENCE_GAP`,
 `DUPLICATE_ATTEMPT_NUMBER`, `HISTORICAL_IDENTITY_CHANGED`, or
 `EXECUTION_RUNNER_CHANGED`),
-`ATTACHMENT_MISSING`, `ATTACHMENT_SIZE_MISMATCH`, `ATTACHMENT_HASH_MISMATCH`;
-and the informational `IGNORED_EVENT_TYPE`, `DUPLICATE_EVENT`, and
+`ATTACHMENT_MISSING`, `ATTACHMENT_SIZE_MISMATCH`, `ATTACHMENT_HASH_MISMATCH`,
+`UNSAFE_FILESYSTEM_ENTRY`; and the informational `IGNORED_EVENT_TYPE`, `DUPLICATE_EVENT`, and
 `INCOMPLETE_RUN`. Exit status is 0 for a valid run, 1 for an invalid one,
 2 for usage or I/O errors.
 

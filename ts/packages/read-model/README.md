@@ -196,11 +196,11 @@ the current corpus and producers, not a proof about every future one.
   and the entries of `events/` and `attachments/` are the link checks.
 - Memory is bounded by the validated events of the ingested runs; the
   snapshot is meant for a bounded set of runs, not for a service.
-- Two validator behaviours are recorded for a later hardening pass and are
-  fenced by this package's discovery boundary: used on its own, the
-  validator follows symbolic links under `events/` and `attachments/`, and
-  its duplicate-event canonicalisation recurses on absurdly deep unknown
-  properties (reported here as `VALIDATION_ERROR`).
+- The validator refuses linked and special entries under `events/` and
+  `attachments/` itself and compares duplicates without recursion; this
+  package's entry check before validation stays as defence in depth, and
+  `VALIDATION_ERROR` remains the report for any unexpected validator
+  failure.
 - No aggregation across sessions, no run-level environment, no
   time-windowed statistics, and no persistence: those are later
   milestones.

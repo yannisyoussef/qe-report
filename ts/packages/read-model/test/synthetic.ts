@@ -1,10 +1,15 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { afterAll } from 'vitest';
 import type { TestCase } from 'qe-report-protocol';
 
 /** Test-only: writes small protocol-valid run directories to exercise the projector. */
+const ROOTS: string[] = [];
+afterAll(() => {
+  for (const d of ROOTS) rmSync(d, { recursive: true, force: true });
+});
 export interface EventSpec {
   readonly type: string;
   readonly payload: unknown;
@@ -21,7 +26,9 @@ export interface SessionSpec {
 }
 
 export function freshRoot(name = 'root'): string {
-  return mkdtempSync(join(tmpdir(), `qe-rm-${name}-`));
+  const d = mkdtempSync(join(tmpdir(), `qe-rm-${name}-`));
+  ROOTS.push(d);
+  return d;
 }
 
 /** Writes `<root>/runs/<dirName>` with one file per session and the attachment bytes given. */
