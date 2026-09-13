@@ -80,4 +80,51 @@ CREATE INDEX qe_run_source_lines_session_idx
   ON qe_run_source_lines (project_id, run_id, session_id, sequence);
 `,
   },
+  {
+    version: 2,
+    name: 'blobs-and-run-blobs',
+    sql: `
+CREATE TABLE qe_blobs (
+  sha256       text        NOT NULL,
+  size_bytes   bigint      NOT NULL,
+  storage_key  text        NOT NULL,
+  stored_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT qe_blobs_pkey PRIMARY KEY (sha256),
+  CONSTRAINT qe_blobs_sha256_check CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT qe_blobs_size_bytes_check CHECK (size_bytes >= 0),
+  CONSTRAINT qe_blobs_storage_key_check
+    CHECK (storage_key ~ '^[A-Za-z0-9/._-]+$' AND left(storage_key, 1) <> '/'
+           AND storage_key !~ '(^|/)[.][.]?(/|$)')
+);
+
+COMMENT ON TABLE qe_blobs IS
+  'One row per durable byte object, global across projects and runs: the SHA-256 is the identity, the size is fixed for it, and the bytes live in the blob store under the provider-generated key. The bytes themselves are never stored here.';
+COMMENT ON COLUMN qe_blobs.size_bytes IS
+  'The one size the hash has: every declaration and every object for it must agree.';
+COMMENT ON COLUMN qe_blobs.storage_key IS
+  'The relative key the blob provider published the object under. Recorded for operators; readers address blobs by hash, and the check only keeps it relative and free of dot segments.';
+COMMENT ON COLUMN qe_blobs.stored_at IS
+  'When this catalog row was written, which may be after the object was published (an unreferenced object reused by a later ingestion).';
+
+CREATE TABLE qe_run_blobs (
+  project_id  text  NOT NULL,
+  run_id      text  NOT NULL,
+  sha256      text  NOT NULL,
+  CONSTRAINT qe_run_blobs_pkey PRIMARY KEY (project_id, run_id, sha256),
+  CONSTRAINT qe_run_blobs_run_fkey FOREIGN KEY (project_id, run_id)
+    REFERENCES qe_runs (project_id, run_id),
+  CONSTRAINT qe_run_blobs_blob_fkey FOREIGN KEY (sha256) REFERENCES qe_blobs (sha256)
+);
+
+COMMENT ON TABLE qe_run_blobs IS
+  'Which distinct durable byte objects an archived run requires: a rebuildable storage-integrity index derived from the run''s attachment events. Attachment names, media types, attempts, steps, and multiplicity come from the raw source lines only. A run archived before this table existed has no rows here until its bytes are materialised.';
+
+CREATE INDEX qe_run_blobs_sha256_idx ON qe_run_blobs (sha256);
+
+ALTER TABLE qe_runs RENAME COLUMN attachments_verified TO source_attachments_verified;
+
+COMMENT ON COLUMN qe_runs.source_attachments_verified IS
+  'The validation pass at ingestion checked the source attachment bytes against their declarations. An audit claim about the source at that moment, never proof that durable bytes exist: durable presence is qe_run_blobs plus qe_blobs, and integrity is established only by re-reading the blob store.';
+`,
+  },
 ];

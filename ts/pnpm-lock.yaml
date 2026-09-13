@@ -197,6 +197,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/playwright
 
+  packages/blob-fs: {}
+
   packages/equivalence:
     dependencies:
       qe-report-protocol:
@@ -230,6 +232,9 @@ importers:
       pg:
         specifier: 8.23.0
         version: 8.23.0
+      qe-report-blob-fs:
+        specifier: workspace:*
+        version: link:../blob-fs
       qe-report-protocol:
         specifier: workspace:*
         version: link:../protocol

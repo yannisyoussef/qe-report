@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -15,8 +16,10 @@ class BravoTest {
     Thread.sleep(20);
   }
 
+  /** A report entry becomes an attachment of this attempt: the consumer's only attachment. */
   @Test
-  void verdict() {
+  void verdict(TestReporter reporter) {
+    reporter.publishEntry("evidence", "bravo report entry");
     assertEquals(1, "Bravo".equals("Charlie") ? 2 : 1, "Bravo verdict");
   }
 

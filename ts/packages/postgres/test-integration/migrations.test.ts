@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MIGRATION_LOCK_KEY, migrate, migrationChecksum } from '../src/migrate.js';
 import { MIGRATIONS } from '../src/migrations.js';
 import pg from 'pg';
-import { TestPostgres, waitFor } from './support.js';
+import { TestPostgres, applyThrough, waitFor } from './support.js';
 
 const pgTest = new TestPostgres();
 beforeAll(() => pgTest.start());
@@ -25,6 +25,8 @@ describe('migrations on PostgreSQL 16', () => {
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`,
     );
     expect(tables.rows.map((r) => r.table_name)).toEqual([
+      'qe_blobs',
+      'qe_run_blobs',
       'qe_run_source_lines',
       'qe_runs',
       'qe_schema_migrations',
@@ -69,12 +71,97 @@ describe('migrations on PostgreSQL 16', () => {
   });
 
   it('refuse to continue when an applied migration has a different checksum', async () => {
-    const db = await pgTest.emptyDatabase('checksum');
-    await migrate(db.pool);
-    await db.pool.query('UPDATE qe_schema_migrations SET checksum = $1 WHERE version = 1', [
-      '0'.repeat(64),
+    for (const version of [1, 2]) {
+      const db = await pgTest.emptyDatabase('checksum');
+      await migrate(db.pool);
+      await db.pool.query('UPDATE qe_schema_migrations SET checksum = $1 WHERE version = $2', [
+        '0'.repeat(64),
+        version,
+      ]);
+      await expect(migrate(db.pool)).rejects.toThrow(/never rewritten/u);
+    }
+  });
+
+  it('upgrade a database at migration 1 to migration 2, carrying the source validation claim and exposing legacy runs', async () => {
+    const db = await pgTest.emptyDatabase('upgrade');
+    await applyThrough(db.pool, 1);
+    const tablesBefore = await tableNames(db.pool);
+    expect(tablesBefore).toEqual(['qe_run_source_lines', 'qe_runs', 'qe_schema_migrations']);
+    // A run archived under migration 1: its attachment events are in its lines, its bytes are not durable.
+    await db.pool.query(
+      `INSERT INTO qe_runs (project_id, run_id, source_locator, content_fingerprint, fingerprint_version,
+         protocol_versions, source_line_count, attachments_verified, validation_summary)
+       VALUES ('legacy', 'run-1', '/gone', $1, 1, '{0.3.0}', 1, true, '{}'::jsonb)`,
+      ['a'.repeat(64)],
+    );
+    const applied = await migrate(db.pool);
+    expect(applied.map((m) => [m.version, m.appliedNow])).toEqual([
+      [1, false],
+      [2, true],
     ]);
-    await expect(migrate(db.pool)).rejects.toThrow(/never rewritten/u);
+    expect(await tableNames(db.pool)).toEqual([
+      'qe_blobs',
+      'qe_run_blobs',
+      'qe_run_source_lines',
+      'qe_runs',
+      'qe_schema_migrations',
+    ]);
+    const columns = await db.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'qe_runs' ORDER BY column_name`,
+    );
+    expect(columns.rows.map((c) => c.column_name)).toContain('source_attachments_verified');
+    expect(columns.rows.map((c) => c.column_name)).not.toContain('attachments_verified');
+    const legacy = await db.pool.query<{ source_attachments_verified: boolean; blobs: string }>(
+      `SELECT r.source_attachments_verified,
+              (SELECT count(*) FROM qe_run_blobs b WHERE b.project_id = r.project_id AND b.run_id = r.run_id)::text AS blobs
+         FROM qe_runs r WHERE r.project_id = 'legacy'`,
+    );
+    expect(legacy.rows).toEqual([{ source_attachments_verified: true, blobs: '0' }]);
+    // The checksum of migration 1 is the one recorded before the upgrade; nothing rewrote it.
+    const recorded = await db.pool.query<{ version: number; checksum: string }>(
+      'SELECT version, checksum FROM qe_schema_migrations ORDER BY version',
+    );
+    expect(recorded.rows).toEqual(
+      MIGRATIONS.map((m) => ({ version: m.version, checksum: migrationChecksum(m) })),
+    );
+    expect(await migrate(db.pool)).toEqual(applied.map((m) => ({ ...m, appliedNow: false })));
+  });
+
+  it('enforce the blob catalog constraints', async () => {
+    const db = await pgTest.database('constraints');
+    const sha = 'b'.repeat(64);
+    await db.pool.query(
+      `INSERT INTO qe_blobs (sha256, size_bytes, storage_key) VALUES ($1, 3, $2)`,
+      [sha, `sha256/bb/bb/${sha}`],
+    );
+    await expect(
+      db.pool.query(`INSERT INTO qe_blobs (sha256, size_bytes, storage_key) VALUES ($1, 3, 'x')`, [
+        sha,
+      ]),
+    ).rejects.toThrow(/qe_blobs_pkey/u);
+    for (const bad of ['', '/abs', '../up', 'sha256/../x', 'a/./b']) {
+      await expect(
+        db.pool.query(`INSERT INTO qe_blobs (sha256, size_bytes, storage_key) VALUES ($1, 1, $2)`, [
+          'c'.repeat(64),
+          bad,
+        ]),
+      ).rejects.toThrow(/storage_key_check/u);
+    }
+    await expect(
+      db.pool.query(`INSERT INTO qe_blobs (sha256, size_bytes, storage_key) VALUES ($1, 1, 'k')`, [
+        'C'.repeat(64),
+      ]),
+    ).rejects.toThrow(/sha256_check/u);
+    await expect(
+      db.pool.query(`INSERT INTO qe_blobs (sha256, size_bytes, storage_key) VALUES ($1, -1, 'k')`, [
+        'd'.repeat(64),
+      ]),
+    ).rejects.toThrow(/size_bytes_check/u);
+    await expect(
+      db.pool.query(`INSERT INTO qe_run_blobs (project_id, run_id, sha256) VALUES ('p', 'r', $1)`, [
+        sha,
+      ]),
+    ).rejects.toThrow(/run_fkey/u);
   });
 
   it('produce a deterministic schema', async () => {
@@ -89,16 +176,36 @@ describe('migrations on PostgreSQL 16', () => {
         )
       ).rows;
     expect(await columnsOf(b.pool)).toEqual(await columnsOf(a.pool));
-    const constraints = await a.pool.query<{ conname: string }>(
-      `SELECT conname FROM pg_constraint WHERE conrelid IN ('qe_runs'::regclass, 'qe_run_source_lines'::regclass) ORDER BY conname`,
-    );
-    expect(constraints.rows.map((r) => r.conname)).toEqual(
+    const constraintsOf = async (pool: typeof a.pool): Promise<string[]> =>
+      (
+        await pool.query<{ conname: string }>(
+          `SELECT conname FROM pg_constraint
+            WHERE conrelid IN ('qe_runs'::regclass, 'qe_run_source_lines'::regclass, 'qe_blobs'::regclass, 'qe_run_blobs'::regclass)
+            ORDER BY conname`,
+        )
+      ).rows.map((r) => r.conname);
+    const constraints = await constraintsOf(a.pool);
+    expect(constraints).toEqual(await constraintsOf(b.pool));
+    expect(constraints).toEqual(
       expect.arrayContaining([
         'qe_runs_pkey',
         'qe_runs_ingestion_sequence_key',
         'qe_run_source_lines_pkey',
         'qe_run_source_lines_run_fkey',
+        'qe_blobs_pkey',
+        'qe_blobs_storage_key_check',
+        'qe_run_blobs_pkey',
+        'qe_run_blobs_run_fkey',
+        'qe_run_blobs_blob_fkey',
       ]),
     );
   });
 });
+
+/** Every table in the public schema, sorted. */
+async function tableNames(pool: pg.Pool): Promise<string[]> {
+  const tables = await pool.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`,
+  );
+  return tables.rows.map((r) => r.table_name);
+}

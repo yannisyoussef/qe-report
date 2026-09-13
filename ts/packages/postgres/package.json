@@ -1,7 +1,7 @@
 {
   "name": "qe-report-postgres",
   "version": "0.1.0",
-  "description": "qe-report durable run store: complete validated runs archived as their original protocol source in PostgreSQL, replayed through the validator and projector",
+  "description": "qe-report durable run store: complete validated runs archived as their original protocol source in PostgreSQL with their attachment bytes in a content-addressed blob store, replayed through the validator and projector",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "pg": "8.23.0",
+    "qe-report-blob-fs": "workspace:*",
     "qe-report-protocol": "workspace:*",
     "qe-report-read-model": "workspace:*",
     "qe-report-validator": "workspace:*"
