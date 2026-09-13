@@ -311,6 +311,23 @@ Two identities, because the runners give two different things:
   When unavailable, `historicalId` is absent. Derivation rules belong to
   each adapter and are not part of the protocol.
 
+Because the attempts of one execution are one test, the validator holds
+them to three relational rules, run-wide and across sessions. No two
+attempts of an execution share an `attemptNumber`: the final attempt is
+the one with the highest number, and two attempts with that number would
+leave it undefined; gaps such as 1 then 3 are allowed and nothing is
+invented for the missing numbers. Every attempt carries the same history
+identity, the same `historicalId` and the same `historicalIdStability`,
+an absent id included, so an identity cannot appear, disappear, or change
+its stability between retries. Every attempt belongs to a session
+declaring the same `runner.name`, an absent runner counting as a family of
+its own, so the history key above is defined for the whole execution.
+Retries may still differ in presentation (labels, tags, display name,
+location, path), may sit in different sessions of the same runner family,
+and may come from different producers or runner versions. A repetition of
+a test inside one run (Playwright's `repeatEach`) is a separate execution
+with its own `executionId`, not a retry.
+
 `path` is the runner's own container hierarchy, outermost first, as typed
 segments. `file` and `group` are the well-known kinds. A runner-specific
 kind such as Playwright's `project` is allowed; a consumer that does not
@@ -508,7 +525,8 @@ qe-report-validate <run directory | events file> [--attachments <dir>] [--requir
 A run directory is validated as a whole: every `events/*.ndjson` file as
 one session, then the run-level rules (one `runId`, unique event and
 session ids, at most one `run.finished`, every session finished when the
-run is closed) and the bytes under `attachments/`. The argument is one run
+run is closed, one attempt per attempt number and one history identity
+and runner family per execution) and the bytes under `attachments/`. The argument is one run
 directory, `<output root>/runs/<run directory>`, not the output root;
 discovering the runs below a root is the read model's job, not the
 validator's. A single session file
@@ -521,7 +539,9 @@ for schema problems a JSON pointer. Codes: `MALFORMED_JSON`,
 `SCHEMA_INVALID`, `UNSUPPORTED_PROTOCOL_VERSION`, `UNSUPPORTED_EVENT_TYPE`,
 `EVENT_TOO_LARGE`, `LIFECYCLE_INVALID` (with a detail such as
 `DUPLICATE_ATTEMPT_FINISHED`, `SESSION_ALREADY_FINISHED`,
-`DUPLICATE_RUN_FINISHED`, `SESSION_FILE_MIXED`, or `SEQUENCE_GAP`),
+`DUPLICATE_RUN_FINISHED`, `SESSION_FILE_MIXED`, `SEQUENCE_GAP`,
+`DUPLICATE_ATTEMPT_NUMBER`, `HISTORICAL_IDENTITY_CHANGED`, or
+`EXECUTION_RUNNER_CHANGED`),
 `ATTACHMENT_MISSING`, `ATTACHMENT_SIZE_MISMATCH`, `ATTACHMENT_HASH_MISMATCH`;
 and the informational `IGNORED_EVENT_TYPE`, `DUPLICATE_EVENT`, and
 `INCOMPLETE_RUN`. Exit status is 0 for a valid run, 1 for an invalid one,
@@ -548,7 +568,10 @@ version, the unpublished 0.1 and 0.2 lines, session outcomes (a failed,
 inconclusive, or passed session over attempts that say otherwise, a flaky
 test with and without a failing invocation policy, an invocation-level
 setup failure with no attempt, an inconclusive final attempt with and
-without a passed session), two run ids in one directory, and each
+without a passed session), a retry across two sessions of one runner
+family from two producers, two run ids in one directory, each execution
+rule (a reused attempt number, a changed, appeared, or destabilised
+history identity, a changed or missing runner between sessions), and each
 lifecycle, session-file, and attachment violation. `naming/` holds the
 run-directory naming corpus.
 
