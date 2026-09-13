@@ -45,9 +45,12 @@ describe('real JUnit runs in PostgreSQL', () => {
       readdirSync(join(CONSUMER_RUNS, 'gradle', 'runs')).sort()[0] ?? '',
     );
     const isolatedRoot = join(CONSUMER_RUNS, 'gradle-isolated', 'runs');
+    // The CI artifact drops empty directories, so a run without attachments may lack the folder.
     const isolated = readdirSync(isolatedRoot)
       .map((d) => join(isolatedRoot, d))
-      .find((d) => readdirSync(join(d, 'attachments')).length > 0);
+      .find(
+        (d) => existsSync(join(d, 'attachments')) && readdirSync(join(d, 'attachments')).length > 0,
+      );
     if (isolated === undefined) throw new Error('no isolated run carries the report entry');
     const local = await buildReadModel([
       { projectId: 'gradle', runDirectory: shared },
