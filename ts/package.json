@@ -16,8 +16,11 @@
     "test:equivalence": "pnpm --filter qe-report-equivalence run equivalence",
     "test:consumer-runs": "pnpm --filter qe-report-equivalence run consumer-runs",
     "test:read-model-junit": "pnpm --filter qe-report-read-model run test:junit-runs",
+    "test:postgres-junit": "pnpm --filter qe-report-postgres run test:junit-runs",
     "test:playwright-consumer": "pnpm --filter qe-report-playwright run test:consumer",
-    "test:read-model-playwright": "pnpm --filter qe-report-read-model run test:playwright-runs"
+    "test:read-model-playwright": "pnpm --filter qe-report-read-model run test:playwright-runs",
+    "test:postgres-playwright": "pnpm --filter qe-report-postgres run test:playwright-runs",
+    "test:postgres-integration": "pnpm --filter qe-report-postgres run test:integration"
   },
   "devDependencies": {
     "@types/node": "24.13.4",
