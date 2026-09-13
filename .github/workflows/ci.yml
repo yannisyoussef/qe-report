@@ -61,7 +61,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm check
-      - name: PostgreSQL persistence and durable attachment bytes against a Testcontainers PostgreSQL 16
+      - name: PostgreSQL persistence, durable attachment bytes, and retention against a Testcontainers PostgreSQL 16
         if: matrix.node == 22
         working-directory: ts
         run: pnpm test:postgres-integration

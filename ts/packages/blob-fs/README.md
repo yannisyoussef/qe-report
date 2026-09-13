@@ -80,13 +80,59 @@ the same bytes; the filesystem's exclusive link decides who publishes,
 every caller ends with the same verified content, and no process-local
 lock is needed for correctness.
 
+## Maintenance
+
+Reading and writing blobs never removes one. A separate, operator-level
+surface does, and only that surface:
+
+```ts
+const { objects, next, problems } = await store.listObjects({ limit: 500 });
+await store.removeObject(sha256, sizeBytes); // 'removed' | 'missing'
+const { files } = await store.listTemporaryFiles({ before: cutoff });
+await store.removeTemporaryFile(files[0].name);
+```
+
+`listObjects` enumerates the medium itself, in hash order, bounded and
+resumable through `next`, and returns only canonical objects:
+`sha256/ab/cd/<hash>` where the shard directories agree with the hash and
+the entry is a regular file. A link, a special file, a nested directory, a
+malformed name, or a hash filed under the wrong shard is reported as a
+problem with a path relative to the root, and is never opened or
+followed. Enumerating the medium is the only way to find an object the
+database never recorded, which is what an ingestion that published its
+bytes and then rolled back leaves behind.
+
+`removeObject` derives the path from the hash, inspects it without
+following links, opens it as a regular file, checks the size the caller
+knows, recomputes the full SHA-256, and requires the entry to still be
+the file it just read before unlinking it and syncing the directory. A
+corrupt or unsafe entry throws and stays for an operator; an object that
+is already gone answers `missing`, which is not a failure. Removal is a
+lifecycle action taken deliberately by whoever runs retention; `put`
+still never replaces an object, and nothing else in the API mutates
+bytes.
+
+`listTemporaryFiles` sees only the names `put` generates
+(`<32 hex>.part`), only regular files, and only those modified before the
+cutoff when one is given; anything else under the temporary directory is
+either not the store's business or a reported problem.
+`removeTemporaryFile` accepts only such a name.
+
 ## What the store does not do
 
-- It does not delete. Unreferenced objects (from an ingestion whose
-  database transaction rolled back after publication) stay until a later
-  retention milestone decides how to collect them; they are immutable
-  and safe. Temporary files left by a process killed mid-copy stay under
-  `<root>/tmp` for the same milestone to sweep; they are never published.
+- It does not delete by itself. Unreferenced objects (from an ingestion
+  whose database transaction rolled back after publication) and
+  temporary files left by a process killed mid-copy stay until an
+  operator invokes maintenance; they are immutable and safe, and
+  deciding when to collect them is the caller's, not the store's.
+- It does not decide whether a blob is still wanted. `put` returning
+  means the bytes are on the medium; whether they stay is the business of
+  whoever calls `removeObject`, and keeping removal away from live
+  references is that caller's coordination, not the store's. The archive
+  does it with a shared and exclusive advisory lock.
+- It does not know which archive a root belongs to. One root belongs to
+  one archive: two of them sharing a root would each see the other's
+  objects as unknown.
 - It does not inspect bytes. Archives, images, videos, and traces are
   opaque: nothing is extracted, parsed, transcoded, or rendered.
 - It does not scope bytes by project or run; those facts live in the run
@@ -109,4 +155,9 @@ reads and writes, eight concurrent writers in one process and six
 concurrent writer processes, temporary-file cleanup after success and
 failure, streaming of multi-megabyte sources, missing, corrupted, and
 truncated objects on verification, and an object that outlives the run
-directory it came from.
+directory it came from. Maintenance has its own: enumeration order and
+paging, every ill-formed or unsafe entry reported and left alone,
+verified removal, a corrupt or wrongly sized object refused, a link at an
+object path or at one of the store's directories refused, removal
+followed by a clean re-publication of the same bytes, and temporary
+sweeping by name, kind, and age.
