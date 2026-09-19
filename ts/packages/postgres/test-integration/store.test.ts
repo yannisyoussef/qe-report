@@ -7,6 +7,7 @@ import { validateRunDirectorySnapshot } from 'qe-report-validator';
 import { ReadModel, buildReadModel, projectRun } from 'qe-report-read-model';
 import type { ProjectedRun } from 'qe-report-read-model';
 import { buildArchive, type RunArchive } from '../src/archive.js';
+import { PostgresQueries } from '../src/queries.js';
 import { ReplayMismatchError, type PersistResult } from '../src/store.js';
 import type { ValidatedRun } from 'qe-report-validator';
 import { FIXTURES_DIR, manifest } from '../../protocol/test/helpers.js';
@@ -745,6 +746,31 @@ describe('persisting runs', () => {
           JSON.stringify(a.summary),
         ],
       );
+      // What a real first archiver commits beside its row: the source a waiter that finds the
+      // same content will index the run from.
+      for (const line of a.lines) {
+        await holder.query(
+          `INSERT INTO qe_run_source_lines (
+             project_id, run_id, storage_ordinal, event_id, session_id, sequence, event_type,
+             protocol_version, canonical_sha256, disposition, raw_line, source_file, source_line)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [
+            'A',
+            a.runId,
+            line.storageOrdinal,
+            line.eventId,
+            line.sessionId,
+            line.sequence,
+            line.eventType,
+            line.protocolVersion,
+            line.canonicalSha256,
+            line.disposition,
+            line.rawLine,
+            line.sourceFile,
+            line.sourceLine,
+          ],
+        );
+      }
     };
     // Polled outside the holder's transaction: pg_stat_activity is snapshotted per transaction,
     // so the holder itself would keep seeing the state before the contenders arrived.
@@ -780,8 +806,12 @@ describe('persisting runs', () => {
     );
     await waiting(2);
     await holder.query('COMMIT');
-    expect((await same).kind).toBe('already_present');
+    // The holder committed no query index; the waiter builds it from the holder's stored source.
+    expect(await same).toMatchObject({ kind: 'already_present', queryIndexRebuilt: true });
     expect((await different).kind).toBe('conflict');
+    expect(await new PostgresQueries(db.pool).verifyIndexedRun('A', other.runId)).toMatchObject({
+      agrees: true,
+    });
     await holder.end();
   });
 

@@ -231,6 +231,7 @@ CREATE TABLE qe_history_occurrences (
   historical_id_stability  text        NOT NULL,
   occurred_at_raw          text        NOT NULL,
   occurred_at_instant      timestamptz NOT NULL,
+  occurred_at_leap         smallint    NOT NULL,
   session_ids              text[]      NOT NULL,
   attempt_count            integer     NOT NULL,
   complete                 boolean     NOT NULL,
@@ -253,9 +254,10 @@ CREATE TABLE qe_history_occurrences (
     CHECK (array_length(session_ids, 1) >= 1 AND array_position(session_ids, NULL) IS NULL),
   CONSTRAINT qe_history_occurrences_stability_check
     CHECK (historical_id_stability IN ('stable', 'uncertain', 'unavailable')),
+  CONSTRAINT qe_history_occurrences_leap_check CHECK (occurred_at_leap BETWEEN 0 AND 1000),
   CONSTRAINT qe_history_occurrences_final_status_check
     CHECK (final_status IS NULL
-           OR final_status IN ('passed', 'failed', 'skipped', 'aborted', 'inconclusive')),
+           OR final_status IN ('passed', 'failed', 'skipped', 'inconclusive')),
   CONSTRAINT qe_history_occurrences_expected_status_check
     CHECK (expected_status IS NULL OR expected_status IN ('passed', 'failed', 'skipped')),
   CONSTRAINT qe_history_occurrences_run_verdict_check
@@ -270,13 +272,16 @@ COMMENT ON TABLE qe_history_occurrences IS
 COMMENT ON COLUMN qe_history_occurrences.history_key IS
   'SHA-256 of the runner name and the historical id, which is what the history index is keyed by. The names themselves are bounded by the protocol at 512 characters each, which in multi-byte text is more than a btree key can hold; a digest of fixed width can be, and the names are still compared exactly beside it so a collision could not answer the wrong question.';
 COMMENT ON COLUMN qe_history_occurrences.occurred_at_instant IS
-  'The producer instant of the first attempt as the in-memory comparator parses it, to millisecond precision, so that ordering here and there cannot differ. The original string is kept beside it.';
+  'The history position of the first attempt''s producer timestamp, to the millisecond, from the read model''s own ordering primitive, so that ordering here and there cannot differ. For a leap second it is the last millisecond of the second before it, and occurred_at_leap says where inside the leap second it falls. The original string is kept beside it.';
+COMMENT ON COLUMN qe_history_occurrences.occurred_at_leap IS
+  '0 for an ordinary timestamp; for a leap second (23:59:60 UTC), 1 plus its millisecond within it. One timestamptz cannot hold a leap second apart from the second that follows it, so the position is the pair.';
 COMMENT ON COLUMN qe_history_occurrences.flaky IS
   'Copied from the projected execution. SQL counts these; it never decides what flaky means.';
 
--- The one ordering a history page takes: the key, then instant, then the identifier tie-breakers.
+-- The one ordering a history page takes: the key, then the timestamp position (instant, then the
+-- place inside a leap second), then the identifier tie-breakers.
 CREATE INDEX qe_history_occurrences_key_idx ON qe_history_occurrences
-  (project_id, history_key, occurred_at_instant, run_id, execution_id)
+  (project_id, history_key, occurred_at_instant, occurred_at_leap, run_id, execution_id)
   INCLUDE (index_version);
 
 COMMENT ON COLUMN qe_history_occurrences.index_version IS

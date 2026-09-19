@@ -4,7 +4,7 @@ import { QUERY_INDEX_VERSION, type DerivedQueryIndex } from './query-index.js';
 /** Occurrence rows written per statement; a run with thousands of executions still fits. */
 const OCCURRENCES_PER_STATEMENT = 500;
 /** Columns each occurrence row carries; 500 of them stay far below PostgreSQL's parameter limit. */
-const OCCURRENCE_COLUMNS = 19;
+const OCCURRENCE_COLUMNS = 20;
 
 /**
  * Replaces one run's derived rows. The caller supplies a transaction: there is never a committed
@@ -80,6 +80,7 @@ export async function replaceQueryIndex(
         o.historicalIdStability,
         o.occurredAt,
         row.occurredAtInstant,
+        row.occurredAtLeap,
         o.sessionIds,
         o.attemptCount,
         o.complete,
@@ -97,7 +98,7 @@ export async function replaceQueryIndex(
       `INSERT INTO qe_history_occurrences (
          project_id, run_id, execution_id, history_key, index_version, runner_name, historical_id,
          historical_id_stability,
-         occurred_at_raw, occurred_at_instant, session_ids, attempt_count, complete,
+         occurred_at_raw, occurred_at_instant, occurred_at_leap, session_ids, attempt_count, complete,
          final_status, expected_status, flaky, run_verdict, run_complete, session_status)
        VALUES ${tuples.join(', ')}`,
       values,

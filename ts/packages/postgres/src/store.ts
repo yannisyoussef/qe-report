@@ -8,7 +8,7 @@ import {
   type Summary,
   type ValidatedRun,
 } from 'qe-report-validator';
-import { projectRun, type ProjectedRun } from 'qe-report-read-model';
+import { checkProjectId, projectRun, type ProjectedRun } from 'qe-report-read-model';
 import { replaceQueryIndex } from './index-writer.js';
 import { QUERY_INDEX_VERSION, deriveQueryIndex, type DerivedQueryIndex } from './query-index.js';
 import {
@@ -55,9 +55,11 @@ export type PersistResult =
        */
       readonly retentionAdded: boolean;
       /**
-       * True when this call rebuilt the run's derived query index because it was missing or was
-       * written under an older interpretation of a projected run. Derived state is repaired
-       * here, never promoted to truth: the archived source is untouched.
+       * True when this call rebuilt the run's derived query index because it was missing, stale,
+       * or written under another interpretation of a projected run. It is rebuilt from the
+       * archive's own stored source, never from the directory this call offered: two physical
+       * representations with one content fingerprint can still differ in facts such as their
+       * duplicate lines, and only the archived one is this run. The source is untouched.
        */
       readonly queryIndexRebuilt: boolean;
     }
@@ -151,18 +153,6 @@ export class ReplayMismatchError extends Error {
   }
 }
 
-/** An opaque partition key, bounded because the derived indexes are keyed by it. */
-const MAX_PROJECT_ID_LENGTH = 128;
-
-function checkProjectId(projectId: string): void {
-  if (typeof projectId !== 'string' || projectId === '') {
-    throw new TypeError('projectId must be a non-empty string');
-  }
-  if (projectId.length > MAX_PROJECT_ID_LENGTH) {
-    throw new TypeError(`projectId must be at most ${MAX_PROJECT_ID_LENGTH} characters`);
-  }
-}
-
 /** Retention refuses to guess: an ingestion states one finite instant, or archives nothing. */
 function checkExpiresAt(expiresAt: unknown): Date {
   if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())) {
@@ -229,17 +219,17 @@ export class PostgresRunStore {
     }
     // validateRunDirectorySnapshot checked the bytes under <run>/attachments against the events.
     const archive = buildArchive(validated);
-    // The projection this archive produces, read into query-index rows now, so that the
-    // transaction below stores a run that is immediately queryable. It is derived state: the
-    // source lines beside it are what can produce it again.
-    const derived = deriveQueryIndex(
+    // The projection this directory produces, read into query-index rows now, so that a run
+    // this call inserts is stored immediately queryable. It is used only if this directory
+    // becomes the archived source; a run already archived is indexed from its own stored source.
+    const offeredIndex = deriveQueryIndex(
       projectRun(request.projectId, request.runDirectory, validated),
     );
     // From here the call may publish bytes or write rows, so it holds the maintenance lock
     // shared: destructive retention cannot interleave with the identity check, the
     // materialisation, or the transaction, and other ingestions still run beside it.
     return withIngestionLock(this.pool, async (client) => {
-      const known = await knownRun(client, request.projectId, archive, expiresAt, derived);
+      const known = await knownRun(client, request.projectId, archive, expiresAt);
       if (known !== undefined) return known;
       const published = await materialiseBlobs(
         this.blobs,
@@ -253,7 +243,7 @@ export class PostgresRunStore {
         archive,
         published,
         expiresAt,
-        derived,
+        offeredIndex,
       );
     });
   }
@@ -526,7 +516,6 @@ async function knownRun(
   projectId: string,
   archive: RunArchive,
   expiresAt: Date,
-  derived: DerivedQueryIndex,
 ): Promise<PersistResult | undefined> {
   const stored = await storedFingerprint(client, projectId, archive);
   if (stored === undefined) return undefined;
@@ -547,8 +536,8 @@ async function knownRun(
   if (archive.requiredBlobs.some((b) => !known.has(b.sha256))) return undefined;
   // Its bytes are all accounted for, so only derived state can still be missing, and none of it
   // needs blob work: a run archived before retention or before query indexes existed is
-  // completed from what has just been validated, in one transaction, without the archive itself
-  // changing in any way.
+  // completed in one transaction, its expiry from this call and its index from its own stored
+  // source, without the archive itself changing in any way.
   await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
   let retentionAdded = false;
   let queryIndexRebuilt = false;
@@ -565,15 +554,7 @@ async function knownRun(
       return undefined;
     }
     retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
-    const indexed = await client.query(
-      `SELECT 1 FROM qe_run_query_index
-        WHERE project_id = $1 AND run_id = $2 AND index_version = $3 AND source_fingerprint = $4`,
-      [projectId, archive.runId, QUERY_INDEX_VERSION, stored.storedFingerprint],
-    );
-    queryIndexRebuilt = indexed.rowCount === 0;
-    if (queryIndexRebuilt) {
-      await replaceQueryIndex(client, projectId, archive.runId, derived, stored.storedFingerprint);
-    }
+    queryIndexRebuilt = await repairStoredIndex(client, projectId, archive.runId);
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -593,7 +574,8 @@ async function knownRun(
  * The transaction behind every persist: claim the identity, record the blobs, insert every line,
  * every run-to-blob relation, and the retention fact, commit; or read the claimant and back out.
  * `published` must cover every blob the archive requires: the database references only blobs the
- * store already holds.
+ * store already holds. `offeredIndex` is the index of the offered source and is written only when
+ * this call inserts the run; a run someone else archived is indexed from its own stored source.
  *
  * The caller owns the mutation boundary and this does not take one of its own: it must already
  * be running on a connection that holds the shared maintenance lock, which
@@ -606,7 +588,7 @@ export async function archiveWithin(
   archive: RunArchive,
   published: readonly BlobDescriptor[],
   expiresAt: Date,
-  derived: DerivedQueryIndex,
+  offeredIndex: DerivedQueryIndex,
 ): Promise<PersistResult> {
   checkProjectId(projectId);
   checkExpiresAt(expiresAt);
@@ -672,20 +654,7 @@ export async function archiveWithin(
       // A run archived before retention existed gains its fact here. One already recorded is
       // left exactly as it is: an established expiry is never moved by re-ingestion.
       const retentionAdded = await recordRetention(client, projectId, archive.runId, expiresAt);
-      const indexed = await client.query(
-        `SELECT 1 FROM qe_run_query_index
-          WHERE project_id = $1 AND run_id = $2 AND index_version = $3 AND source_fingerprint = $4`,
-        [projectId, archive.runId, QUERY_INDEX_VERSION, stored.storedFingerprint],
-      );
-      const queryIndexRebuilt = indexed.rowCount === 0;
-      if (queryIndexRebuilt)
-        await replaceQueryIndex(
-          client,
-          projectId,
-          archive.runId,
-          derived,
-          stored.storedFingerprint,
-        );
+      const queryIndexRebuilt = await repairStoredIndex(client, projectId, archive.runId);
       await client.query('COMMIT');
       return {
         kind: 'already_present',
@@ -702,7 +671,13 @@ export async function archiveWithin(
     // In the same transaction as the run: this writer never leaves a run without its expiry,
     // and never leaves one that nothing can query until an operator rebuilds it.
     await recordRetention(client, projectId, archive.runId, expiresAt);
-    await replaceQueryIndex(client, projectId, archive.runId, derived, archive.contentFingerprint);
+    await replaceQueryIndex(
+      client,
+      projectId,
+      archive.runId,
+      offeredIndex,
+      archive.contentFingerprint,
+    );
     await client.query('COMMIT');
     return {
       kind: 'inserted',
@@ -714,6 +689,37 @@ export async function archiveWithin(
     await client.query('ROLLBACK').catch(() => undefined);
     throw e;
   }
+}
+
+/**
+ * Rebuilds an already archived run's query index when it is missing, stale, or written under
+ * another interpretation; true when it did. The caller holds the run's row inside its
+ * transaction, so nothing deletes the run or replaces its index meanwhile.
+ *
+ * An already archived run's index is always derived from the archive's stored source, never from
+ * a representation offered later: the content fingerprint deliberately ignores duplicate lines,
+ * so an idempotent re-ingestion can carry the same content in a different physical form, and
+ * facts such as the duplicate count are those of the archived form only.
+ */
+async function repairStoredIndex(
+  client: PoolClient,
+  projectId: string,
+  runId: string,
+): Promise<boolean> {
+  const indexed = await client.query(
+    `SELECT 1 FROM qe_run_query_index q JOIN qe_runs r USING (project_id, run_id)
+      WHERE q.project_id = $1 AND q.run_id = $2
+        AND q.index_version = $3 AND q.source_fingerprint = r.content_fingerprint`,
+    [projectId, runId, QUERY_INDEX_VERSION],
+  );
+  if ((indexed.rowCount ?? 0) > 0) return false;
+  const stored = await readStoredRun(client, projectId, runId);
+  if (stored === undefined) throw new Error(`run ${runId} vanished while its row was held`);
+  const derived = deriveQueryIndex(
+    projectRun(projectId, stored.sourceLocator, await replayStored(stored)),
+  );
+  await replaceQueryIndex(client, projectId, runId, derived, stored.contentFingerprint);
+  return true;
 }
 
 /** Records the run's expiry when it has none; true when this call wrote it. */
@@ -740,9 +746,7 @@ async function storedFingerprint(
   db: Pool | PoolClient,
   projectId: string,
   archive: RunArchive,
-): Promise<
-  { fingerprint: string; storedFingerprint: string; ingestionSequence: bigint } | undefined
-> {
+): Promise<{ fingerprint: string; ingestionSequence: bigint } | undefined> {
   const existing = await db.query<{
     content_fingerprint: string;
     fingerprint_version: number;
@@ -767,11 +771,7 @@ async function storedFingerprint(
             )
           ).rows.map((r) => ({ canonicalSha256: r.canonical_sha256, disposition: r.disposition })),
         );
-  return {
-    fingerprint,
-    storedFingerprint: stored.content_fingerprint,
-    ingestionSequence: BigInt(stored.ingestion_sequence),
-  };
+  return { fingerprint, ingestionSequence: BigInt(stored.ingestion_sequence) };
 }
 
 /** The published descriptors for exactly the blobs the archive requires, sizes agreeing. */

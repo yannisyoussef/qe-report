@@ -1,5 +1,10 @@
 import type { Pool, PoolClient } from 'pg';
-import { projectRun, type ExecutionOccurrence, type ProjectedRun } from 'qe-report-read-model';
+import {
+  checkProjectId,
+  projectRun,
+  type ExecutionOccurrence,
+  type ProjectedRun,
+} from 'qe-report-read-model';
 import type {
   ExpectedStatus,
   HistoricalIdStability,
@@ -32,18 +37,6 @@ export const MAX_PAGE_SIZE = 1000;
 /** The most runs one rebuild pass takes; it holds the shared maintenance lease throughout. */
 export const MAX_REBUILD_RUNS = 1000;
 
-/** A project id is an opaque partition key; the archive bounds its length because it is indexed. */
-const MAX_PROJECT_ID_LENGTH = 128;
-
-function checkProjectId(projectId: string): void {
-  if (typeof projectId !== 'string' || projectId === '') {
-    throw new TypeError('projectId must be a non-empty string');
-  }
-  if (projectId.length > MAX_PROJECT_ID_LENGTH) {
-    throw new TypeError(`projectId must be at most ${MAX_PROJECT_ID_LENGTH} characters`);
-  }
-}
-
 function checkLimit(limit: number | undefined, fallback: number, ceiling: number): number {
   if (limit === undefined) return fallback;
   if (!Number.isSafeInteger(limit) || limit < 1) {
@@ -58,6 +51,9 @@ function checkCursor(after: HistoryCursor | undefined): HistoryCursor | undefine
   if (!(after.occurredAt instanceof Date) || !Number.isFinite(after.occurredAt.getTime())) {
     throw new TypeError('the cursor instant must be a valid Date');
   }
+  if (!Number.isInteger(after.leap) || after.leap < 0 || after.leap > 1000) {
+    throw new TypeError('the cursor leap position must be a whole number from 0 to 1000');
+  }
   if (typeof after.runId !== 'string' || after.runId === '') {
     throw new TypeError('the cursor must name a run');
   }
@@ -70,10 +66,11 @@ function checkCursor(after: HistoryCursor | undefined): HistoryCursor | undefine
 /** PostgreSQL's `bigint`; a sequence outside it is not one this archive ever handed out. */
 const MAX_BIGINT = 9_223_372_036_854_775_807n;
 
-function checkSequence(sequence: bigint | undefined): bigint | undefined {
+/** An ingestion-sequence cursor, named as the caller passed it so a refusal says which one. */
+function checkSequence(sequence: bigint | undefined, name: string): bigint | undefined {
   if (sequence === undefined) return undefined;
   if (typeof sequence !== 'bigint' || sequence < 0n || sequence > MAX_BIGINT) {
-    throw new TypeError('beforeIngestionSequence must be a non-negative bigint');
+    throw new TypeError(`${name} must be a non-negative bigint within PostgreSQL's bigint`);
   }
   return sequence;
 }
@@ -145,9 +142,14 @@ export interface RunPage {
   readonly next: bigint | undefined;
 }
 
-/** Where a history page continues: the instant the order uses, then the identifier tie-breakers. */
+/**
+ * Where a history page continues: the timestamp position the order uses (its instant, then its
+ * place inside a leap second), then the identifier tie-breakers.
+ */
 export interface HistoryCursor {
   readonly occurredAt: Date;
+  /** 0 for an ordinary timestamp; for a leap second, 1 plus its millisecond within it. */
+  readonly leap: number;
   readonly runId: string;
   readonly executionId: string;
 }
@@ -262,7 +264,7 @@ export class PostgresQueries {
   async listRuns(request: ListRunsRequest): Promise<RunPage> {
     checkProjectId(request.projectId);
     const limit = checkLimit(request.limit, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
-    const before = checkSequence(request.beforeIngestionSequence);
+    const before = checkSequence(request.beforeIngestionSequence, 'beforeIngestionSequence');
     return this.answering(request.projectId, async (client) => {
       const rows = await client.query<RunSummaryRow>(
         `SELECT r.run_id, r.ingestion_sequence, r.ingested_at, t.expires_at,
@@ -294,9 +296,10 @@ export class PostgresQueries {
 
   /**
    * How one historical test behaved across the project's runs, one page at a time, in the order
-   * the in-memory model presents: producer instant, then run id, then execution id. The instant
-   * is stored exactly as that comparator parses it and the identifiers are compared by byte,
-   * which for the protocol's printable-ASCII identifiers is the same as by code unit.
+   * the in-memory model presents: producer timestamp position, then run id, then execution id.
+   * The position is stored as the read model's ordering primitive computes it, and the
+   * identifiers are compared by byte, which for the protocol's printable-ASCII identifiers is the
+   * same as by code unit.
    */
   async getTestHistoryPage(request: HistoryRequest): Promise<HistoryPage> {
     checkProjectId(request.projectId);
@@ -308,16 +311,18 @@ export class PostgresQueries {
       // keyset scan whether or not a page follows another one.
       const rows = await client.query<OccurrenceRow>(
         `SELECT run_id, execution_id, historical_id_stability, occurred_at_raw,
-                occurred_at_instant, session_ids, attempt_count, complete, final_status,
-                expected_status, flaky, run_verdict, run_complete, session_status
+                occurred_at_instant, occurred_at_leap, session_ids, attempt_count, complete,
+                final_status, expected_status, flaky, run_verdict, run_complete, session_status
            FROM qe_history_occurrences
           WHERE project_id = $1 AND history_key = $2 AND index_version = $3
             AND runner_name = $4 AND historical_id = $5${
               after === undefined
                 ? ''
-                : '\n            AND (occurred_at_instant, run_id, execution_id) > ($7, $8, $9)'
+                : `
+            AND (occurred_at_instant, occurred_at_leap, run_id, execution_id)
+              > ($7, $8, $9, $10)`
             }
-          ORDER BY occurred_at_instant, run_id, execution_id
+          ORDER BY occurred_at_instant, occurred_at_leap, run_id, execution_id
           LIMIT $6`,
         after === undefined
           ? [
@@ -336,6 +341,7 @@ export class PostgresQueries {
               request.historicalId,
               limit + 1,
               after.occurredAt,
+              after.leap,
               after.runId,
               after.executionId,
             ],
@@ -353,6 +359,7 @@ export class PostgresQueries {
           rows.rows.length > limit && last !== undefined
             ? {
                 occurredAt: last.occurred_at_instant,
+                leap: last.occurred_at_leap,
                 runId: last.run_id,
                 executionId: last.execution_id,
               }
@@ -395,6 +402,7 @@ export class PostgresQueries {
   async rebuildProjectIndex(request: RebuildRequest): Promise<RebuildResult> {
     checkProjectId(request.projectId);
     const maxRuns = checkLimit(request.maxRuns, DEFAULT_REBUILD_RUNS, MAX_REBUILD_RUNS);
+    const after = checkSequence(request.afterIngestionSequence, 'afterIngestionSequence');
     return withIngestionLock(this.pool, async (client) => {
       const selected = await client.query<{
         run_id: string;
@@ -405,7 +413,7 @@ export class PostgresQueries {
           WHERE project_id = $1 AND ($2::bigint IS NULL OR ingestion_sequence > $2)
           ORDER BY ingestion_sequence
           LIMIT $3`,
-        [request.projectId, request.afterIngestionSequence ?? null, maxRuns + 1],
+        [request.projectId, after ?? null, maxRuns + 1],
       );
       const runs = selected.rows.slice(0, maxRuns);
       const problems: RebuildProblem[] = [];
@@ -537,6 +545,7 @@ interface OccurrenceRow {
   historical_id_stability: string;
   occurred_at_raw: string;
   occurred_at_instant: Date;
+  occurred_at_leap: number;
   session_ids: string[];
   attempt_count: number;
   complete: boolean;
@@ -715,7 +724,8 @@ async function compareIndex(
     OccurrenceRow & { runner_name: string; historical_id: string; index_version: number }
   >(
     `SELECT run_id, execution_id, runner_name, historical_id, historical_id_stability,
-            occurred_at_raw, occurred_at_instant, session_ids, attempt_count, complete,
+            occurred_at_raw, occurred_at_instant, occurred_at_leap, session_ids, attempt_count,
+            complete,
             final_status, expected_status, flaky, run_verdict, run_complete, session_status,
             index_version
        FROM qe_history_occurrences WHERE project_id = $1 AND run_id = $2
@@ -745,9 +755,12 @@ async function compareIndex(
         }
       }
       // The column the whole history order rests on, which no other field would show.
-      if (stored_.occurred_at_instant.getTime() !== now.occurredAtInstant.getTime()) {
+      if (
+        stored_.occurred_at_instant.getTime() !== now.occurredAtInstant.getTime() ||
+        stored_.occurred_at_leap !== now.occurredAtLeap
+      ) {
         differences.push(
-          `occurrence ${now.occurrence.executionId}: the ordering instant is not what its clock reads to`,
+          `occurrence ${now.occurrence.executionId}: the ordering instant is not the position its clock reads to`,
         );
       }
       if (stored_.index_version !== QUERY_INDEX_VERSION) {

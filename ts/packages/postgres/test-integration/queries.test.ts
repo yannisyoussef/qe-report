@@ -1,5 +1,7 @@
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
+import { validateRunDirectorySnapshot } from 'qe-report-validator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   ReadModel,
@@ -14,9 +16,11 @@ import {
   PostgresQueries,
   QUERY_INDEX_VERSION,
   QueryIndexIncompleteError,
+  ReplayMismatchError,
   type HistoryPage,
   type RunSummary,
 } from '../src/index.js';
+import { buildArchive, type RunArchive } from '../src/archive.js';
 import { FIXTURES_DIR, manifest } from '../../protocol/test/helpers.js';
 import {
   attemptFinished,
@@ -28,7 +32,7 @@ import {
   writeRun,
   type EventSpec,
 } from '../../read-model/test/synthetic.js';
-import { NEVER, TestPostgres, rowsIn, waitFor } from './support.js';
+import { NEVER, TestPostgres, archiveInto, publish, rowsIn, waitFor } from './support.js';
 
 const pgTest = new TestPostgres();
 beforeAll(() => pgTest.start());
@@ -788,19 +792,26 @@ describe('what the history key is, and is not', () => {
     expect(beta).toEqual(local.getTestHistory('P', 'beta', 'one-identity').occurrences);
   });
 
-  it('reads a leap second as the instant it was, in both models alike', async () => {
+  it('pages a leap-second boundary in the in-memory history order', async () => {
     const db = await pgTest.database('leap');
     const queries = new PostgresQueries(db.pool);
     const root = freshRoot('leap');
-    // The protocol admits 23:59:60; Date.parse alone does not. The run is still archivable, and
-    // the durable order is the order the in-memory comparator gives.
-    const instants = [
-      '2026-12-31T23:59:59.000+00:00',
-      '2026-12-31T23:59:60.000+00:00',
-      '2027-01-01T00:00:01.000+00:00',
+    // The protocol admits 23:59:60 as the last second of a UTC day; Date.parse does not read it,
+    // and one millisecond count cannot hold it apart from the 00:00:00 after it. The run ids run
+    // against the clock, so an order that let a leap second tie with its neighbour and fell back
+    // on the identifiers would come out visibly wrong. Two runs share one leap instant, and one
+    // leap second is written in another offset.
+    const chronological: [string, string][] = [
+      ['run-9', '2026-12-31T23:59:59.000+00:00'],
+      ['run-8', '2026-12-31T23:59:59.999+00:00'],
+      ['run-7', '2027-01-01T00:59:60.000+01:00'],
+      ['run-0', '2026-12-31T23:59:60.500+00:00'],
+      ['run-6', '2026-12-31T23:59:60.500+00:00'],
+      ['run-5', '2027-01-01T00:00:00.000+00:00'],
+      ['run-4', '2027-01-01T00:00:00.500+00:00'],
     ];
-    for (const [i, at] of instants.entries()) {
-      const dir = writeRun(root, `leap-${i}`, `run-leap-${i}`, [
+    for (const [runId, at] of chronological) {
+      const dir = writeRun(root, runId, runId, [
         {
           sessionId: 's',
           events: [
@@ -822,15 +833,31 @@ describe('what the history key is, and is not', () => {
         at,
       ).toBe('inserted');
     }
-    const durable = await wholeHistory(queries, 'P', 'pw', 'leap', 2);
-    expect(durable.map((o) => o.runId)).toEqual(['run-leap-0', 'run-leap-1', 'run-leap-2']);
-    expect(durable.map((o) => o.occurredAt)).toEqual(instants);
     const local = (
       await buildReadModel(
-        instants.map((_, i) => ({ projectId: 'P', runDirectory: join(root, 'runs', `leap-${i}`) })),
+        chronological.map(([runId]) => ({
+          projectId: 'P',
+          runDirectory: join(root, 'runs', runId),
+        })),
       )
     ).model;
-    expect(durable).toEqual(local.getTestHistory('P', 'pw', 'leap').occurrences);
+    const memory = local.getTestHistory('P', 'pw', 'leap').occurrences;
+    expect(memory.map((o) => o.runId)).toEqual(chronological.map(([runId]) => runId));
+    for (const limit of [1, 2, 3, 100]) {
+      const durable = await wholeHistory(queries, 'P', 'pw', 'leap', limit);
+      expect(durable, `page size ${limit}`).toEqual(memory);
+    }
+    // The cursor carries the place inside the leap second, not only the instant.
+    const first = await queries.getTestHistoryPage({
+      projectId: 'P',
+      runnerName: 'pw',
+      historicalId: 'leap',
+      limit: 3,
+    });
+    expect(first.next).toMatchObject({ runId: 'run-7', leap: 1 });
+    for (const [runId] of chronological) {
+      expect(await queries.verifyIndexedRun('P', runId), runId).toMatchObject({ agrees: true });
+    }
   });
 });
 
@@ -848,10 +875,14 @@ describe('bounds and cursors', () => {
       ).rejects.toThrow(TypeError);
     }
     for (const after of [
-      { occurredAt: new Date(Number.NaN), runId: 'r', executionId: 'e' },
-      { occurredAt: new Date(0), runId: '', executionId: 'e' },
-      { occurredAt: new Date(0), runId: 'r', executionId: '' },
-      { occurredAt: '2026-01-01' as unknown as Date, runId: 'r', executionId: 'e' },
+      { occurredAt: new Date(Number.NaN), leap: 0, runId: 'r', executionId: 'e' },
+      { occurredAt: new Date(0), leap: 0, runId: '', executionId: 'e' },
+      { occurredAt: new Date(0), leap: 0, runId: 'r', executionId: '' },
+      { occurredAt: '2026-01-01' as unknown as Date, leap: 0, runId: 'r', executionId: 'e' },
+      { occurredAt: new Date(0), leap: -1, runId: 'r', executionId: 'e' },
+      { occurredAt: new Date(0), leap: 1001, runId: 'r', executionId: 'e' },
+      { occurredAt: new Date(0), leap: 0.5, runId: 'r', executionId: 'e' },
+      { occurredAt: new Date(0), leap: '0' as unknown as number, runId: 'r', executionId: 'e' },
     ]) {
       await expect(queries.getTestHistoryPage({ projectId: 'P', ...key, after })).rejects.toThrow(
         TypeError,
@@ -863,7 +894,23 @@ describe('bounds and cursors', () => {
     await expect(
       queries.listRuns({ projectId: 'P', beforeIngestionSequence: 1 as unknown as bigint }),
     ).rejects.toThrow(TypeError);
-    await expect(queries.getIndexStatus('x'.repeat(200))).rejects.toThrow(TypeError);
+    await expect(
+      queries.listRuns({ projectId: 'P', beforeIngestionSequence: 2n ** 63n }),
+    ).rejects.toThrow(/beforeIngestionSequence/u);
+    // The rebuild cursor lives in the same numeric domain and is refused in its own name.
+    for (const bad of [-1n, 2n ** 63n, 1 as unknown as bigint, '1' as unknown as bigint]) {
+      await expect(
+        queries.rebuildProjectIndex({ projectId: 'P', afterIngestionSequence: bad }),
+      ).rejects.toThrow(/afterIngestionSequence/u);
+    }
+    const edge = await queries.rebuildProjectIndex({
+      projectId: 'P',
+      afterIngestionSequence: 2n ** 63n - 1n,
+    });
+    expect(edge).toMatchObject({ rebuilt: 0, more: false, lastIngestionSequence: undefined });
+    expect(
+      (await queries.rebuildProjectIndex({ projectId: 'P', afterIngestionSequence: 0n })).rebuilt,
+    ).toBe(local.runs().length);
   });
 });
 
@@ -969,5 +1016,213 @@ describe('drift in the ordering key', () => {
     expect((await queries.verifyIndexedRun('P', sample.runId)).differences.join(' ')).toMatch(
       /flaky/u,
     );
+  });
+});
+
+/**
+ * An already-present run's query index is always derived from the archive's stored raw source,
+ * never from an idempotent physical representation offered later.
+ */
+describe('canonical-source repair', () => {
+  /** Validates a directory into the archive the store would build from it. */
+  async function archiveOf(dir: string): Promise<RunArchive> {
+    return buildArchive(
+      await validateRunDirectorySnapshot(dir, { retainEvents: true, retainSourceLines: true }),
+    );
+  }
+
+  /** One run in two physical forms: as written, and with one line repeated byte for byte. */
+  function twoForms(root: string): { plain: string; doubled: string } {
+    const events: EventSpec[] = [
+      started('pw'),
+      attemptStarted('e-1', 1, testCase('e', 'canonical')),
+      attemptFinished('e-1', 'passed'),
+      finished(),
+    ];
+    const plain = writeRun(root, 'plain', 'run-canonical', [{ sessionId: 's', events }]);
+    const doubled = writeRun(root, 'doubled', 'run-canonical', [{ sessionId: 's', events }]);
+    const file = join(doubled, 'events', 's.ndjson');
+    const lines = readFileSync(file, 'utf8').trimEnd().split('\n');
+    writeFileSync(file, [lines[0], lines[1], lines[1], ...lines.slice(2)].join('\n') + '\n');
+    return { plain, doubled };
+  }
+
+  const cases = [
+    { archived: 'plain', offered: 'doubled', damage: 'missing', path: 'advisory' },
+    { archived: 'plain', offered: 'doubled', damage: 'stale', path: 'advisory' },
+    { archived: 'plain', offered: 'doubled', damage: 'missing', path: 'conflict' },
+    { archived: 'doubled', offered: 'plain', damage: 'missing', path: 'advisory' },
+    { archived: 'doubled', offered: 'plain', damage: 'stale', path: 'advisory' },
+    { archived: 'doubled', offered: 'plain', damage: 'missing', path: 'conflict' },
+  ] as const;
+
+  it.each(cases)(
+    'rebuilds a $damage index of the $archived archive from its own source when the $offered form is offered ($path path)',
+    async ({ archived, offered, damage, path }) => {
+      const db = await pgTest.database(`canonical_${archived}_${damage}_${path}`);
+      const queries = new PostgresQueries(db.pool);
+      const forms = twoForms(freshRoot('canonical'));
+      const archivedDir = forms[archived];
+      const offeredDir = forms[offered];
+
+      // One semantic run: the same content fingerprint, different duplicate counts.
+      const archivedArchive = await archiveOf(archivedDir);
+      const offeredArchive = await archiveOf(offeredDir);
+      expect(offeredArchive.contentFingerprint).toBe(archivedArchive.contentFingerprint);
+      expect(archivedArchive.summary.duplicates).toBe(archived === 'doubled' ? 1 : 0);
+      expect(offeredArchive.summary.duplicates).toBe(offered === 'doubled' ? 1 : 0);
+
+      expect(
+        (
+          await db.store.persistRunDirectory({
+            projectId: 'P',
+            runDirectory: archivedDir,
+            expiresAt: NEVER,
+          })
+        ).kind,
+      ).toBe('inserted');
+      const local = (await buildReadModel([{ projectId: 'P', runDirectory: archivedDir }])).model;
+      const truth = local.getRun('P', 'run-canonical') as ProjectedRun;
+      const before = await db.store.loadRun('P', 'run-canonical');
+
+      if (damage === 'missing') {
+        await db.pool.query('DELETE FROM qe_history_occurrences');
+        await db.pool.query('DELETE FROM qe_run_query_index');
+      } else {
+        // A stale row that already says what the offered form would: only a rebuild from the
+        // archive can put the archive's own facts back.
+        await db.pool.query(
+          'UPDATE qe_run_query_index SET index_version = $1, duplicate_event_count = $2',
+          [QUERY_INDEX_VERSION + 1, offeredArchive.summary.duplicates],
+        );
+      }
+      expect((await queries.getIndexStatus('P')).complete).toBe(false);
+
+      const repaired =
+        path === 'advisory'
+          ? await db.store.persistRunDirectory({
+              projectId: 'P',
+              runDirectory: offeredDir,
+              expiresAt: PAST,
+            })
+          : // The archive transaction's own same-content branch, reached directly with the index
+            // the offered form derives, as a caller racing the first archiver would reach it.
+            await archiveInto(
+              db.pool,
+              'P',
+              offeredDir,
+              offeredArchive,
+              await publish(db, offeredDir, offeredArchive),
+              PAST,
+            );
+      expect(repaired).toMatchObject({ kind: 'already_present', queryIndexRebuilt: true });
+
+      const listed = await queries.listRuns({ projectId: 'P' });
+      expect(listed.runs).toHaveLength(1);
+      expect(listed.runs[0]?.duplicateEvents).toBe(truth.validator.duplicateEvents);
+      expect(listed.runs[0]?.duplicateEvents).toBe(archivedArchive.summary.duplicates);
+      expect(listed.runs[0]?.duplicateEvents).not.toBe(offeredArchive.summary.duplicates);
+      expect(await queries.verifyIndexedRun('P', 'run-canonical')).toEqual({
+        projectId: 'P',
+        runId: 'run-canonical',
+        agrees: true,
+        differences: [],
+      });
+      expect(await wholeHistory(queries, 'P', 'pw', 'canonical')).toEqual(
+        local.getTestHistory('P', 'pw', 'canonical').occurrences,
+      );
+      // Source, first-ingestion provenance, fingerprint, and the first expiry are untouched.
+      expect(await db.store.loadRun('P', 'run-canonical')).toEqual(before);
+    },
+  );
+});
+
+describe('canonical-source repair of an archive that cannot be replayed', () => {
+  it('fails the re-ingestion loudly rather than indexing the offered copy', async () => {
+    const db = await pgTest.database('canonical_damaged');
+    const queries = new PostgresQueries(db.pool);
+    const dir = fixture('runs/karate');
+    await db.store.persistRunDirectory({ projectId: 'P', runDirectory: dir, expiresAt: NEVER });
+    await db.pool.query('DELETE FROM qe_history_occurrences');
+    await db.pool.query('DELETE FROM qe_run_query_index');
+    await db.pool.query(
+      `UPDATE qe_run_source_lines SET raw_line = '{"not":"an event"}'
+        WHERE project_id = 'P' AND run_id = 'run-karate-0001' AND storage_ordinal = 0`,
+    );
+    // The offered directory is perfectly valid, but it is not the archive, and only the archive
+    // may say what this run's index holds.
+    await expect(
+      db.store.persistRunDirectory({ projectId: 'P', runDirectory: dir, expiresAt: NEVER }),
+    ).rejects.toThrow(ReplayMismatchError);
+    expect(await rowsIn(db.pool, 'qe_run_query_index')).toBe(0);
+    expect(await queries.getIndexStatus('P')).toMatchObject({ missingRuns: 1, complete: false });
+  });
+});
+
+describe('project ids', () => {
+  it('serves a project id longer than 128 characters everywhere it is archived', async () => {
+    const db = await pgTest.database('long_project');
+    const queries = new PostgresQueries(db.pool);
+    // Opaque and non-empty is the whole contract; nothing here gives it a length of its own.
+    const projectId = `project/${'x'.repeat(300)}/é`;
+    expect(projectId.length).toBeGreaterThan(128);
+    const dir = fixture('runs/flaky-session-passed');
+    expect(
+      (await db.store.persistRunDirectory({ projectId, runDirectory: dir, expiresAt: NEVER })).kind,
+    ).toBe('inserted');
+    expect(await queries.getIndexStatus(projectId)).toMatchObject({
+      totalRuns: 1,
+      currentRuns: 1,
+      complete: true,
+    });
+    await db.pool.query('DELETE FROM qe_history_occurrences');
+    await db.pool.query('DELETE FROM qe_run_query_index');
+    expect(await queries.rebuildProjectIndex({ projectId })).toMatchObject({
+      rebuilt: 1,
+      problems: [],
+    });
+    const local = (await buildReadModel([{ projectId, runDirectory: dir }])).model;
+    const run = local.runs()[0] as ProjectedRun;
+    expect((await queries.listRuns({ projectId })).runs.map((r) => r.runId)).toEqual([run.runId]);
+    for (const key of historyKeys(local)) {
+      expect(await wholeHistory(queries, projectId, key.runnerName, key.historicalId)).toEqual(
+        local.getTestHistory(projectId, key.runnerName, key.historicalId).occurrences,
+      );
+      const flakiness = local.getFlakiness(projectId, key.runnerName, key.historicalId);
+      expect(await queries.getFlakinessSummary({ projectId, ...key })).toMatchObject({
+        totalOccurrences: flakiness.totalOccurrences,
+        flakyOccurrences: flakiness.flakyOccurrences,
+        everFlaky: flakiness.everFlaky,
+      });
+    }
+    expect((await queries.getRun(projectId, run.runId))?.executions).toEqual(run.executions);
+    expect(await queries.verifyIndexedRun(projectId, run.runId)).toMatchObject({ agrees: true });
+    await expect(queries.getIndexStatus('')).rejects.toThrow(TypeError);
+  });
+});
+
+describe('what a derived row may hold', () => {
+  it('admits exactly the canonical attempt statuses as a final status', async () => {
+    const db = await pgTest.database('final_status');
+    await db.store.persistRunDirectory({
+      projectId: 'P',
+      runDirectory: fixture('runs/flaky-session-passed'),
+      expiresAt: NEVER,
+    });
+    expect(await rowsIn(db.pool, 'qe_history_occurrences')).toBeGreaterThan(0);
+    for (const status of ['passed', 'failed', 'skipped', 'inconclusive', null]) {
+      await db.pool.query('UPDATE qe_history_occurrences SET final_status = $1', [status]);
+    }
+    // A runner-native status the protocol maps away is not a canonical one.
+    for (const status of ['aborted', 'timedOut', 'interrupted', '']) {
+      await expect(
+        db.pool.query('UPDATE qe_history_occurrences SET final_status = $1', [status]),
+      ).rejects.toThrow(/qe_history_occurrences_final_status_check/u);
+    }
+    for (const leap of [-1, 1001]) {
+      await expect(
+        db.pool.query('UPDATE qe_history_occurrences SET occurred_at_leap = $1', [leap]),
+      ).rejects.toThrow(/qe_history_occurrences_leap_check/u);
+    }
   });
 });

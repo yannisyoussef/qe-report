@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  historyInstantMs,
+  historyInstant,
   historyOccurrencesOf,
   type ExecutionOccurrence,
   type ProjectedRun,
@@ -31,12 +31,15 @@ export interface RunIndexRow {
 
 /**
  * One history occurrence as it is stored: the occurrence the read model derives, plus the
- * instant its comparator would order by, parsed once here so that the database orders exactly
- * as the in-memory model does.
+ * position its comparator would order it by, read once here by the same primitive so that the
+ * database orders exactly as the in-memory model does.
  */
 export interface OccurrenceIndexRow {
   readonly occurrence: ExecutionOccurrence;
+  /** The position's instant: for a leap second, the last millisecond of the second before it. */
   readonly occurredAtInstant: Date;
+  /** 0 for an ordinary timestamp; for a leap second, 1 plus its millisecond within it. */
+  readonly occurredAtLeap: number;
   /** {@link historyKeyOf} of the occurrence's runner and historical id. */
   readonly historyKey: Buffer;
 }
@@ -67,11 +70,17 @@ export function deriveQueryIndex(run: ProjectedRun): DerivedQueryIndex {
       scopeFailureCount: run.scopeFailures.length,
       attachmentCount: run.attachments.length,
     },
-    occurrences: historyOccurrencesOf(run).map((occurrence) => ({
-      occurrence,
-      occurredAtInstant: instantOf(occurrence),
-      historyKey: historyKeyOf(occurrence.runnerName, occurrence.historicalId),
-    })),
+    occurrences: historyOccurrencesOf(run).map((occurrence) => {
+      // The read model's own ordering primitive: a timestamp no validator accepts is refused
+      // there rather than given a place, and nothing here reads a clock differently.
+      const position = historyInstant(occurrence.occurredAt);
+      return {
+        occurrence,
+        occurredAtInstant: new Date(position.epochMs),
+        occurredAtLeap: position.leap,
+        historyKey: historyKeyOf(occurrence.runnerName, occurrence.historicalId),
+      };
+    }),
   };
 }
 
@@ -88,16 +97,4 @@ export function historyKeyOf(runnerName: string, historicalId: string): Buffer {
     .update(Buffer.of(0))
     .update(historicalId, 'utf8')
     .digest();
-}
-
-/**
- * The instant the in-memory comparator sorts by, taken from the same function it uses, so that
- * the two orders cannot differ by construction. The protocol allows up to nanosecond precision
- * in the text and the comparator reads milliseconds, which is why the database stores what was
- * read rather than re-parsing the string and keeping more. It is total: a run the platform
- * cannot read a clock from is still archived and still indexed, because derived state never
- * decides whether a validated run may be stored.
- */
-function instantOf(occurrence: ExecutionOccurrence): Date {
-  return new Date(historyInstantMs(occurrence.occurredAt));
 }
