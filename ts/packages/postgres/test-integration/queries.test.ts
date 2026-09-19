@@ -1231,6 +1231,50 @@ describe('project ids', () => {
   });
 });
 
+describe('the system-wide project id bound', () => {
+  it('archives and answers for a project id of exactly 512 bytes of UTF-8, and refuses 513', async () => {
+    const db = await pgTest.database('project_bytes');
+    const queries = new PostgresQueries(db.pool);
+    const dir = fixture('runs/flaky-session-passed');
+    // 170 three-byte characters and two ASCII bytes: 172 characters, 512 bytes.
+    const atBound = `${String.fromCodePoint(0x20ac).repeat(170)}ab`;
+    expect(Buffer.byteLength(atBound, 'utf8')).toBe(512);
+    const pastBound = `${atBound}c`;
+    expect(
+      (
+        await db.store.persistRunDirectory({
+          projectId: atBound,
+          runDirectory: dir,
+          expiresAt: NEVER,
+        })
+      ).kind,
+    ).toBe('inserted');
+    const local = (await buildReadModel([{ projectId: atBound, runDirectory: dir }])).model;
+    const run = local.runs()[0] as ProjectedRun;
+    expect((await queries.listRuns({ projectId: atBound })).runs.map((r) => r.runId)).toEqual([
+      run.runId,
+    ]);
+    for (const key of historyKeys(local)) {
+      expect(await wholeHistory(queries, atBound, key.runnerName, key.historicalId)).toEqual(
+        local.getTestHistory(atBound, key.runnerName, key.historicalId).occurrences,
+      );
+    }
+    expect((await queries.getRun(atBound, run.runId))?.executions).toEqual(run.executions);
+    await expect(
+      db.store.persistRunDirectory({ projectId: pastBound, runDirectory: dir, expiresAt: NEVER }),
+    ).rejects.toThrow(TypeError);
+    for (const ask of [
+      (): Promise<unknown> => queries.getIndexStatus(pastBound),
+      (): Promise<unknown> => queries.listRuns({ projectId: pastBound }),
+      (): Promise<unknown> => queries.getRun(pastBound, run.runId),
+      (): Promise<unknown> => queries.rebuildProjectIndex({ projectId: pastBound }),
+    ]) {
+      await expect(ask()).rejects.toThrow(TypeError);
+    }
+    expect(await rowsIn(db.pool, 'qe_runs')).toBe(1);
+  });
+});
+
 describe('what a derived row may hold', () => {
   it('admits exactly the canonical attempt statuses as a final status', async () => {
     const db = await pgTest.database('final_status');

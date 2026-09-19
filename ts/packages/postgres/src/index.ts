@@ -49,3 +49,12 @@ export {
   type StoredRun,
   type StoredSourceLine,
 } from './store.js';
+export {
+  API_KEY_SCOPES,
+  PostgresApiKeys,
+  parseApiKeyToken,
+  type ApiKeyPrincipal,
+  type ApiKeyScope,
+  type CreateApiKeyRequest,
+  type CreatedApiKey,
+} from './api-keys.js';

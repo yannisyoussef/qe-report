@@ -106,6 +106,72 @@ describe('persisting runs', () => {
     expect(await db.store.loadRun('other', 'run-fork-0001')).toBeUndefined();
   });
 
+  it('records a logical locator and run-relative source files for a directory that is temporary', async () => {
+    const db = await pgTest.database('logical');
+    const root = freshRoot('logical');
+    const staged = join(root, 'runs', 'request-1');
+    mkdirSync(join(root, 'runs'), { recursive: true });
+    cpSync(fixture('runs/forked'), staged, { recursive: true });
+    const result = await db.store.persistRunDirectory({
+      projectId: 'P',
+      runDirectory: staged,
+      expiresAt: NEVER,
+      sourceLocator: 'http:request-1',
+    });
+    expect(result.kind).toBe('inserted');
+    // The temporary directory goes; what was stored never needed it and never names it.
+    rmSync(staged, { recursive: true, force: true });
+    const stored = await db.store.loadRun('P', 'run-fork-0001');
+    expect(stored?.sourceLocator).toBe('http:request-1');
+    const files = new Set(stored?.sourceLines.map((l) => l.sourceFile));
+    expect(files.size).toBeGreaterThan(0);
+    for (const file of files) expect(file).toMatch(/^events\/[^/]+\.ndjson$/u);
+    expect(
+      JSON.stringify(stored, (_, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)),
+    ).not.toContain(root);
+    expect((await db.store.projectStoredRun('P', 'run-fork-0001'))?.runDirectory).toBe(
+      'http:request-1',
+    );
+    // The same content from a directory someone keeps is the same run.
+    expect(
+      (
+        await db.store.persistRunDirectory({
+          projectId: 'P',
+          runDirectory: fixture('runs/forked'),
+          expiresAt: NEVER,
+        })
+      ).kind,
+    ).toBe('already_present');
+    // A refusal names its files the same way.
+    const invalid = manifest().runs.find(
+      (r) => r.outcome === 'INVALID' && r.dir.startsWith('runs/'),
+    );
+    expect(invalid).toBeDefined();
+    const bad = join(root, 'runs', 'request-2');
+    cpSync(fixture(invalid?.dir ?? ''), bad, { recursive: true });
+    const refused = await db.store.persistRunDirectory({
+      projectId: 'P',
+      runDirectory: bad,
+      expiresAt: NEVER,
+      sourceLocator: 'http:request-2',
+    });
+    expect(refused.kind).toBe('rejected');
+    const diagnostics = refused.kind === 'rejected' ? refused.diagnostics : [];
+    expect(diagnostics.length).toBeGreaterThan(0);
+    expect(JSON.stringify(diagnostics)).not.toContain(root);
+    for (const d of diagnostics) expect(d.file === '' || !d.file.startsWith('/')).toBe(true);
+    for (const locator of ['', 'x'.repeat(257), 'two\nlines']) {
+      await expect(
+        db.store.persistRunDirectory({
+          projectId: 'P',
+          runDirectory: fixture('runs/forked'),
+          expiresAt: NEVER,
+          sourceLocator: locator,
+        }),
+      ).rejects.toThrow(TypeError);
+    }
+  });
+
   it('is idempotent for the same run and refuses different content under one identity', async () => {
     const db = await pgTest.database('idem');
     const first = await db.store.persistRunDirectory({
