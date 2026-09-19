@@ -535,7 +535,38 @@ its own transaction, under a session advisory lock so concurrent starts
 apply each once; it records version, name, and a checksum over the
 version, name, and SQL, is a no-op when run again, and refuses to
 continue when a recorded migration's checksum no longer matches the
-code.
+code. `schemaStatus(pool)` reads the same record without changing
+anything and says whether the database holds exactly this code's schema;
+a server checks it instead of migrating on start.
+
+Migration 5 does two things. It bounds `qe_runs.project_id` at 512 bytes
+of UTF-8, the system-wide project id contract, and every other table
+takes the bound from `qe_runs` through its key. An archive holding a
+longer project id is not rewritten: the migration refuses, names how many
+runs are affected, and changes nothing until an operator reconciles them.
+It also creates `qe_project_api_keys`.
+
+## Project-scoped API keys
+
+`PostgresApiKeys` issues, authenticates, and revokes the machine
+credentials a transport uses. A token is `qer_k1_<publicId>_<secret>`:
+80 random bits of public id, which finds the row, and 256 random bits of
+secret, which proves it. Only the SHA-256 of the secret is stored, and
+the comparison is constant-time; neither the token nor the secret can be
+read back. A key names one project and `runs:read`, `runs:write`, or
+both, and neither ever changes: a trigger allows one update to a key,
+its revocation. Rotation is issuing a new key and revoking the old one.
+Malformed, unknown, wrong, expired (by the database's clock), and revoked
+tokens all authenticate as nothing.
+
+## Logical provenance
+
+`persistRunDirectory` takes an optional `sourceLocator`. A transport that
+stages an upload in a temporary directory passes one, such as
+`http:<request id>`: it is recorded as the run's locator, and every
+source file and diagnostic is named relative to the directory
+(`events/000001.ndjson`), so no temporary path is stored or handed back.
+Without it the directory is its own provenance, as before.
 
 ## Evidence
 
@@ -609,18 +640,16 @@ archive.
 - No search of any kind: no display-name, tag, label, or failure-message
   search, no date windows, no trend or pass-rate aggregates. The indexes
   answer the three questions the read model defines and nothing else.
-- No authorisation. Every query takes a project id and answers about it,
-  including `getIndexStatus`, so whatever sits in front of this decides
-  who may name which project.
+- No authorisation of its own. Every query takes a project id and answers
+  about it, including `getIndexStatus`; the HTTP transport
+  (`qe-report-http-api`) decides the project from an API key, and any
+  other caller must decide it just as deliberately.
 - A history page is bounded and a run listing is bounded, but paging
   across several of them is not one snapshot: each page is consistent in
   itself, and a run archived or deleted between pages shows up as a
   difference between them.
-- A project id is opaque and non-empty, the same contract the read
-  model and the store have, and the query surface adds nothing to it.
-  PostgreSQL bounds a btree entry at about 2.7 kB, which has bounded
-  every table keyed by project id since migration 1; that is a physical
-  ceiling, far past any real project id, and not a supported limit.
+- A project id follows the one system-wide contract: well-formed
+  Unicode, no U+0000, 1 to 512 bytes of UTF-8, never normalised.
 - No update and no incremental ingestion; a run is archived once,
   complete, and afterwards only deleted. An established expiry cannot be
   changed, and there is no hold, extension, or policy model.
