@@ -14,5 +14,5 @@ export {
   historyInstant,
   type HistoryInstant,
 } from './history-order.js';
-export { checkProjectId } from './project-id.js';
+export { checkProjectId, MAX_PROJECT_ID_UTF8_BYTES } from './project-id.js';
 export type * from './model.js';
