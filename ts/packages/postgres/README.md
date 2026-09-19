@@ -427,22 +427,36 @@ that snapshot is read whole even if retention deletes it a moment later, and one
 order and nothing else: not protocol chronology, not producer time, and not the order a history
 is presented in. The sequence is a database identity, handed out before a run commits, so a run
 archived concurrently with a listing may become visible below a page boundary the listing has
-already passed; a page is a description of one snapshot, not a subscription. `getTestHistoryPage` pages ascending in the in-memory model's history order,
-producer instant then run id then execution id, through a keyset cursor rather than an offset.
-Ordering touches three columns and no others. `occurred_at_instant` holds exactly what the
-in-memory comparator reads the producer's clock to, to the millisecond, computed here rather
-than parsed by the database, which would otherwise keep the nanoseconds the protocol allows in
-the text. `run_id` and `execution_id` break its ties, and they are protocol identifiers, which
-are printable ASCII, so the declared `COLLATE "C"` byte order is exactly the code-unit order the
-comparator uses. The remaining identifier columns are declared `COLLATE "C"` for deterministic
-equality only; nothing orders by them.
+already passed; a page is a description of one snapshot, not a subscription.
 
-One clock the protocol admits is not an instant any obvious parse produces: a leap second, and
-in principle a date or offset whose shape is legal and whose value is not. Both models read them
-through one shared function, so the durable order is the in-memory order whatever that function
-does: a leap second is the second it belongs to, and a string naming no instant at all takes the
-earliest position rather than an accidental one. Tightening the protocol to reject the latter
-would be a protocol decision, not a storage one, and is not taken here.
+`getTestHistoryPage` pages ascending in history order through a keyset cursor rather than an
+offset. History order is the producer timestamp's position, then run id, then execution id. It
+is the presentation order of a history, not a claim about global chronology: the timestamps come
+from different producers' clocks. The position comes from one primitive in the read model,
+`historyInstant`, which the in-memory history, the index writer, and therefore the order
+PostgreSQL pages in all use:
+
+- An ordinary timestamp is its instant to the millisecond, exactly as `Date.parse` reads it, so
+  every history that held only such timestamps keeps the order it always had.
+- A leap second (`23:59:60` UTC, the only second of 60 the validator admits) sorts after every
+  instant of the `23:59:59` before it and before the `00:00:00` after it, and leap-second
+  timestamps sort among themselves by their own milliseconds. One `timestamptz` cannot hold that
+  apart from the next second, so the position is a pair: `occurred_at_instant`, the last
+  millisecond of `23:59:59` for a leap second, and `occurred_at_leap`, 0 for an ordinary
+  timestamp and 1 plus the millisecond inside a leap second.
+- A string the validator refuses has no position and is refused rather than given one. None can
+  reach the index, because only validated runs are archived.
+
+This was a decision rather than a copy. The in-memory comparator used to be
+`Date.parse(a) - Date.parse(b)`, which is `NaN` for a leap second and therefore no order at all;
+building a durable index for it exposed that. The fix is in the read model, where history
+semantics live, not in the protocol: the wire format is unchanged.
+
+`run_id` and `execution_id` break ties. They are protocol identifiers, which are printable ASCII,
+so the declared `COLLATE "C"` byte order is exactly the code-unit order the comparator uses. The
+remaining identifier columns are declared `COLLATE "C"` for deterministic equality only; nothing
+orders by them. The instant is computed by the primitive, not parsed by the database, which
+would otherwise keep the nanoseconds the protocol allows in the text.
 
 The history key stays `(projectId, runner.name, historicalId)`. Producer name, display name,
 path, location, and tags are not part of it, and an execution with no historical id or no
@@ -488,8 +502,23 @@ ingestion takes the same row lock, so a rebuild and a re-ingestion of one run se
 run itself rather than colliding. A run a pass cannot index is named in `problems` and the pass
 carries on; its cursor moves past it, so a walk of the project finishes, and a pass started
 without a cursor comes back to it. Nothing is scheduled, nothing runs in
-the background, and no rebuild ever reads a stale index as its input. Re-ingesting a run whose
-index is missing or stale repairs it and answers `already_present` with `queryIndexRebuilt`.
+the background, and no rebuild ever reads a stale index as its input.
+
+Re-ingesting a run whose index is missing or stale repairs it and answers `already_present` with
+`queryIndexRebuilt`. The repair follows one rule, and it is part of this store's contract:
+
+> An already-present run's query index is always derived from the archive's stored raw source,
+> never from an idempotent physical representation offered later.
+
+The content fingerprint deliberately ignores identical duplicate lines, so two directories can
+be the same run and still differ in validator facts such as `duplicateEvents`. Only the one that
+was archived first is this run. So the new run's index is written from the source this call is
+archiving, while an existing run's is rebuilt, under its row lock, by replaying its stored lines
+through the validator and the projector. That holds on the advisory path and on the same-content
+branch of the archive transaction alike. An archive whose own source no longer replays fails the
+re-ingestion with `ReplayMismatchError`, rather than being indexed from the copy that was offered.
+The source, the first ingestion's provenance, the fingerprint, and an established expiry are never
+touched.
 
 `verifyIndexedRun` replays one indexed run and compares what it projects with what is stored. It
 is an operator's tool for looking for drift deliberately; the ordinary freshness contract is the
@@ -562,6 +591,19 @@ relations, and its own bytes, while a run that shares those bytes or was
 ingested to be kept still replays, projects, and resolves every
 attachment.
 
+The query suite archives the whole fixture corpus and compares every history, page by page with
+pages small enough to straddle `repeatEach` and the identifier tie-breakers, and every flakiness
+summary, with the in-memory read model. It also covers identifiers a locale collation would order
+differently, a leap-second boundary whose run ids run against the clock, the completeness gate,
+staleness by version and by fingerprint, a destructive rebuild after every derived row is
+deleted, drift in any column including the ordering position, retention cascade, project
+isolation, a project id far longer than 128 characters, the canonical attempt statuses as the
+only final statuses a row can hold, rebuilds racing each other, re-ingestion and retention, and
+canonical-source repair: a run archived with and without an identical duplicate line, its index
+removed or made stale, and the other physical form offered, on both repair paths. In every case
+the repaired index has the archived form's duplicate count and agrees with a replay of the
+archive.
+
 ## Limitations
 
 - No search of any kind: no display-name, tag, label, or failure-message
@@ -574,8 +616,11 @@ attachment.
   across several of them is not one snapshot: each page is consistent in
   itself, and a run archived or deleted between pages shows up as a
   difference between them.
-- A project id is at most 128 characters here, because the derived
-  indexes are keyed by it.
+- A project id is opaque and non-empty, the same contract the read
+  model and the store have, and the query surface adds nothing to it.
+  PostgreSQL bounds a btree entry at about 2.7 kB, which has bounded
+  every table keyed by project id since migration 1; that is a physical
+  ceiling, far past any real project id, and not a supported limit.
 - No update and no incremental ingestion; a run is archived once,
   complete, and afterwards only deleted. An established expiry cannot be
   changed, and there is no hold, extension, or policy model.
@@ -583,9 +628,11 @@ attachment.
   of its own and no audit trail beyond the report it returns.
 - The exact number of retention-unmanaged runs is computed on every pass,
   which scans the archive.
-- No relational tables for sessions, executions, attempts, history, or
-  flakiness; the archive plus the projector is the model. Rebuildable
-  indexes may be added later if queries need them.
+- No relational tables for sessions, attempts, steps, scope failures,
+  attachment references, or failures; the archive plus the projector is
+  the model. The query indexes hold listing facts and history
+  occurrences only, and are rebuilt from the archive rather than kept as
+  truth.
 - One blob provider, the local filesystem store; one database provider,
   exercised against PostgreSQL 16; no generic persistence layer.
 - A hash is global across projects: whether a blob exists is not a

@@ -127,6 +127,17 @@ by the producer clock of the first attempt, then run id, then execution
 id. Producer clocks are not a global ordering across machines; the
 tie-breakers make the order deterministic, not authoritative.
 
+The clock is read by one exported primitive, `historyInstant`, which the
+durable query index uses as well. An ordinary timestamp is its instant
+to the millisecond, as `Date.parse` reads it. A leap second
+(`23:59:60` UTC), which `Date.parse` cannot read, sorts after every
+instant of the second before it and before the `00:00:00` after it, and
+by its own milliseconds among other leap seconds. A timestamp the
+validator refuses has no place in a history and is refused rather than
+given one. Earlier the comparator subtracted `Date.parse` results, which
+gave a leap second no order at all; the primitive fixes that without
+moving any other timestamp.
+
 ## Flakiness
 
 An execution is flaky when it has more than one attempt, its final attempt
