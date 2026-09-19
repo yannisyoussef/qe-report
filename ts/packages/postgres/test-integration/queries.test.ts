@@ -505,13 +505,43 @@ describe('completeness, staleness, and rebuild', () => {
     expect(rebuild.rebuilt).toBe(local.runs().length);
     expect(rebuild.skipped).toBe(0);
     expect(rebuild.problems).toEqual([]);
-    expect((await queries.getIndexStatus('P')).complete).toBe(true);
+    expect(await queries.getIndexStatus('P')).toMatchObject({
+      totalRuns: local.runs().length,
+      currentRuns: local.runs().length,
+      missingRuns: 0,
+      staleRuns: 0,
+      complete: true,
+    });
     expect(await wholeListing(queries, 'P')).toEqual(before.listing);
     expect(
       await Promise.all(
         historyKeys(local).map((k) => wholeHistory(queries, 'P', k.runnerName, k.historicalId)),
       ),
     ).toEqual(before.histories);
+    // And not merely what it was before: what the in-memory model says, page by page, for every
+    // history and every flakiness summary, with every run agreeing with a replay of its source.
+    for (const k of historyKeys(local)) {
+      const label = `${k.runnerName}/${k.historicalId}`;
+      expect(await wholeHistory(queries, 'P', k.runnerName, k.historicalId, 2), label).toEqual(
+        local.getTestHistory('P', k.runnerName, k.historicalId).occurrences,
+      );
+      const flakiness = local.getFlakiness('P', k.runnerName, k.historicalId);
+      expect(await queries.getFlakinessSummary({ projectId: 'P', ...k }), label).toEqual({
+        projectId: 'P',
+        ...k,
+        totalOccurrences: flakiness.totalOccurrences,
+        flakyOccurrences: flakiness.flakyOccurrences,
+        everFlaky: flakiness.everFlaky,
+      });
+    }
+    for (const run of local.runs()) {
+      expect(await queries.verifyIndexedRun('P', run.runId), run.runId).toEqual({
+        projectId: 'P',
+        runId: run.runId,
+        agrees: true,
+        differences: [],
+      });
+    }
   });
 
   it('repairs a missing index through ordinary re-ingestion, without touching the archive', async () => {
