@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
+    "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm format:check && pnpm openapi:check && pnpm test",
     "test:equivalence": "pnpm --filter qe-report-equivalence run equivalence",
     "test:consumer-runs": "pnpm --filter qe-report-equivalence run consumer-runs",
     "test:read-model-junit": "pnpm --filter qe-report-read-model run test:junit-runs",
@@ -20,7 +20,11 @@
     "test:playwright-consumer": "pnpm --filter qe-report-playwright run test:consumer",
     "test:read-model-playwright": "pnpm --filter qe-report-read-model run test:playwright-runs",
     "test:postgres-playwright": "pnpm --filter qe-report-postgres run test:playwright-runs",
-    "test:postgres-integration": "pnpm --filter qe-report-postgres run test:integration"
+    "test:postgres-integration": "pnpm --filter qe-report-postgres run test:integration",
+    "openapi:check": "pnpm --filter qe-report-http-api run openapi:check",
+    "test:http-integration": "pnpm --filter qe-report-http-api run test:integration",
+    "test:http-junit": "pnpm --filter qe-report-http-api run test:junit-runs",
+    "test:http-playwright": "pnpm --filter qe-report-http-api run test:playwright-runs"
   },
   "devDependencies": {
     "@types/node": "24.13.4",
