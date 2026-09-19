@@ -288,4 +288,94 @@ COMMENT ON COLUMN qe_history_occurrences.index_version IS
   'The interpretation this row was written under, carried beside the run''s own so that a query filters stale rows out structurally rather than trusting a check made a statement earlier.';
 `,
   },
+  {
+    version: 5,
+    name: 'transport-auth-and-project-id-bound',
+    sql: `
+-- The project id contract (well-formed Unicode, no U+0000, at most 512 bytes of UTF-8) is only
+-- enforceable by a UTF-8 database: it is what rejects malformed text and U+0000 in the first place.
+DO $$
+BEGIN
+  IF current_setting('server_encoding') <> 'UTF8' THEN
+    RAISE EXCEPTION 'migration 5: the database encoding is %, and qe-report requires UTF8 so that a project id is well-formed Unicode', current_setting('server_encoding');
+  END IF;
+END
+$$;
+
+-- An archived project id beyond the bound is reported, never truncated, hashed, or renamed.
+DO $$
+DECLARE
+  offending bigint;
+BEGIN
+  SELECT count(*) INTO offending FROM qe_runs WHERE octet_length(project_id) > 512;
+  IF offending > 0 THEN
+    RAISE EXCEPTION 'migration 5: % archived runs have a project id longer than 512 bytes of UTF-8', offending
+      USING HINT = 'Reconcile those runs (re-archive them under a conforming project id, or delete them) and run the migration again; nothing was changed.';
+  END IF;
+END
+$$;
+
+-- The canonical archive is the storage authority for the bound: every derived and relation table
+-- references a run by this key.
+ALTER TABLE qe_runs
+  ADD CONSTRAINT qe_runs_project_id_bound_check CHECK (octet_length(project_id) <= 512);
+
+-- Project-scoped machine credentials. A key is found by its public id and proven by a secret
+-- whose SHA-256 alone is stored; nothing here can give the secret back. No project table exists:
+-- a key may be issued for a project that holds no run yet.
+CREATE TABLE qe_project_api_keys (
+  public_id      text        COLLATE "C" NOT NULL,
+  project_id     text        NOT NULL,
+  secret_sha256  bytea       NOT NULL,
+  scopes         text[]      NOT NULL,
+  label          text,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  expires_at     timestamptz,
+  revoked_at     timestamptz,
+  CONSTRAINT qe_project_api_keys_pkey PRIMARY KEY (public_id),
+  CONSTRAINT qe_project_api_keys_public_id_check CHECK (public_id ~ '^[a-z2-7]{16}$'),
+  CONSTRAINT qe_project_api_keys_project_id_check
+    CHECK (project_id <> '' AND octet_length(project_id) <= 512),
+  CONSTRAINT qe_project_api_keys_secret_check CHECK (length(secret_sha256) = 32),
+  CONSTRAINT qe_project_api_keys_scopes_check CHECK (
+    scopes = ARRAY['runs:read']::text[]
+    OR scopes = ARRAY['runs:write']::text[]
+    OR scopes = ARRAY['runs:read', 'runs:write']::text[]),
+  CONSTRAINT qe_project_api_keys_label_check
+    CHECK (label IS NULL OR (label <> '' AND char_length(label) <= 200)),
+  CONSTRAINT qe_project_api_keys_revoked_check
+    CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+);
+
+COMMENT ON TABLE qe_project_api_keys IS
+  'Project-scoped machine credentials. The credential alone determines the project a request acts on; no request names one. Issued and revoked by an operator, never over HTTP.';
+COMMENT ON COLUMN qe_project_api_keys.public_id IS
+  'The lookup handle carried in the token: 80 random bits, lower-case base32. Not a secret.';
+COMMENT ON COLUMN qe_project_api_keys.secret_sha256 IS
+  'SHA-256 of the 256 random bits of secret. The secret itself, the token, and any header carrying it are never stored.';
+COMMENT ON COLUMN qe_project_api_keys.scopes IS
+  'runs:read, runs:write, or both, in that order. There is no other scope, no wildcard, and no administrative scope.';
+
+-- What a key is for never changes: another project or other scopes are another key.
+CREATE FUNCTION qe_project_api_keys_immutable() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF NEW.public_id IS DISTINCT FROM OLD.public_id
+     OR NEW.project_id IS DISTINCT FROM OLD.project_id
+     OR NEW.secret_sha256 IS DISTINCT FROM OLD.secret_sha256
+     OR NEW.scopes IS DISTINCT FROM OLD.scopes
+     OR NEW.label IS DISTINCT FROM OLD.label
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+     OR (OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at) THEN
+    RAISE EXCEPTION 'an API key is immutable except for being revoked, once';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+CREATE TRIGGER qe_project_api_keys_immutable_trigger
+  BEFORE UPDATE ON qe_project_api_keys
+  FOR EACH ROW EXECUTE FUNCTION qe_project_api_keys_immutable();
+`,
+  },
 ];

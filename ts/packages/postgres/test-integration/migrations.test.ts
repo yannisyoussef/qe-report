@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { MIGRATION_LOCK_KEY, migrate, migrationChecksum } from '../src/migrate.js';
+import { MIGRATION_LOCK_KEY, migrate, migrationChecksum, schemaStatus } from '../src/migrate.js';
 import { MIGRATIONS } from '../src/migrations.js';
 import pg from 'pg';
 import { TestPostgres, applyThrough, waitFor } from './support.js';
@@ -27,6 +27,7 @@ describe('migrations on PostgreSQL 16', () => {
     expect(tables.rows.map((r) => r.table_name)).toEqual([
       'qe_blobs',
       'qe_history_occurrences',
+      'qe_project_api_keys',
       'qe_run_blobs',
       'qe_run_query_index',
       'qe_run_retention',
@@ -74,7 +75,7 @@ describe('migrations on PostgreSQL 16', () => {
   });
 
   it('refuse to continue when an applied migration has a different checksum', async () => {
-    for (const version of [1, 2, 3, 4]) {
+    for (const version of MIGRATIONS.map((m) => m.version)) {
       const db = await pgTest.emptyDatabase('checksum');
       await migrate(db.pool);
       await db.pool.query('UPDATE qe_schema_migrations SET checksum = $1 WHERE version = $2', [
@@ -112,10 +113,12 @@ describe('migrations on PostgreSQL 16', () => {
       [2, true],
       [3, true],
       [4, true],
+      [5, true],
     ]);
     expect(await tableNames(db.pool)).toEqual([
       'qe_blobs',
       'qe_history_occurrences',
+      'qe_project_api_keys',
       'qe_run_blobs',
       'qe_run_query_index',
       'qe_run_retention',
@@ -216,7 +219,8 @@ describe('migrations on PostgreSQL 16', () => {
           `SELECT conname FROM pg_constraint
             WHERE conrelid IN ('qe_runs'::regclass, 'qe_run_source_lines'::regclass, 'qe_blobs'::regclass,
                                'qe_run_blobs'::regclass, 'qe_run_retention'::regclass,
-                               'qe_run_query_index'::regclass, 'qe_history_occurrences'::regclass)
+                               'qe_run_query_index'::regclass, 'qe_history_occurrences'::regclass,
+                               'qe_project_api_keys'::regclass)
             ORDER BY conname`,
         )
       ).rows.map((r) => r.conname);
@@ -241,6 +245,11 @@ describe('migrations on PostgreSQL 16', () => {
         'qe_history_occurrences_pkey',
         'qe_history_occurrences_run_fkey',
         'qe_history_occurrences_stability_check',
+        'qe_runs_project_id_bound_check',
+        'qe_project_api_keys_pkey',
+        'qe_project_api_keys_project_id_check',
+        'qe_project_api_keys_scopes_check',
+        'qe_project_api_keys_secret_check',
       ]),
     );
     // What a run takes with it, and what it must not: the blob catalog is global and stays.
@@ -317,7 +326,7 @@ describe('upgrading a database that stopped earlier', () => {
     }
   };
 
-  for (const from of [1, 2, 3]) {
+  for (const from of [1, 2, 3, 4]) {
     it(`brings a database at migration ${from} up to the current schema`, async () => {
       const db = await pgTest.emptyDatabase(`from_v${from}`);
       await applyThrough(db.pool, from);
@@ -329,6 +338,7 @@ describe('upgrading a database that stopped earlier', () => {
       expect(await tableNames(db.pool)).toEqual([
         'qe_blobs',
         'qe_history_occurrences',
+        'qe_project_api_keys',
         'qe_run_blobs',
         'qe_run_query_index',
         'qe_run_retention',
@@ -349,4 +359,155 @@ describe('upgrading a database that stopped earlier', () => {
       expect((await migrate(db.pool)).every((m) => !m.appliedNow)).toBe(true);
     });
   }
+});
+
+describe('migration 5: the project id bound and project-scoped keys', () => {
+  /** Inserts a bare run row under a project id; the table's own checks decide whether it fits. */
+  const insertRun = (pool: pg.Pool, projectId: string, runId = 'run-1'): Promise<unknown> =>
+    pool.query(
+      `INSERT INTO qe_runs (project_id, run_id, source_locator, content_fingerprint,
+         fingerprint_version, protocol_versions, source_line_count, source_attachments_verified,
+         validation_summary)
+       VALUES ($1, $2, '/gone', $3, 1, '{0.3.0}', 1, true, '{}'::jsonb)`,
+      [projectId, runId, 'a'.repeat(64)],
+    );
+
+  it('bounds an archived project id at 512 bytes of UTF-8, counted as bytes', async () => {
+    const db = await pgTest.database('project_bound');
+    const twoByte = String.fromCodePoint(0xe9);
+    await insertRun(db.pool, 'x'.repeat(512));
+    await insertRun(db.pool, twoByte.repeat(256));
+    await expect(insertRun(db.pool, 'x'.repeat(513))).rejects.toThrow(
+      /qe_runs_project_id_bound_check/u,
+    );
+    // 257 characters, 514 bytes: the character count would have let it through.
+    await expect(insertRun(db.pool, twoByte.repeat(257))).rejects.toThrow(
+      /qe_runs_project_id_bound_check/u,
+    );
+    await expect(insertRun(db.pool, '')).rejects.toThrow(/qe_runs_project_id_check/u);
+  });
+
+  it('refuses to migrate an archive holding a project id past the bound, and changes nothing', async () => {
+    const db = await pgTest.emptyDatabase('project_bound_upgrade');
+    await applyThrough(db.pool, 4);
+    await insertRun(db.pool, 'y'.repeat(600));
+    await insertRun(db.pool, 'fine', 'run-2');
+    await expect(migrate(db.pool)).rejects.toThrow(
+      /migration 5: 1 archived runs have a project id longer than 512 bytes/u,
+    );
+    const recorded = await db.pool.query<{ version: number }>(
+      'SELECT version FROM qe_schema_migrations ORDER BY version',
+    );
+    expect(recorded.rows.map((r) => r.version)).toEqual([1, 2, 3, 4]);
+    expect(await tableNames(db.pool)).not.toContain('qe_project_api_keys');
+    const kept = await db.pool.query<{ project_id: string }>(
+      'SELECT project_id FROM qe_runs ORDER BY run_id',
+    );
+    expect(kept.rows.map((r) => r.project_id)).toEqual(['y'.repeat(600), 'fine']);
+    expect((await schemaStatus(db.pool)).problems).toEqual(['migration 5 is not applied']);
+    // Once the operator reconciles it, the same migration goes through.
+    await db.pool.query(`DELETE FROM qe_runs WHERE run_id = 'run-1'`);
+    expect((await migrate(db.pool)).filter((m) => m.appliedNow).map((m) => m.version)).toEqual([5]);
+  });
+
+  it('keeps a key row to its declared shape and immutable except for one revocation', async () => {
+    const db = await pgTest.database('api_key_table');
+    const digest = Buffer.alloc(32, 7);
+    const insert = (values: {
+      publicId?: string;
+      projectId?: string;
+      secret?: Buffer;
+      scopes?: string[];
+      label?: string | null;
+    }): Promise<unknown> =>
+      db.pool.query(
+        `INSERT INTO qe_project_api_keys (public_id, project_id, secret_sha256, scopes, label)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          values.publicId ?? 'abcdefghijklmnop',
+          values.projectId ?? 'P',
+          values.secret ?? digest,
+          values.scopes ?? ['runs:read'],
+          values.label ?? null,
+        ],
+      );
+    await insert({});
+    await insert({ publicId: 'bbbbbbbbbbbbbbbb', scopes: ['runs:write'] });
+    await insert({ publicId: 'cccccccccccccccc', scopes: ['runs:read', 'runs:write'] });
+    await insert({ publicId: 'dddddddddddddddd', projectId: 'z'.repeat(512) });
+    const refused: [Parameters<typeof insert>[0], RegExp][] = [
+      [{ publicId: 'eeeeeeeeeeeeeeee', scopes: [] }, /scopes_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', scopes: ['runs:write', 'runs:read'] }, /scopes_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', scopes: ['runs:read', 'runs:read'] }, /scopes_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', scopes: ['*'] }, /scopes_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', scopes: ['runs:admin'] }, /scopes_check/u],
+      [{ publicId: 'EEEEEEEEEEEEEEEE' }, /public_id_check/u],
+      [{ publicId: 'eeee' }, /public_id_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeee1' }, /public_id_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', projectId: '' }, /project_id_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', projectId: 'z'.repeat(513) }, /project_id_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', secret: Buffer.alloc(31) }, /secret_check/u],
+      [{ publicId: 'eeeeeeeeeeeeeeee', label: '' }, /label_check/u],
+      [{ publicId: 'abcdefghijklmnop' }, /qe_project_api_keys_pkey/u],
+    ];
+    for (const [values, error] of refused) {
+      await expect(insert(values), JSON.stringify(values)).rejects.toThrow(error);
+    }
+    for (const change of [
+      `project_id = 'Q'`,
+      `scopes = ARRAY['runs:read', 'runs:write']`,
+      `secret_sha256 = '\\x${'00'.repeat(32)}'::bytea`,
+      `expires_at = now()`,
+      `label = 'renamed'`,
+    ]) {
+      await expect(
+        db.pool.query(
+          `UPDATE qe_project_api_keys SET ${change} WHERE public_id = 'abcdefghijklmnop'`,
+        ),
+        change,
+      ).rejects.toThrow(/immutable/u);
+    }
+    await db.pool.query(
+      `UPDATE qe_project_api_keys SET revoked_at = now() WHERE public_id = 'abcdefghijklmnop'`,
+    );
+    await expect(
+      db.pool.query(
+        `UPDATE qe_project_api_keys SET revoked_at = NULL WHERE public_id = 'abcdefghijklmnop'`,
+      ),
+    ).rejects.toThrow(/immutable/u);
+  });
+
+  it('reports whether the schema is current without changing it', async () => {
+    const db = await pgTest.emptyDatabase('schema_status');
+    expect(await schemaStatus(db.pool)).toMatchObject({
+      current: false,
+      appliedVersions: [],
+      problems: ['the database has never been migrated'],
+    });
+    expect(await tableNames(db.pool)).toEqual([]);
+    await applyThrough(db.pool, 3);
+    expect(await schemaStatus(db.pool)).toMatchObject({
+      current: false,
+      appliedVersions: [1, 2, 3],
+      problems: ['migration 4 is not applied', 'migration 5 is not applied'],
+    });
+    await migrate(db.pool);
+    const current = await schemaStatus(db.pool);
+    expect(current).toEqual({
+      current: true,
+      expectedVersion: 5,
+      appliedVersions: [1, 2, 3, 4, 5],
+      problems: [],
+    });
+    await db.pool.query(`UPDATE qe_schema_migrations SET checksum = $1 WHERE version = 2`, [
+      '0'.repeat(64),
+    ]);
+    await db.pool.query(
+      `INSERT INTO qe_schema_migrations (version, name, checksum) VALUES (6, 'future', 'x')`,
+    );
+    expect((await schemaStatus(db.pool)).problems).toEqual([
+      'migration 2 was applied with a different checksum',
+      'migration 6 is applied but unknown to this code',
+    ]);
+  });
 });

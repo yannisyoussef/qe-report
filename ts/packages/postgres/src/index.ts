@@ -1,4 +1,4 @@
-export { migrate, type AppliedMigration } from './migrate.js';
+export { migrate, schemaStatus, type AppliedMigration, type SchemaStatus } from './migrate.js';
 export { MAINTENANCE_LOCK_KEY, MaintenanceBusyError } from './locks.js';
 export {
   RetentionMaintenance,

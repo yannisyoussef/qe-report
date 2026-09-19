@@ -106,3 +106,58 @@ export async function migrate(pool: Pool): Promise<readonly AppliedMigration[]> 
     else client.release(broken);
   }
 }
+
+/** Whether a database holds exactly the schema this code was built for. */
+export interface SchemaStatus {
+  /** True when every migration this code knows is applied with its checksum, and nothing else is. */
+  readonly current: boolean;
+  /** The highest version this code defines. */
+  readonly expectedVersion: number;
+  /** The versions recorded in the database, ascending; empty when it was never migrated. */
+  readonly appliedVersions: readonly number[];
+  /** What is missing, changed, or unknown, one sentence each. */
+  readonly problems: readonly string[];
+}
+
+/**
+ * Reads the migration record without changing anything: a server checks it at startup and
+ * readiness instead of migrating, because changing a schema is an operator's decision, not a
+ * side effect of a process starting.
+ */
+export async function schemaStatus(pool: Pool): Promise<SchemaStatus> {
+  const expectedVersion = Math.max(...MIGRATIONS.map((m) => m.version));
+  const exists = await pool.query<{ present: boolean }>(
+    `SELECT to_regclass('qe_schema_migrations') IS NOT NULL AS present`,
+  );
+  if (exists.rows[0]?.present !== true) {
+    return {
+      current: false,
+      expectedVersion,
+      appliedVersions: [],
+      problems: ['the database has never been migrated'],
+    };
+  }
+  const rows = await pool.query<{ version: number; checksum: string }>(
+    'SELECT version, checksum FROM qe_schema_migrations ORDER BY version',
+  );
+  const recorded = new Map(rows.rows.map((r) => [r.version, r.checksum]));
+  const problems: string[] = [];
+  for (const migration of MIGRATIONS) {
+    const checksum = recorded.get(migration.version);
+    if (checksum === undefined) problems.push(`migration ${migration.version} is not applied`);
+    else if (checksum !== migrationChecksum(migration)) {
+      problems.push(`migration ${migration.version} was applied with a different checksum`);
+    }
+  }
+  for (const version of recorded.keys()) {
+    if (!MIGRATIONS.some((m) => m.version === version)) {
+      problems.push(`migration ${version} is applied but unknown to this code`);
+    }
+  }
+  return {
+    current: problems.length === 0,
+    expectedVersion,
+    appliedVersions: [...recorded.keys()],
+    problems,
+  };
+}
