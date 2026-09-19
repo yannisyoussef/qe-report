@@ -1,5 +1,6 @@
 import { discoverRunDirectories } from './discovery.js';
 import { projectRunDirectory } from './ingest.js';
+import { compareHistoryOccurrences } from './history-order.js';
 import { checkProjectId } from './project-id.js';
 import type {
   Blob,
@@ -258,43 +259,6 @@ function compare(a: string, b: string): number {
 
 function compareSources(a: BlobSource | BlobReference, b: BlobSource | BlobReference): number {
   return compare(a.projectId, b.projectId) || compare(a.runId, b.runId);
-}
-
-/**
- * The instant a history orders by, in milliseconds since the epoch: the producer's clock as the
- * platform reads it. A leap second is a real instant that `Date.parse` refuses, so it is read as
- * the second it belongs to. A string whose shape the protocol admits but that names no instant
- * at all, such as a thirteenth month or an impossible offset, has no position of its own and
- * takes the earliest one: a fixed answer, rather than an order that depends on which comparison
- * happened first.
- *
- * Exported because a durable index of these occurrences has to order them by the same number.
- * One definition, so that the two cannot drift apart.
- */
-export function historyInstantMs(occurredAt: string): number {
-  const parsed = Date.parse(occurredAt);
-  if (Number.isFinite(parsed)) return parsed;
-  // `23:59:60` is the one second the clock really had that `Date.parse` will not read.
-  const leap = occurredAt.replace(/T(\d{2}):(\d{2}):60/u, 'T$1:$2:59');
-  if (leap !== occurredAt) {
-    const second = Date.parse(leap);
-    if (Number.isFinite(second)) return second + 1000;
-  }
-  return 0;
-}
-
-/**
- * History order: producer instant, then run id, then execution id, both compared by code unit.
- * It is the presentation order of a history, not a claim about global chronology: the instants
- * come from different producers' clocks. Exported because a durable index has to reproduce
- * exactly this order and nothing else.
- */
-export function compareHistoryOccurrences(a: ExecutionOccurrence, b: ExecutionOccurrence): number {
-  return (
-    historyInstantMs(a.occurredAt) - historyInstantMs(b.occurredAt) ||
-    compare(a.runId, b.runId) ||
-    compare(a.executionId, b.executionId)
-  );
 }
 
 /**
