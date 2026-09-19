@@ -2,8 +2,8 @@ import type { Multipart } from '@fastify/multipart';
 import type { FastifyRequest } from 'fastify';
 import type { Readable } from 'node:stream';
 import type { PersistResult, PostgresRunStore } from 'qe-report-postgres';
-import { historyInstant } from 'qe-report-read-model';
 import { diagnosticDto, ingestionDto } from './dto.js';
+import { OPERATIONAL_INSTANT_GRAMMAR, parseOperationalInstant } from './instants.js';
 import type { TransportLimits } from './limits.js';
 import { Problem } from './problems.js';
 import { encodeRunRef } from './run-ref.js';
@@ -222,17 +222,16 @@ type Part =
     };
 
 /**
- * The expiry, an RFC 3339 instant with an explicit offset, read by the same timestamp rules the
- * protocol uses. Nothing else decides retention: not the time now, the key, or the run.
+ * The expiry the caller states, to the millisecond it states. It is an operational instant, not
+ * a protocol timestamp: a leap second or a finer fraction is refused rather than read as some
+ * earlier instant, because retention must never delete a run before the time it was given.
+ * Nothing else decides retention: not the time now, the key, or the run.
  */
 function parseExpiry(part: Extract<Part, { type: 'field' }>): Date {
-  const refused = new Problem(
-    'BAD_REQUEST',
-    'expiresAt must be an RFC 3339 instant with an explicit offset, such as 2027-01-01T00:00:00Z',
-  );
+  const refused = new Problem('BAD_REQUEST', `expiresAt must be ${OPERATIONAL_INSTANT_GRAMMAR}`);
   if (part.valueTruncated || typeof part.value !== 'string') throw refused;
   try {
-    return new Date(historyInstant(part.value).epochMs);
+    return parseOperationalInstant(part.value, 'expiresAt');
   } catch {
     throw refused;
   }

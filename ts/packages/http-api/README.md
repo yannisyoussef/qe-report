@@ -62,6 +62,7 @@ Keys are managed by the operator command, never over HTTP:
 qe-report-admin key create --project web --scope runs:write --scope runs:read --label "ci main"
 # prints qer_k1_<publicId>_<secret> once, on standard output; it cannot be recovered
 qe-report-admin key create --project web --scope runs:read --expires-at 2027-01-01T00:00:00Z
+# --expires-at takes the same operational instant a run's expiresAt does
 qe-report-admin key revoke --public-id <publicId>
 ```
 
@@ -88,7 +89,7 @@ server path:
 
 | Part         | Kind                                                         | Count       |
 | ------------ | ------------------------------------------------------------ | ----------- |
-| `expiresAt`  | text: an RFC 3339 instant with an explicit offset            | exactly one |
+| `expiresAt`  | text: an operational instant (below)                         | exactly one |
 | `events`     | file: one NDJSON protocol event stream, one session per part | one or more |
 | `attachment` | file: attachment bytes                                       | any         |
 
@@ -100,6 +101,24 @@ curl --fail-with-body -H "Authorization: Bearer $QE_REPORT_TOKEN" \
   -F attachment=@qe-report/runs/run-42/attachments/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 \
   https://qe-report.example/v1/runs
 ```
+
+### Operational instants
+
+A lifecycle time a caller states, a run's `expiresAt` and a key's `--expires-at`, is an
+**operational instant**: RFC 3339, an explicit `Z` or numeric offset, seconds `00` to `59`, and
+at most three fractional digits.
+
+```
+2027-01-01T00:00:00Z   2027-01-01T00:00:00.123Z   2027-01-01T01:00:00+01:00
+```
+
+It is deliberately narrower than a protocol timestamp, and one parser applies it to both fields.
+A protocol `occurredAt` may carry nanoseconds, which a millisecond deadline would truncate, and
+a leap second, which the read model orders as an instant plus a place inside that second. Read
+either as a deadline and the deadline moves earlier, so retention would delete a run before the
+time its owner asked for. Both are refused with `400` instead, and nothing is archived. Protocol
+timestamps are untouched: `occurredAt` keeps every form protocol 0.3 accepts, and history keeps
+its leap-second order.
 
 The server writes each part, byte for byte and in arrival order, into a fresh directory it
 names itself, `<staging root>/<request id>/events/000001.ndjson` and so on. It never uses a

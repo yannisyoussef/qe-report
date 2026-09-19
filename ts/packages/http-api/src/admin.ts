@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util';
 import pg from 'pg';
+import { parseOperationalInstant } from './instants.js';
 import {
   API_KEY_SCOPES,
   PostgresApiKeys,
@@ -15,7 +16,7 @@ export const USAGE = `qe-report-admin: operator actions against DATABASE_URL; no
   qe-report-admin schema
       Reports whether the schema is current, without changing it.
   qe-report-admin key create --project <projectId> --scope <runs:read|runs:write> [--scope ...]
-                             [--label <text>] [--expires-at <RFC 3339 instant>]
+                             [--label <text>] [--expires-at <RFC 3339 instant, offset, <=ms>]
       Issues a project-scoped API key and prints its bearer token, once, on standard output.
   qe-report-admin key revoke --public-id <publicId>
       Revokes a key at once.
@@ -78,11 +79,11 @@ export async function runAdmin(
       }
       let expiresAt: Date | undefined;
       if (values['expires-at'] !== undefined) {
-        const text = values['expires-at'];
-        if (!/(Z|[+-]\d{2}:\d{2})$/u.test(text) || !Number.isFinite(Date.parse(text))) {
-          throw new UsageError('--expires-at must be an RFC 3339 instant with an explicit offset');
+        try {
+          expiresAt = parseOperationalInstant(values['expires-at'], '--expires-at');
+        } catch (e) {
+          throw new UsageError((e as Error).message);
         }
-        expiresAt = new Date(text);
       }
       const created = await new PostgresApiKeys(pool).create({
         projectId: values.project,

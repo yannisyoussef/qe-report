@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { ApiKeyPrincipal } from 'qe-report-postgres';
+import { historyInstant } from 'qe-report-read-model';
 import {
   DEFAULT_TRANSPORT_LIMITS,
   createQeReportApi,
   decodeRunRef,
   encodeRunRef,
+  NotAnInstant,
+  parseOperationalInstant,
   resolveLimits,
   type QeReportApiOptions,
 } from '../src/index.js';
@@ -139,6 +142,74 @@ describe('cursors', () => {
     ]) {
       expect(() => decodeHistoryCursor('A', 'pw', 'h', doc(bad))).toThrow(Problem);
     }
+  });
+});
+
+describe('operational instants', () => {
+  it('takes exactly the instants a deadline may be, to the millisecond it states', () => {
+    const accepted: [string, string][] = [
+      ['2027-01-01T00:00:00Z', '2027-01-01T00:00:00.000Z'],
+      ['2027-01-01T00:00:00.1Z', '2027-01-01T00:00:00.100Z'],
+      ['2027-01-01T00:00:00.12Z', '2027-01-01T00:00:00.120Z'],
+      ['2027-01-01T00:00:00.123Z', '2027-01-01T00:00:00.123Z'],
+      ['2027-01-01T01:00:00+01:00', '2027-01-01T00:00:00.000Z'],
+      ['2026-12-31T18:29:59.999-05:30', '2026-12-31T23:59:59.999Z'],
+      ['2024-02-29T23:59:59Z', '2024-02-29T23:59:59.000Z'],
+      ['2027-01-01T00:00:00+23:59', '2026-12-31T00:01:00.000Z'],
+      ['1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'],
+    ];
+    for (const [text, instant] of accepted) {
+      const at = parseOperationalInstant(text, 'expiresAt');
+      expect(at.toISOString(), text).toBe(instant);
+      // Exactly what was asked for: no fraction of a millisecond is lost or invented.
+      expect(at.getTime() % 1, text).toBe(0);
+    }
+  });
+
+  it('refuses a leap second, finer precision, and anything that is not an instant', () => {
+    const refused = [
+      // A protocol timestamp this would have to move to fit a Date.
+      '2016-12-31T23:59:60Z',
+      '2016-12-31T23:59:60.500Z',
+      '2017-01-01T00:59:60+01:00',
+      '2027-01-01T00:00:00.1234Z',
+      '2027-01-01T00:00:00.123456789Z',
+      // No offset at all.
+      '2027-01-01T00:00:00',
+      '2027-01-01T00:00:00.123',
+      // Not a calendar date, not a clock, not an offset.
+      '2027-02-30T00:00:00Z',
+      '2027-13-01T00:00:00Z',
+      '2026-02-29T00:00:00Z',
+      '2027-01-01T24:00:00Z',
+      '2027-01-01T00:60:00Z',
+      '2027-01-01T00:00:00+24:00',
+      '2027-01-01T00:00:00+00:60',
+      // Not the grammar.
+      '',
+      '2027-01-01',
+      '2027-01-01 00:00:00Z',
+      '2027-01-01t00:00:00z',
+      ' 2027-01-01T00:00:00Z',
+      '2027-01-01T00:00:00Z ',
+      '2027-01-01T00:00:00.Z',
+      String(Date.now()),
+    ];
+    for (const text of refused) {
+      expect(() => parseOperationalInstant(text, 'expiresAt'), JSON.stringify(text)).toThrow(
+        NotAnInstant,
+      );
+    }
+    for (const value of [undefined, null, 7, new Date(), {}]) {
+      expect(() => parseOperationalInstant(value, 'expiresAt')).toThrow(NotAnInstant);
+    }
+    // The message names the field it refused and what it wanted.
+    expect(() => parseOperationalInstant('nope', '--expires-at')).toThrow(/^--expires-at must be/u);
+    // A protocol timestamp keeps its own, wider contract: this parser is not that one.
+    expect(() => historyInstant('2016-12-31T23:59:60Z')).not.toThrow();
+    expect(historyInstant('2027-01-01T00:00:00.123456789Z').epochMs).toBe(
+      Date.parse('2027-01-01T00:00:00.123Z'),
+    );
   });
 });
 
