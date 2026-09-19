@@ -26,7 +26,9 @@ describe('migrations on PostgreSQL 16', () => {
     );
     expect(tables.rows.map((r) => r.table_name)).toEqual([
       'qe_blobs',
+      'qe_history_occurrences',
       'qe_run_blobs',
+      'qe_run_query_index',
       'qe_run_retention',
       'qe_run_source_lines',
       'qe_runs',
@@ -72,7 +74,7 @@ describe('migrations on PostgreSQL 16', () => {
   });
 
   it('refuse to continue when an applied migration has a different checksum', async () => {
-    for (const version of [1, 2, 3]) {
+    for (const version of [1, 2, 3, 4]) {
       const db = await pgTest.emptyDatabase('checksum');
       await migrate(db.pool);
       await db.pool.query('UPDATE qe_schema_migrations SET checksum = $1 WHERE version = $2', [
@@ -109,10 +111,13 @@ describe('migrations on PostgreSQL 16', () => {
       [1, false],
       [2, true],
       [3, true],
+      [4, true],
     ]);
     expect(await tableNames(db.pool)).toEqual([
       'qe_blobs',
+      'qe_history_occurrences',
       'qe_run_blobs',
+      'qe_run_query_index',
       'qe_run_retention',
       'qe_run_source_lines',
       'qe_runs',
@@ -210,7 +215,8 @@ describe('migrations on PostgreSQL 16', () => {
         await pool.query<{ conname: string }>(
           `SELECT conname FROM pg_constraint
             WHERE conrelid IN ('qe_runs'::regclass, 'qe_run_source_lines'::regclass, 'qe_blobs'::regclass,
-                               'qe_run_blobs'::regclass, 'qe_run_retention'::regclass)
+                               'qe_run_blobs'::regclass, 'qe_run_retention'::regclass,
+                               'qe_run_query_index'::regclass, 'qe_history_occurrences'::regclass)
             ORDER BY conname`,
         )
       ).rows.map((r) => r.conname);
@@ -229,6 +235,12 @@ describe('migrations on PostgreSQL 16', () => {
         'qe_run_blobs_blob_fkey',
         'qe_run_retention_pkey',
         'qe_run_retention_run_fkey',
+        'qe_run_query_index_pkey',
+        'qe_run_query_index_run_fkey',
+        'qe_run_query_index_version_check',
+        'qe_history_occurrences_pkey',
+        'qe_history_occurrences_run_fkey',
+        'qe_history_occurrences_stability_check',
       ]),
     );
     // What a run takes with it, and what it must not: the blob catalog is global and stays.
@@ -240,14 +252,33 @@ describe('migrations on PostgreSQL 16', () => {
       `SELECT conname, confdeltype, convalidated FROM pg_constraint
         WHERE contype = 'f' AND conrelid IN ('qe_run_source_lines'::regclass,
                                              'qe_run_blobs'::regclass,
-                                             'qe_run_retention'::regclass)
+                                             'qe_run_retention'::regclass,
+                                             'qe_run_query_index'::regclass,
+                                             'qe_history_occurrences'::regclass)
         ORDER BY conname`,
     );
     expect(actions.rows).toEqual([
+      { conname: 'qe_history_occurrences_run_fkey', confdeltype: 'c', convalidated: true },
       { conname: 'qe_run_blobs_blob_fkey', confdeltype: 'a', convalidated: true },
       { conname: 'qe_run_blobs_run_fkey', confdeltype: 'c', convalidated: true },
+      { conname: 'qe_run_query_index_run_fkey', confdeltype: 'c', convalidated: true },
       { conname: 'qe_run_retention_run_fkey', confdeltype: 'c', convalidated: true },
       { conname: 'qe_run_source_lines_run_fkey', confdeltype: 'c', convalidated: true },
+    ]);
+    // The declared collation is what makes the durable history order the in-memory one.
+    const collations = await a.pool.query<{ attname: string; collname: string }>(
+      `SELECT a.attname, c.collname FROM pg_attribute a
+         JOIN pg_collation c ON c.oid = a.attcollation
+        WHERE a.attrelid = 'qe_history_occurrences'::regclass
+          AND a.attname IN ('project_id', 'run_id', 'execution_id', 'runner_name', 'historical_id')
+        ORDER BY a.attname`,
+    );
+    expect(collations.rows).toEqual([
+      { attname: 'execution_id', collname: 'C' },
+      { attname: 'historical_id', collname: 'C' },
+      { attname: 'project_id', collname: 'C' },
+      { attname: 'run_id', collname: 'C' },
+      { attname: 'runner_name', collname: 'C' },
     ]);
   });
 });
@@ -259,3 +290,63 @@ async function tableNames(pool: pg.Pool): Promise<string[]> {
   );
   return tables.rows.map((r) => r.table_name);
 }
+
+describe('upgrading a database that stopped earlier', () => {
+  /** A run row as each version shapes it, so an upgrade meets real rows rather than none. */
+  const seed = async (pool: pg.Pool, version: number): Promise<void> => {
+    const verified = version >= 2 ? 'source_attachments_verified' : 'attachments_verified';
+    await pool.query(
+      `INSERT INTO qe_runs (project_id, run_id, source_locator, content_fingerprint,
+         fingerprint_version, protocol_versions, source_line_count, ${verified}, validation_summary)
+       VALUES ('legacy', 'run-1', '/gone', $1, 1, '{0.3.0}', 1, true, '{}'::jsonb)`,
+      ['a'.repeat(64)],
+    );
+    await pool.query(
+      `INSERT INTO qe_run_source_lines (project_id, run_id, storage_ordinal, event_id, session_id,
+         sequence, event_type, protocol_version, canonical_sha256, disposition, raw_line,
+         source_file, source_line)
+       VALUES ('legacy', 'run-1', 0, 'e-1', 's', 1, 'session.started', '0.3.0', $1, 'accepted',
+               '{}', 'f', 1)`,
+      ['b'.repeat(64)],
+    );
+    if (version >= 3) {
+      await pool.query(
+        `INSERT INTO qe_run_retention (project_id, run_id, expires_at)
+         VALUES ('legacy', 'run-1', now())`,
+      );
+    }
+  };
+
+  for (const from of [1, 2, 3]) {
+    it(`brings a database at migration ${from} up to the current schema`, async () => {
+      const db = await pgTest.emptyDatabase(`from_v${from}`);
+      await applyThrough(db.pool, from);
+      await seed(db.pool, from);
+      const applied = await migrate(db.pool);
+      expect(applied.map((m) => [m.version, m.appliedNow])).toEqual(
+        MIGRATIONS.map((m) => [m.version, m.version > from]),
+      );
+      expect(await tableNames(db.pool)).toEqual([
+        'qe_blobs',
+        'qe_history_occurrences',
+        'qe_run_blobs',
+        'qe_run_query_index',
+        'qe_run_retention',
+        'qe_run_source_lines',
+        'qe_runs',
+        'qe_schema_migrations',
+      ]);
+      // Migration 4 indexes nothing: the archive is untouched and the derived tables are empty.
+      const counts = await db.pool.query<{ runs: string; lines: string; indexed: string }>(
+        `SELECT (SELECT count(*) FROM qe_runs)::text AS runs,
+                (SELECT count(*) FROM qe_run_source_lines)::text AS lines,
+                (SELECT count(*) FROM qe_run_query_index)::text AS indexed`,
+      );
+      expect(counts.rows[0]).toEqual({ runs: '1', lines: '1', indexed: '0' });
+      // The run keeps its expiry only if it ever had one; nothing is invented on the way up.
+      const retention = await db.pool.query('SELECT 1 FROM qe_run_retention');
+      expect(retention.rowCount).toBe(from >= 3 ? 1 : 0);
+      expect((await migrate(db.pool)).every((m) => !m.appliedNow)).toBe(true);
+    });
+  }
+});

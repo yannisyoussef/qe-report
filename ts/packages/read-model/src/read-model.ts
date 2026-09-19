@@ -1,5 +1,6 @@
 import { discoverRunDirectories } from './discovery.js';
 import { projectRunDirectory } from './ingest.js';
+import { compareHistoryOccurrences } from './history-order.js';
 import { checkProjectId } from './project-id.js';
 import type {
   Blob,
@@ -117,7 +118,7 @@ export class ReadModel {
     }
     const history = new Map<string, ExecutionOccurrence[]>();
     for (const run of accepted.values()) {
-      for (const occurrence of occurrencesOf(run)) {
+      for (const occurrence of historyOccurrencesOf(run)) {
         const key = historyKey(
           occurrence.projectId,
           occurrence.runnerName,
@@ -128,7 +129,7 @@ export class ReadModel {
         else list.push(occurrence);
       }
     }
-    for (const [key, list] of history) history.set(key, list.sort(compareOccurrences));
+    for (const [key, list] of history) history.set(key, list.sort(compareHistoryOccurrences));
     const frozenBlobs = new Map<string, Blob>();
     for (const [sha, blob] of [...blobs.entries()].sort(([a], [b]) => compare(a, b))) {
       frozenBlobs.set(sha, {
@@ -260,17 +261,13 @@ function compareSources(a: BlobSource | BlobReference, b: BlobSource | BlobRefer
   return compare(a.projectId, b.projectId) || compare(a.runId, b.runId);
 }
 
-/** Producer instant (offsets normalised by parsing), then run id, then execution id. */
-function compareOccurrences(a: ExecutionOccurrence, b: ExecutionOccurrence): number {
-  return (
-    Date.parse(a.occurredAt) - Date.parse(b.occurredAt) ||
-    compare(a.runId, b.runId) ||
-    compare(a.executionId, b.executionId)
-  );
-}
-
-/** The history occurrences of a run: one per execution that carries a historical id under a declared runner. */
-function occurrencesOf(run: ProjectedRun): ExecutionOccurrence[] {
+/**
+ * The history occurrences of a run: one per execution that carries a historical id under a
+ * declared runner. An execution without either is not history and is never given one. This is
+ * the single derivation of history facts from a projected run; the in-memory snapshot and any
+ * durable index of them both call it, so neither can drift into its own interpretation.
+ */
+export function historyOccurrencesOf(run: ProjectedRun): readonly ExecutionOccurrence[] {
   const out: ExecutionOccurrence[] = [];
   const sessions = new Map(run.sessions.map((s) => [s.sessionId, s]));
   for (const e of run.executions) {
