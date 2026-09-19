@@ -1,4 +1,4 @@
-import { COMPONENT_SCHEMAS, REQUEST_ID_HEADER, ROUTES, type RouteSpec } from './schemas.js';
+import { COMMON_RESPONSE_HEADERS, COMPONENT_SCHEMAS, ROUTES, type RouteSpec } from './schemas.js';
 
 type Schema = Record<string, unknown>;
 
@@ -91,7 +91,7 @@ function operation(route: RouteSpec): Schema {
   for (const [status, response] of Object.entries(route.responses)) {
     responses[status] = {
       description: response.description,
-      headers: { ...REQUEST_ID_HEADER, ...(response.headers ?? {}) },
+      headers: { ...COMMON_RESPONSE_HEADERS, ...(response.headers ?? {}) },
       ...(response.content === undefined
         ? {}
         : { content: { [response.content.mediaType]: { schema: response.content.schema } } }),

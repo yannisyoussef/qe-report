@@ -379,16 +379,38 @@ const problem = (description: string): ResponseSpec => ({
   description,
   content: { mediaType: 'application/problem+json', schema: ref('Problem') },
 });
-const requestIdHeader = {
+/** Headers every response of every operation carries, whatever its status. */
+const commonHeaders = {
   'X-Request-Id': {
     description: 'The id this server gave the request; quote it when reporting a problem.',
     schema: { type: 'string', format: 'uuid' },
   },
+  'Cache-Control': {
+    description:
+      'Always no-store: an authenticated answer is never held by a shared or private cache.',
+    schema: { type: 'string', enum: ['no-store'] },
+  },
 };
+/** The challenge every unauthenticated answer carries, as RFC 9110 asks of a 401. */
+const challenge = {
+  'WWW-Authenticate': {
+    description: 'Always Bearer realm="qe-report".',
+    schema: { type: 'string', enum: ['Bearer realm="qe-report"'] },
+  },
+};
+
+const unauthenticated: ResponseSpec = {
+  ...problem('No valid API key. Unknown, malformed, expired, and revoked keys are not told apart.'),
+  headers: challenge,
+};
+
+/** An archive-integrity or database failure: the detail is logged, never sent. */
+const serverError = problem(
+  'The server could not complete the request; the detail is in its log, under this requestId.',
+);
+
 const authProblems: Record<number, ResponseSpec> = {
-  401: problem(
-    'No valid API key. Unknown, malformed, expired, and revoked keys are not told apart.',
-  ),
+  401: unauthenticated,
   403: problem('The key is valid but lacks the scope this operation needs.'),
 };
 const runRefParams: Schema = object({ runRef }, ['runRef']);
@@ -427,8 +449,10 @@ export const ROUTES: readonly RouteSpec[] = [
           expiresAt: {
             type: 'string',
             format: 'date-time',
+            pattern:
+              '^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d{1,3})?(Z|[+-]\\d{2}:\\d{2})$',
             description:
-              'Required, exactly once, as text: an RFC 3339 instant with an explicit offset after which retention may delete the run. A past instant is valid.',
+              'Required, exactly once, as text: the instant after which retention may delete the run. An RFC 3339 instant with an explicit offset, seconds 00 to 59, and at most three fractional digits, so that it is exactly the millisecond it states. A leap second or a finer fraction is refused rather than read as an earlier instant. A past instant is valid and makes the run eligible at once.',
           },
           events: {
             type: 'array',
@@ -464,6 +488,7 @@ export const ROUTES: readonly RouteSpec[] = [
       413: problem('A transport limit was exceeded; nothing was written.'),
       415: problem('The body is not multipart/form-data.'),
       422: problem('The protocol source is invalid, incomplete, or empty; nothing was written.'),
+      500: serverError,
     },
   },
   {
@@ -477,6 +502,7 @@ export const ROUTES: readonly RouteSpec[] = [
       200: { description: 'One page.', content: json(ref('RunPage')) },
       400: problem('A malformed cursor or limit.'),
       ...authProblems,
+      500: serverError,
       503: problem('The project’s query index is incomplete; nothing partial is answered.'),
     },
   },
@@ -489,8 +515,10 @@ export const ROUTES: readonly RouteSpec[] = [
     params: runRefParams,
     responses: {
       200: { description: 'The run.', content: json(ref('Run')) },
+      400: problem('The runRef is not one canonical encoding of a protocol run id.'),
       ...authProblems,
       404: problem('No such run in this project.'),
+      500: serverError,
     },
   },
   {
@@ -512,10 +540,20 @@ export const ROUTES: readonly RouteSpec[] = [
             description: 'Always nosniff.',
             schema: { type: 'string', enum: ['nosniff'] },
           },
+          'Content-Length': {
+            description: 'The blob’s size in bytes.',
+            schema: { type: 'string' },
+          },
+          'Content-Disposition': {
+            description: 'attachment, named by the hash; never a producer’s filename.',
+            schema: { type: 'string' },
+          },
         },
       },
+      400: problem('The runRef is not canonical, or the sha256 is not 64 lower-case hex digits.'),
       ...authProblems,
       404: problem('No such run in this project, or the run references no such attachment.'),
+      500: serverError,
     },
   },
   {
@@ -530,7 +568,9 @@ export const ROUTES: readonly RouteSpec[] = [
       200: { description: 'One page, in history order.', content: json(ref('HistoryPage')) },
       400: problem('A malformed body or cursor.'),
       ...authProblems,
+      413: problem('The JSON body is larger than this server accepts.'),
       415: problem('The body is not application/json.'),
+      500: serverError,
       503: problem('The project’s query index is incomplete; nothing partial is answered.'),
     },
   },
@@ -545,10 +585,12 @@ export const ROUTES: readonly RouteSpec[] = [
       200: { description: 'The counts.', content: json(ref('Flakiness')) },
       400: problem('A malformed body.'),
       ...authProblems,
+      413: problem('The JSON body is larger than this server accepts.'),
       415: problem('The body is not application/json.'),
+      500: serverError,
       503: problem('The project’s query index is incomplete; nothing partial is answered.'),
     },
   },
 ];
 
-export const REQUEST_ID_HEADER = requestIdHeader;
+export const COMMON_RESPONSE_HEADERS = commonHeaders;
