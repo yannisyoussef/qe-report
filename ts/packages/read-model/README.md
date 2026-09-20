@@ -36,14 +36,24 @@ breaks an execution invariant, see below),
 
 ## Project context
 
-`projectId` is ingestion context, not a protocol field: an opaque,
-non-empty partition key supplied by the caller and never derived from
-labels, environment, runner metadata, or a directory name. The canonical
-run key is `(projectId, runId)`; the same run id may exist in two projects
-and yields two independent runs. Run and history queries never cross a
+`projectId` is ingestion context, not a protocol field: an opaque
+partition key supplied by the caller and never derived from labels,
+environment, runner metadata, or a directory name. The canonical run key
+is `(projectId, runId)`; the same run id may exist in two projects and
+yields two independent runs. Run and history queries never cross a
 project boundary; the blob catalog is the one deliberately snapshot-wide
-index, described below. An empty project id is a caller error, not an
-ingestion problem.
+index, described below.
+
+One contract governs a project id everywhere in the system, and
+`checkProjectId` is its only implementation: a non-empty string of
+well-formed Unicode, without U+0000, of at most
+`MAX_PROJECT_ID_UTF8_BYTES` (512) bytes in UTF-8. The bound is counted in
+bytes, not characters. Nothing is trimmed or normalised, so two
+canonically equivalent spellings are two projects unless their code
+points are the same. The bound exists because every durable table is
+keyed by a project id inside compound B-tree keys, and 512 bytes keeps
+each of them far below PostgreSQL's limit on an index entry. A project id
+outside the contract is a caller error, not an ingestion problem.
 
 ## Discovery
 

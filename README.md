@@ -17,8 +17,11 @@ explicit run expiry and bounded maintenance that deletes expired runs and
 reclaims bytes no run anywhere still references. Rebuildable PostgreSQL
 indexes answer run listings, exact test history, and flakiness without
 replaying every archived run, while one run is still reconstructed from
-its own stored source. No HTTP transport and no reporting server exist
-yet. Nothing is published.
+its own stored source. An authenticated HTTP API (version 1) over those
+same operations takes runs as streamed multipart uploads and answers
+runs, histories, flakiness, and attachment downloads, with the project
+decided by a project-scoped API key alone. No user accounts, no UI, and
+no reporting server beyond that API exist yet. Nothing is published.
 
 ## What is here
 
@@ -27,7 +30,7 @@ yet. Nothing is published.
 | [`protocol/`](protocol/README.md) | The protocol: JSON Schema (source of truth), fixture corpus, redaction cases, documentation. |
 | [`java/`](java/) | Gradle build. `protocol` (model and codec), `sdk` (session writer, file sink, redaction), and [`junit-platform`](java/junit-platform/README.md) (a `TestExecutionListener` discovered through ServiceLoader). Library bytecode targets Java 17. |
 | [`java/consumer-fixtures/`](java/consumer-fixtures/README.md) | Gradle and Maven Surefire projects that consume the adapter as a published artifact; run by the adapter's tests, not part of the build. |
-| [`ts/`](ts/) | pnpm workspace. `protocol` (types and codec), `sdk` (session writer, file sink, redaction), `validator` (library and `qe-report-validate` CLI), [`playwright`](ts/packages/playwright/README.md) (a Playwright Test reporter), [`read-model`](ts/packages/read-model/README.md) (validation-first projection of run directories into runs, histories, and flakiness), [`postgres`](ts/packages/postgres/README.md) (durable archive of complete validated runs in PostgreSQL, replayed through the read model, with retention and rebuildable query indexes; tested with Testcontainers), [`blob-fs`](ts/packages/blob-fs/README.md) (immutable content-addressed attachment bytes on the local filesystem, keyed by SHA-256, with an operator-level maintenance surface), and a test-only `equivalence` harness. Node 22 or newer. |
+| [`ts/`](ts/) | pnpm workspace. `protocol` (types and codec), `sdk` (session writer, file sink, redaction), `validator` (library and `qe-report-validate` CLI), [`playwright`](ts/packages/playwright/README.md) (a Playwright Test reporter), [`read-model`](ts/packages/read-model/README.md) (validation-first projection of run directories into runs, histories, and flakiness), [`postgres`](ts/packages/postgres/README.md) (durable archive of complete validated runs in PostgreSQL, replayed through the read model, with retention and rebuildable query indexes; tested with Testcontainers), [`blob-fs`](ts/packages/blob-fs/README.md) (immutable content-addressed attachment bytes on the local filesystem, keyed by SHA-256, with an operator-level maintenance surface), [`http-api`](ts/packages/http-api/README.md) (authenticated HTTP API v1 on Fastify over the store and the query indexes, with project-scoped API keys, an operator CLI, and the [OpenAPI contract](openapi/qe-report-api-v1.json)), and a test-only `equivalence` harness. Node 22 or newer. |
 | [`ts/consumer-fixtures/`](ts/consumer-fixtures/playwright/README.md) | A Playwright project that consumes the reporter as a package; run by the reporter's consumer tests, not part of the build. |
 
 Read [`protocol/README.md`](protocol/README.md) first: it explains the

@@ -1,4 +1,4 @@
-export { migrate, type AppliedMigration } from './migrate.js';
+export { migrate, schemaStatus, type AppliedMigration, type SchemaStatus } from './migrate.js';
 export { MAINTENANCE_LOCK_KEY, MaintenanceBusyError } from './locks.js';
 export {
   RetentionMaintenance,
@@ -49,3 +49,12 @@ export {
   type StoredRun,
   type StoredSourceLine,
 } from './store.js';
+export {
+  API_KEY_SCOPES,
+  PostgresApiKeys,
+  parseApiKeyToken,
+  type ApiKeyPrincipal,
+  type ApiKeyScope,
+  type CreateApiKeyRequest,
+  type CreatedApiKey,
+} from './api-keys.js';

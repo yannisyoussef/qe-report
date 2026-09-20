@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { Pool, PoolClient } from 'pg';
 import type { BlobDescriptor, BlobStore, BlobStoreError, OpenedBlob } from 'qe-report-blob-fs';
 import { isSha256 } from 'qe-report-blob-fs';
@@ -36,6 +37,14 @@ export interface PersistRequest {
    * A run archived here always gets one; the first one recorded is the one that stands.
    */
   readonly expiresAt: Date;
+  /**
+   * Logical provenance, for a run directory that is itself temporary, such as an upload a
+   * transport staged: recorded as the run's source locator in place of the directory, and every
+   * source file and diagnostic is then named relative to the directory (`events/000001.ndjson`)
+   * rather than by its path, so that no temporary path is stored or returned. Absent, the
+   * directory is its own provenance, as for any caller archiving a directory it keeps.
+   */
+  readonly sourceLocator?: string;
 }
 
 export type PersistResult =
@@ -153,6 +162,43 @@ export class ReplayMismatchError extends Error {
   }
 }
 
+/** A logical locator is text a person can read back: bounded, one line, and not empty. */
+function checkSourceLocator(sourceLocator: string | undefined): string | undefined {
+  if (sourceLocator === undefined) return undefined;
+  if (
+    typeof sourceLocator !== 'string' ||
+    sourceLocator === '' ||
+    sourceLocator.length > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(sourceLocator)
+  ) {
+    throw new TypeError('sourceLocator must be 1 to 256 printable characters when it is given');
+  }
+  return sourceLocator;
+}
+
+/**
+ * The same validation, with every file it names given relative to the run directory it read:
+ * what was `<dir>/events/a.ndjson` is `events/a.ndjson`. Only names change; nothing is re-read.
+ */
+function relativeTo(runDirectory: string, validated: ValidatedRun): ValidatedRun {
+  const name = (file: string): string => {
+    if (file === '') return file;
+    const relative = path.relative(runDirectory, file).split(path.sep).join('/');
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error('the validator named a file outside the run directory it was given');
+    }
+    return relative;
+  };
+  return {
+    report: {
+      ...validated.report,
+      diagnostics: validated.report.diagnostics.map((d) => ({ ...d, file: name(d.file) })),
+    },
+    events: validated.events,
+    sourceLines: validated.sourceLines.map((l) => ({ ...l, sourceFile: name(l.sourceFile) })),
+  };
+}
+
 /** Retention refuses to guess: an ingestion states one finite instant, or archives nothing. */
 function checkExpiresAt(expiresAt: unknown): Date {
   if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())) {
@@ -192,10 +238,13 @@ export class PostgresRunStore {
   async persistRunDirectory(request: PersistRequest): Promise<PersistResult> {
     checkProjectId(request.projectId);
     const expiresAt = checkExpiresAt(request.expiresAt);
-    const validated = await validateRunDirectorySnapshot(request.runDirectory, {
+    const sourceLocator = checkSourceLocator(request.sourceLocator) ?? request.runDirectory;
+    const snapshot = await validateRunDirectorySnapshot(request.runDirectory, {
       retainEvents: true,
       retainSourceLines: true,
     });
+    const validated =
+      request.sourceLocator === undefined ? snapshot : relativeTo(request.runDirectory, snapshot);
     const runId = validated.sourceLines[0]?.runId;
     if (!validated.report.valid) {
       return {
@@ -222,9 +271,7 @@ export class PostgresRunStore {
     // The projection this directory produces, read into query-index rows now, so that a run
     // this call inserts is stored immediately queryable. It is used only if this directory
     // becomes the archived source; a run already archived is indexed from its own stored source.
-    const offeredIndex = deriveQueryIndex(
-      projectRun(request.projectId, request.runDirectory, validated),
-    );
+    const offeredIndex = deriveQueryIndex(projectRun(request.projectId, sourceLocator, validated));
     // From here the call may publish bytes or write rows, so it holds the maintenance lock
     // shared: destructive retention cannot interleave with the identity check, the
     // materialisation, or the transaction, and other ingestions still run beside it.
@@ -239,7 +286,7 @@ export class PostgresRunStore {
       return archiveWithin(
         client,
         request.projectId,
-        request.runDirectory,
+        sourceLocator,
         archive,
         published,
         expiresAt,

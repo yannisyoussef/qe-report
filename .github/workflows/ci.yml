@@ -65,6 +65,10 @@ jobs:
         if: matrix.node == 22
         working-directory: ts
         run: pnpm test:postgres-integration
+      - name: HTTP API v1 over PostgreSQL 16, the attachment store, and staging, through real requests
+        if: matrix.node == 22
+        working-directory: ts
+        run: pnpm test:http-integration
 
   playwright:
     name: Playwright reporter (Node ${{ matrix.node }}, Playwright ${{ matrix.playwright }})
@@ -111,6 +115,10 @@ jobs:
         if: matrix.node == 22 && matrix.playwright == '1.63.0'
         working-directory: ts
         run: pnpm test:postgres-playwright
+      - name: Upload real Playwright runs through HTTP and read them back
+        if: matrix.node == 22 && matrix.playwright == '1.63.0'
+        working-directory: ts
+        run: pnpm test:http-playwright
 
   equivalence:
     name: Cross-language equivalence
@@ -149,3 +157,6 @@ jobs:
       - name: Archive real JUnit runs in PostgreSQL and replay them
         working-directory: ts
         run: pnpm test:postgres-junit
+      - name: Upload a real JUnit run through HTTP and read it back
+        working-directory: ts
+        run: pnpm test:http-junit
