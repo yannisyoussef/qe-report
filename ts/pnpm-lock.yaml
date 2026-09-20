@@ -254,6 +254,12 @@ importers:
         specifier: 12.1.0
         version: 12.1.0
 
+  packages/http-client:
+    dependencies:
+      qe-report-sdk:
+        specifier: workspace:*
+        version: link:../sdk
+
   packages/playwright:
     dependencies:
       qe-report-sdk:
