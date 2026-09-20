@@ -35,5 +35,13 @@
   "dependencies": {
     "qe-report-sdk": "workspace:*"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/pg": "8.23.1",
+    "pg": "8.23.0",
+    "qe-report-http-api": "workspace:*",
+    "qe-report-postgres": "workspace:*",
+    "qe-report-read-model": "workspace:*",
+    "testcontainers": "12.1.0"
+  }
 }
