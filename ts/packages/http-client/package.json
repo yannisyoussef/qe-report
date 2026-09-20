@@ -1,0 +1,47 @@
+{
+  "name": "qe-report-http-client",
+  "version": "0.1.0",
+  "description": "qe-report producer transport: uploads a completed run directory to a qe-report service over API v1",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "qe-report-upload": "./dist/bin/upload.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:junit-runs": "vitest run --config vitest.runs.config.ts test-runs/junit-runs.test.ts",
+    "test:playwright-runs": "vitest run --config vitest.runs.config.ts test-runs/playwright-runs.test.ts"
+  },
+  "dependencies": {
+    "qe-report-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/pg": "8.23.1",
+    "pg": "8.23.0",
+    "qe-report-http-api": "workspace:*",
+    "qe-report-postgres": "workspace:*",
+    "qe-report-read-model": "workspace:*",
+    "testcontainers": "12.1.0"
+  }
+}

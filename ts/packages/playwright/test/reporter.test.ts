@@ -143,7 +143,7 @@ describe('QeReportReporter isolation', () => {
     expect(events(dir).filter((e) => e.eventType === 'attempt.finished')).toHaveLength(1);
   });
 
-  it('never returns a status from onEnd and never throws from a callback', () => {
+  it('never returns a status from onEnd and never throws from a callback', async () => {
     const dir = temp();
     const { r, begin } = reporter({ dir, runId: 'run-c' });
     begin();
@@ -151,7 +151,9 @@ describe('QeReportReporter isolation', () => {
       r.onStepEnd(testCase(), testResult(), testStep({ title: 'x', category: 'y' })),
     ).not.toThrow();
     expect(() => r.onTestEnd(testCase(), testResult())).not.toThrow();
-    expect(r.onEnd(fullResult('passed'))).toBeUndefined();
+    // onEnd may be awaited, which is how an upload finishes before the process does; it still
+    // tells Playwright nothing about the outcome of the run.
+    await expect(r.onEnd(fullResult('passed'))).resolves.toBeUndefined();
     expect(r.printsToStdio()).toBe(false);
   });
 

@@ -26,16 +26,63 @@ export default defineConfig({
 
 A reporter option wins over its environment variable, which wins over the default.
 
-| Option               | Environment variable   | Default                                             |
-| -------------------- | ---------------------- | --------------------------------------------------- |
-| `enabled`            | `QE_REPORT_ENABLED`    | `true`                                              |
-| `dir`                | `QE_REPORT_DIR`        | output root `qe-report` under the working directory |
-| `runId`              | `QE_REPORT_RUN_ID`     | generated; the invocation is a run of its own       |
-| `sessionId`          | `QE_REPORT_SESSION_ID` | generated from the process id and random bytes      |
-| `maxAttachmentBytes` | option only            | the SDK's 64 MiB                                    |
+| Option               | Environment variable   | Default                                               |
+| -------------------- | ---------------------- | ----------------------------------------------------- |
+| `enabled`            | `QE_REPORT_ENABLED`    | `true`                                                |
+| `dir`                | `QE_REPORT_DIR`        | output root `qe-report` under the working directory   |
+| `runId`              | `QE_REPORT_RUN_ID`     | generated; the invocation is a run of its own         |
+| `sessionId`          | `QE_REPORT_SESSION_ID` | generated from the process id and random bytes        |
+| `maxAttachmentBytes` | option only            | the SDK's 64 MiB                                      |
+| `upload`             | see below              | off: the reporter writes local files and nothing else |
 
 Run and session ids are protocol identifiers: 1 to 128 printable ASCII characters without
 spaces. A malformed value is reported once on standard error and replaced by the default.
+
+## Uploading the run
+
+The reporter can deliver the finished run to a qe-report service, through
+[`qe-report-http-client`](../http-client/README.md). It is off by default, and a reporter that
+is not configured for it makes no network request at all.
+
+```ts
+// playwright.config.ts
+reporter: [['qe-report-playwright', { upload: { enabled: true, retentionMs: 30 * 24 * 60 * 60 * 1000 } }]],
+```
+
+| Upload option       | Environment variable            | Meaning                                         |
+| ------------------- | ------------------------------- | ----------------------------------------------- |
+| `enabled`           | `QE_REPORT_UPLOAD`              | off unless set                                  |
+| `baseUrl`           | `QE_REPORT_URL`                 | the service                                     |
+| `expiresAt`         | `QE_REPORT_EXPIRES_AT`          | an instant with an offset, at most milliseconds |
+| `retentionMs`       | `QE_REPORT_RETENTION_MS`        | how long to keep the run, from the upload       |
+| `maxAttempts`       | `QE_REPORT_UPLOAD_MAX_ATTEMPTS` | attempts, the first included                    |
+| `attemptTimeoutMs`  | `QE_REPORT_UPLOAD_TIMEOUT_MS`   | the time one attempt may take                   |
+| `allowInsecureHttp` | `QE_REPORT_ALLOW_INSECURE_HTTP` | plaintext to another host, for development only |
+
+**The API key is read from `QE_REPORT_API_KEY` and is never a reporter option**: a configuration
+file is committed, and a key is not. Exactly one of `expiresAt` or `retentionMs` is required;
+there is no default retention, because a run is never archived without an expiry.
+
+**Only a run this process owns is uploaded.** The reporter uploads after the session is finished
+and the sink is closed, and only when it generated the run id itself, which is the one case
+where no other shard or process can still add to the run. With a configured or shared
+`QE_REPORT_RUN_ID`, it says so once and uploads nothing:
+
+```
+qe-report-playwright: automatic upload skipped: this run id is shared or configured, so another
+shard or process may still add to the run; upload the run directory from the coordinator once
+every one of them has finished (qe-report-upload --run-dir <run directory>)
+```
+
+That is the coordinator's job, after every shard has finished:
+
+```bash
+QE_REPORT_API_KEY=... qe-report-upload --run-dir qe-report/runs/<run directory> --retention-ms 2592000000
+```
+
+An upload that fails is a reporting problem, not a test result: it is printed once, the run
+directory is kept, and the outcome of the tests is untouched. A pipeline that must fail when an
+upload fails should run `qe-report-upload` as its own step.
 
 ## Run, session, and shard model
 
@@ -195,6 +242,9 @@ error is printed once and the affected event is dropped while the rest of the ru
 - A test Playwright never finishes (global timeout) is closed as `inconclusive` with
   `rawStatus: "unfinished"` at the end of the run; the failed session outcome outranks it.
 - Standard output and error of tests are not captured.
+- Automatic upload covers only a run the reporter generated the id for. A configured or sharded
+  run is uploaded by the coordinator with `qe-report-upload`, and the reporter never fails a
+  test because an upload failed.
 - The reporter is for direct `playwright test` invocations. Under `merge-reports`, which
   replays a blob, step and attempt attachments are distinct objects and a step-scoped
   attachment would be recorded twice.
