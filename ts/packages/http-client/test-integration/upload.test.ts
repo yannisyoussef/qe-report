@@ -294,6 +294,48 @@ describe('uploading to the real service', () => {
   });
 });
 
+describe('a run several processes wrote', () => {
+  it('is uploaded once, by the coordinator, with every session in it', async () => {
+    const service = await harness.service('shards');
+    const token = await service.key('P');
+    // What two shards of one configured run id leave behind: one directory, two session files,
+    // and no run.finished, because no shard could know it was the last.
+    const root = freshRoot('shards');
+    const dir = writeRun(root, 'sharded', 'run-sharded', [
+      {
+        sessionId: 'shard-1',
+        events: [
+          started('pw'),
+          attemptStarted('a', 1, testCase('one', 'h-one')),
+          attemptFinished('a', 'passed'),
+          finished(),
+        ],
+      },
+      {
+        sessionId: 'shard-2',
+        events: [
+          started('pw'),
+          attemptStarted('b', 1, testCase('two', 'h-two')),
+          attemptFinished('b', 'passed'),
+          finished(),
+        ],
+      },
+    ]);
+    const result = await clientFor(service.base, token).uploadRunDirectory({
+      runDirectory: dir,
+      expiresAt: EXPIRES,
+    });
+    expect(result).toMatchObject({ outcome: 'inserted', runId: 'run-sharded' });
+    const run = await call(service.base, token, 'GET', `/v1/runs/${result.runRef}`);
+    const sessions = run.body.sessions as { sessionId: string }[];
+    expect(sessions.map((s) => s.sessionId).sort()).toEqual(['shard-1', 'shard-2']);
+    expect((run.body.executions as unknown[]).length).toBe(2);
+    // A run no process closed stays complete and open, exactly as the archive says.
+    expect(run.body.validator).toMatchObject({ complete: true, closed: false });
+    expect(uploadsSeen(service)).toBe(1);
+  });
+});
+
 describe('the command against the real service', () => {
   it('uploads, reports, and separates a refusal from a delivery', async () => {
     const service = await harness.service('cli');

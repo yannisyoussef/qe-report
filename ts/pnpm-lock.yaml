@@ -284,6 +284,9 @@ importers:
 
   packages/playwright:
     dependencies:
+      qe-report-http-client:
+        specifier: workspace:*
+        version: link:../http-client
       qe-report-sdk:
         specifier: workspace:*
         version: link:../sdk
