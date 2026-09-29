@@ -14,7 +14,13 @@ export {
   type ServerDiagnostic,
 } from './errors.js';
 export { UploadAborted } from './transport.js';
-export { checkExpiresAt, expiryAfter } from './instants.js';
+export {
+  checkExpiresAt,
+  expiryAfter,
+  parseOperationalInstant,
+  NotAnInstant,
+  OPERATIONAL_INSTANT_GRAMMAR,
+} from './instants.js';
 export { planUpload, type PlannedFile, type UploadPlan } from './local-run.js';
 export { isLoopback, resolveTarget, type Target } from './target.js';
 export {

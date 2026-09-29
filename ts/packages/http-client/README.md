@@ -105,6 +105,14 @@ before the first attempt, and every attempt re-opens exactly those files and che
 device and inode before and after streaming. A directory that changes ends the upload with a
 `RUN_DIRECTORY_CHANGED` error rather than sending half of one run and half of another.
 
+An attachment is checked further, because its name is a statement about its bytes. Its SHA-256 is
+computed again from the very bytes each attempt streams, and compared before the separator that
+would close the part; a mismatch ends the upload with `ATTACHMENT_CHANGED` and leaves the request
+incomplete, so the service has nothing it could archive. Metadata cannot show this on its own:
+bytes can be replaced by different bytes of the same length, under the same inode, with the
+modification time put back. The digest comes from the same pass that feeds the request, so a
+64 MiB attachment is still read once and never held.
+
 Nothing is buffered whole: parts stream, and the request's length is known in advance because
 the plan holds every size.
 
@@ -114,6 +122,22 @@ Every upload states when retention may delete the run, and there is no default. 
 `Date`, or turn a duration into one with `expiryAfter(ms)`. The instant is decided once, before
 the first attempt, so a retry never offers a slightly later deadline than the attempt before it.
 `Date.toISOString()` is exactly the operational instant the service takes.
+
+Text becomes an instant through `parseOperationalInstant`, the one parser behind every way a
+producer states a deadline: the command's `--expires-at`, the Playwright reporter's `expiresAt`
+and `QE_REPORT_EXPIRES_AT`, and any caller that wants to check a value first. It takes exactly
+what API v1 takes, which is narrower than a protocol timestamp:
+
+```
+2027-01-01T00:00:00Z        2027-01-01T00:00:00.5Z
+2027-01-01T00:00:00.123Z    2027-01-01T01:00:00+01:00
+```
+
+RFC 3339, an explicit `Z` or numeric offset, seconds 00 to 59, and at most three fractional
+digits. It is not `new Date(text)`, which would read `2027-02-30T00:00:00Z` as the second of
+March, drop the fourth digit of `...00.1234Z`, and take a value with no offset at all. Each of
+those is refused here instead, so a deadline that leaves a producer is one the service accepts as
+written, and a run is never kept until an instant nobody asked for.
 
 ## Retries
 
@@ -149,12 +173,12 @@ uploads to `https://example.com/qe-report/v1/runs`.
 
 ## Errors
 
-| Error                    | Meaning                                                                                                                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LocalRunDirectoryError` | The producer's directory cannot be uploaded: an unsafe entry, no events, an attachment that is not its hash, or a directory that changed. Nothing was archived. |
-| `UploadRejectedError`    | The service refused the run. Carries the status, the problem code, the request id, the run id, and the validator's diagnostics for a `422`.                     |
-| `UploadTransportError`   | Not delivered: the attempts ran out. Carries how many were made and the last status, if there was one.                                                          |
-| `UploadAborted`          | The caller cancelled.                                                                                                                                           |
+| Error                    | Meaning                                                                                                                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LocalRunDirectoryError` | The producer's directory cannot be uploaded: an unsafe entry, no events, an attachment that is not its hash, or a file or attachment that changed after the plan was made. Nothing was archived. |
+| `UploadRejectedError`    | The service refused the run. Carries the status, the problem code, the request id, the run id, and the validator's diagnostics for a `422`.                                                      |
+| `UploadTransportError`   | Not delivered: the attempts ran out. Carries how many were made and the last status, if there was one.                                                                                           |
+| `UploadAborted`          | The caller cancelled.                                                                                                                                                                            |
 
 Every error carries the service's `X-Request-Id` where there was one, so an upload can be found
 in the service's log.

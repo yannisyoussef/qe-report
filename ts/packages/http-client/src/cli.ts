@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util';
 import { QeReportHttpClient } from './client.js';
 import { LocalRunDirectoryError, UploadRejectedError, UploadTransportError } from './errors.js';
-import { expiryAfter } from './instants.js';
+import { NotAnInstant, expiryAfter, parseOperationalInstant } from './instants.js';
 import { UploadAborted } from './transport.js';
 
 export const USAGE = `qe-report-upload: uploads one completed run directory to a qe-report service
@@ -148,11 +148,13 @@ function retentionOf(expiresAt: string | undefined, retentionMs: string | undefi
     throw new UsageError('exactly one of --expires-at or --retention-ms is required');
   }
   if (retentionMs !== undefined) return expiryAfter(whole('--retention-ms', retentionMs));
-  const at = new Date(expiresAt as string);
-  if (!Number.isFinite(at.getTime())) {
-    throw new UsageError('--expires-at must be an RFC 3339 instant with an explicit offset');
+  // The same parser the reporter and the library use, so that every producer states a deadline
+  // the service accepts as written, rather than one it would refuse or read differently.
+  try {
+    return parseOperationalInstant(expiresAt, '--expires-at');
+  } catch (e) {
+    throw new UsageError(e instanceof NotAnInstant ? e.message : '--expires-at is not an instant');
   }
-  return at;
 }
 
 function whole(name: string, value: string): number {

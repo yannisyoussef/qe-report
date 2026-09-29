@@ -5,7 +5,15 @@ import {
   UploadRejectedError,
   UploadTransportError,
 } from '../src/errors.js';
-import { archived, cleanup, freshDir, service, writeRunDirectory } from './support.js';
+import {
+  archived,
+  cleanup,
+  freshDir,
+  partsOf,
+  service,
+  writeRunDirectory,
+  type SeenRequest,
+} from './support.js';
 
 afterAll(cleanup);
 
@@ -169,5 +177,56 @@ describe('qe-report-upload', () => {
       expect(answer.err).not.toContain(TOKEN);
       expect(answer.err.toLowerCase()).not.toContain('authorization');
     }
+  });
+});
+
+describe('the deadline the command states', () => {
+  it('sends the exact instant for every form the service accepts', async () => {
+    const dir = writeRunDirectory(freshDir('cli-expiry'));
+    const server = await service((_request, response) => archived(response));
+    const cases: [string, number][] = [
+      ['2027-01-01T00:00:00Z', Date.UTC(2027, 0, 1, 0, 0, 0, 0)],
+      ['2027-01-01T00:00:00.1Z', Date.UTC(2027, 0, 1, 0, 0, 0, 100)],
+      ['2027-01-01T00:00:00.12Z', Date.UTC(2027, 0, 1, 0, 0, 0, 120)],
+      ['2027-01-01T00:00:00.123Z', Date.UTC(2027, 0, 1, 0, 0, 0, 123)],
+      ['2027-01-01T01:00:00+01:00', Date.UTC(2027, 0, 1, 0, 0, 0, 0)],
+    ];
+    for (const [text, epochMs] of cases) {
+      const before = server.seen.length;
+      const answer = await run(['--run-dir', dir, '--url', server.baseUrl, '--expires-at', text], {
+        QE_REPORT_API_KEY: TOKEN,
+      });
+      expect(answer.code, text).toBe(0);
+      expect(server.seen).toHaveLength(before + 1);
+      const request = server.seen[before] as SeenRequest;
+      const parts = partsOf(request.body, String(request.headers['content-type']));
+      const stated = parts.find((p) => p.name === 'expiresAt')?.value.toString('utf8');
+      // The instant the caller wrote, to the millisecond, however they wrote it.
+      expect(stated, text).toBe(new Date(epochMs).toISOString());
+      expect(Date.parse(stated as string), text).toBe(epochMs);
+    }
+  });
+
+  it('refuses a deadline the service would not take, before asking it anything', async () => {
+    const dir = writeRunDirectory(freshDir('cli-expiry-bad'));
+    const server = await service((_request, response) => archived(response));
+    const refused = [
+      '2016-12-31T23:59:60Z',
+      '2027-01-01T00:00:00.1234Z',
+      '2027-01-01T00:00:00.123456789Z',
+      '2027-01-01T00:00:00',
+      '2027-02-30T00:00:00Z',
+      '2027-01-01T00:00:00+24:00',
+    ];
+    for (const text of refused) {
+      const answer = await run(['--run-dir', dir, '--url', server.baseUrl, '--expires-at', text], {
+        QE_REPORT_API_KEY: TOKEN,
+      });
+      expect(answer.code, text).toBe(2);
+      expect(answer.err, text).toContain('--expires-at must be');
+      expect(answer.out, text).toBe('');
+    }
+    // Not one of them reached the service: a value it would refuse is refused here instead.
+    expect(server.seen).toEqual([]);
   });
 });

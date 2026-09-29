@@ -1,7 +1,13 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
-import { checkUnchanged, openPlanned, type PlannedFile, type UploadPlan } from './local-run.js';
+import {
+  checkAttachmentBytes,
+  checkUnchanged,
+  openPlanned,
+  type PlannedFile,
+  type UploadPlan,
+} from './local-run.js';
 
 /**
  * The multipart body of `POST /v1/runs`, exactly as API v1 defines it: one `expiresAt` text
@@ -99,15 +105,21 @@ export function multipartBody(plan: UploadPlan, expiresAt: string): MultipartBod
       // The file is the one the plan described, or the upload ends here rather than sending
       // bytes of a run that is no longer the run the plan was made from.
       const fd = openPlanned(part.file);
+      // An attachment is named by its own bytes, so those bytes are hashed as they go out. The
+      // digest is checked before the separator that would end the part, so a mutated object
+      // leaves the request incomplete and the service has nothing it could archive.
+      const digest = part.file.sha256 === undefined ? undefined : createHash('sha256');
       let sent = 0;
       try {
         for await (const chunk of createReadStream('', { fd, autoClose: false })) {
           const bytes = chunk as Buffer;
           sent += bytes.length;
           if (sent > part.file.facts.sizeBytes) break;
+          digest?.update(bytes);
           yield bytes;
         }
         checkUnchanged(fd, part.file, sent);
+        if (digest !== undefined) checkAttachmentBytes(part.file, digest.digest('hex'));
       } finally {
         closeSync(fd);
       }

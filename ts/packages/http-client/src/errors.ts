@@ -6,8 +6,13 @@ export type LocalRunProblem =
   | 'UNREADABLE'
   /** No `events/*.ndjson` to upload. */
   | 'NO_EVENTS'
-  /** An attachment's bytes are not the hash its name claims. */
+  /** An attachment's bytes are not the hash its name claims, as the plan was being built. */
   | 'ATTACHMENT_HASH_MISMATCH'
+  /**
+   * An attachment that was sound when the plan was made no longer holds the bytes its name
+   * claims. Its metadata still matched, so only hashing what was streamed could show it.
+   */
+  | 'ATTACHMENT_CHANGED'
   /** A planned file changed between or during attempts; the upload stops rather than mixing runs. */
   | 'RUN_DIRECTORY_CHANGED';
 

@@ -1,4 +1,77 @@
 /**
+ * An operational instant: a lifecycle time a producer states, such as when a run may be deleted.
+ * It is deliberately narrower than a protocol timestamp, and exactly the grammar API v1 accepts.
+ *
+ * ```
+ * 2027-01-01T00:00:00Z        2027-01-01T00:00:00.5Z
+ * 2027-01-01T00:00:00.123Z    2027-01-01T01:00:00+01:00
+ * ```
+ *
+ * RFC 3339, an explicit `Z` or numeric offset, seconds 00 to 59, and at most three fractional
+ * digits, so the value is exactly a millisecond and a `Date` carries it without losing anything.
+ * A protocol timestamp admits more: nanoseconds, which would be truncated, and a leap second,
+ * which names an instant a millisecond count cannot hold apart from its neighbours. Read as a
+ * deadline either would move earlier, and retention would then delete a run before the time its
+ * owner asked for, so both are refused instead of rounded.
+ */
+const OPERATIONAL =
+  /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?(?:Z|([+-])(\d{2}):(\d{2}))$/u;
+
+/** What an operational instant must look like, worded for someone who has to fix a value. */
+export const OPERATIONAL_INSTANT_GRAMMAR =
+  'an RFC 3339 instant with an explicit offset, seconds 00 to 59, and at most millisecond precision, such as 2027-01-01T00:00:00Z or 2027-01-01T00:00:00.123Z';
+
+/** A value that is not an operational instant; each producer answers it in its own way. */
+export class NotAnInstant extends Error {
+  constructor(what: string) {
+    super(`${what} must be ${OPERATIONAL_INSTANT_GRAMMAR}`);
+    this.name = 'NotAnInstant';
+  }
+}
+
+/**
+ * The instant a producer's lifecycle timestamp names, exactly. The one parser behind every way a
+ * producer states an expiry: the `qe-report-upload` command, the Playwright reporter's
+ * configuration, and any library caller that wants to check a value before sending it.
+ *
+ * The grammar is checked first, then the calendar and the offset, and the instant is built from
+ * the stated components rather than handed to `new Date(text)`. That matters: `Date.parse` reads
+ * `2027-02-30T00:00:00Z` as the second of March and `...00.1234Z` as `.123`, so a value the
+ * service would refuse, or one whose meaning it would have to guess at, would otherwise be sent.
+ *
+ * `what` names the field, for the message: `expiresAt`, `--expires-at`.
+ */
+export function parseOperationalInstant(text: unknown, what: string): Date {
+  if (typeof text !== 'string') throw new NotAnInstant(what);
+  const m = OPERATIONAL.exec(text);
+  if (m === null) throw new NotAnInstant(what);
+  const [, y, mo, d, h, mi, s, fraction, sign, oh, om] = m as unknown as (string | undefined)[];
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const millisecond = Number((fraction ?? '').padEnd(3, '0'));
+  const offsetHour = Number(oh ?? 0);
+  const offsetMinute = Number(om ?? 0);
+  if (offsetHour > 23 || offsetMinute > 59) throw new NotAnInstant(what);
+  const asUtc = Date.UTC(year, month - 1, day, Number(h), Number(mi), Number(s), millisecond);
+  if (!Number.isFinite(asUtc)) throw new NotAnInstant(what);
+  // A day the month does not have rolls forward silently; the components it comes back as must
+  // be the components that were written.
+  const probe = new Date(asUtc);
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    throw new NotAnInstant(what);
+  }
+  const offsetMs = (sign === '-' ? -1 : 1) * (offsetHour * 60 + offsetMinute) * 60_000;
+  const at = new Date(asUtc - offsetMs);
+  if (!Number.isFinite(at.getTime())) throw new NotAnInstant(what);
+  return at;
+}
+
+/**
  * When retention may delete a run. The service takes an operational instant: RFC 3339, an
  * explicit offset, seconds 00 to 59, and at most a millisecond of precision. A `Date` is exactly
  * that, and `toISOString` writes it in exactly that form, so a caller states a deadline and the

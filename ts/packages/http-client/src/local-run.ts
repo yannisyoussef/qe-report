@@ -229,6 +229,25 @@ export function openPlanned(file: PlannedFile): number {
   return fd;
 }
 
+/**
+ * Checks that the bytes just streamed for an attachment are the bytes its name claims. An
+ * attachment is a content-addressed object, so its own name is the strongest statement about it
+ * there is, and that statement has to hold for what was actually transmitted rather than for
+ * what the directory held when the plan was made. Metadata cannot show this: bytes can be
+ * replaced by different bytes of the same length, under the same inode, with the modification
+ * time put back.
+ *
+ * The digest comes from the same read that fed the request, so nothing is read twice and nothing
+ * is held: a 64 MiB attachment costs one pass either way.
+ */
+export function checkAttachmentBytes(file: PlannedFile, digest: string): void {
+  if (file.sha256 === undefined || digest === file.sha256) return;
+  throw new LocalRunDirectoryError(
+    'ATTACHMENT_CHANGED',
+    `${file.name} no longer holds the bytes its name claims; it changed while the run was being uploaded`,
+  );
+}
+
 /** Checks a planned file once more after its bytes were sent, from the descriptor that sent them. */
 export function checkUnchanged(fd: number, file: PlannedFile, sent: number): void {
   let now: Stats;

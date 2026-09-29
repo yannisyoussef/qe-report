@@ -1,16 +1,32 @@
-import { appendFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+  type Stats,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  NotAnInstant,
   QeReportHttpClient,
   UploadAborted,
   UploadRejectedError,
   UploadTransportError,
   expiryAfter,
+  parseOperationalInstant,
   planUpload,
   resolveTarget,
   retryAfterMs,
+  type PlannedFile,
 } from '../src/index.js';
+import { openPlanned } from '../src/local-run.js';
+import { multipartBody } from '../src/multipart.js';
 import {
   archived,
   cleanup,
@@ -587,5 +603,174 @@ describe('the producer keeps its output', () => {
     expect(readFileSync(join(dir, 'attachments', sha256(Buffer.from('bytes'))))).toEqual(
       before.attachment,
     );
+  });
+});
+
+describe('an attachment is its own bytes on every attempt', () => {
+  /** A whole-millisecond time, so that restoring it reproduces it exactly rather than nearly. */
+  const PINNED = new Date('2027-03-04T05:06:07.008Z');
+
+  /**
+   * Different bytes of exactly the same length, at the same path and inode, with the modification
+   * time put back to what it was. Every fact a plan records about a file is left matching.
+   */
+  function forge(path: string, replacement: Buffer): { before: Stats; after: Stats } {
+    const before = statSync(path);
+    if (replacement.length !== before.size) throw new Error('the forgery must be the same length');
+    writeFileSync(path, replacement);
+    utimesSync(path, PINNED, PINNED);
+    const after = statSync(path);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ino).toBe(before.ino);
+    expect(after.dev).toBe(before.dev);
+    return { before, after };
+  }
+
+  it('stops the body mid-part when the bytes are not the hash the plan proved', async () => {
+    const original = Buffer.from('the attachment the plan was made from');
+    const dir = writeRunDirectory(freshDir('swap'), { attachments: [original] });
+    const path = join(dir, 'attachments', sha256(original));
+    utimesSync(path, PINNED, PINNED);
+    // The plan is made while the directory is sound: the object is the hash its name claims.
+    const plan = await planUpload(dir);
+    expect(plan.attachments[0]?.sha256).toBe(sha256(original));
+
+    forge(path, Buffer.from('THE ATTACHMENT THE PLAN WAS MADE FROM'));
+    // Metadata alone would send these bytes: the plan's own check of the reopened file passes.
+    closeSync(openPlanned(plan.attachments[0] as PlannedFile));
+
+    const body = multipartBody(plan, EXPIRES.toISOString());
+    const boundary = /boundary=(.+)$/u.exec(body.contentType)?.[1] as string;
+    const sent: Buffer[] = [];
+    let problem: unknown;
+    try {
+      for await (const chunk of body.open()) sent.push(chunk as Buffer);
+    } catch (e) {
+      problem = e;
+    }
+    expect(problem).toMatchObject({
+      name: 'LocalRunDirectoryError',
+      problem: 'ATTACHMENT_CHANGED',
+    });
+    // The part was never closed and the body never ended, so there is nothing a service could
+    // read as a complete run: no separator after the attachment, no final delimiter.
+    const whole = Buffer.concat(sent);
+    expect(whole.includes(`--${boundary}--`)).toBe(false);
+    expect(whole.subarray(whole.length - 2).toString()).not.toBe('\r\n');
+  });
+
+  it('refuses bytes swapped between attempts, streaming a large attachment', async () => {
+    const original = randomBytes(3 * 1024 * 1024);
+    const dir = writeRunDirectory(freshDir('swap-retry'), { attachments: [original] });
+    const path = join(dir, 'attachments', sha256(original));
+    utimesSync(path, PINNED, PINNED);
+    const server = await service((_request, response, index) => {
+      if (index === 0) {
+        // Something worth another attempt, so the second attempt reads the file again.
+        problem(response, 503, 'BUSY');
+        return;
+      }
+      archived(response);
+    });
+    // The waiting between attempts is where the object changes, and it is counted here because
+    // overriding the client's own sleep is what replaces the recorder in `clientFor`.
+    const waits: number[] = [];
+    const { client } = clientFor(server, {
+      sleep: async (ms) => {
+        waits.push(ms);
+        forge(path, randomBytes(original.length));
+      },
+    });
+    await expect(
+      client.uploadRunDirectory({ runDirectory: dir, expiresAt: EXPIRES }),
+    ).rejects.toMatchObject({ name: 'LocalRunDirectoryError', problem: 'ATTACHMENT_CHANGED' });
+    // The first attempt sent the sound object whole, hashing three megabytes as it streamed; the
+    // second stopped inside the forged one, and a local integrity failure is not tried again.
+    expect(waits).toHaveLength(1);
+    expect(server.seen).toHaveLength(1);
+    const first = server.seen[0] as SeenRequest;
+    const sent = partsOf(first.body, String(first.headers['content-type']));
+    const attachment = sent.find((p) => p.name === 'attachment')?.value as Buffer;
+    expect(sha256(attachment)).toBe(sha256(original));
+  });
+
+  it('keeps a directory that was never sound apart from one that changed', async () => {
+    // Bad before any plan exists: the producer wrote a run whose object is not its name.
+    const dir = writeRunDirectory(freshDir('two-kinds'));
+    mkdirSync(join(dir, 'attachments'), { recursive: true });
+    writeFileSync(
+      join(dir, 'attachments', sha256(Buffer.from('something else'))),
+      Buffer.from('bytes that do not match their name'),
+    );
+    await expect(planUpload(dir)).rejects.toMatchObject({ problem: 'ATTACHMENT_HASH_MISMATCH' });
+
+    // Sound when the plan was made and changed afterwards: the same invariant at a later moment,
+    // and a different problem, because only the first says the producer's output was broken.
+    const sound = Buffer.from('bytes that do match their name...');
+    const second = writeRunDirectory(freshDir('two-kinds-later'), { attachments: [sound] });
+    const path = join(second, 'attachments', sha256(sound));
+    utimesSync(path, PINNED, PINNED);
+    const plan = await planUpload(second);
+    forge(path, Buffer.from('BYTES THAT DO MATCH THEIR NAME...'));
+    const body = multipartBody(plan, EXPIRES.toISOString());
+    await expect(
+      (async () => {
+        for await (const _chunk of body.open()) void _chunk;
+      })(),
+    ).rejects.toMatchObject({ problem: 'ATTACHMENT_CHANGED' });
+  });
+});
+
+describe('a producer states a deadline the service accepts', () => {
+  it('reads every form API v1 takes, to the exact millisecond', () => {
+    const cases: [string, number][] = [
+      ['2027-01-01T00:00:00Z', Date.UTC(2027, 0, 1, 0, 0, 0, 0)],
+      ['2027-01-01T00:00:00.1Z', Date.UTC(2027, 0, 1, 0, 0, 0, 100)],
+      ['2027-01-01T00:00:00.12Z', Date.UTC(2027, 0, 1, 0, 0, 0, 120)],
+      ['2027-01-01T00:00:00.123Z', Date.UTC(2027, 0, 1, 0, 0, 0, 123)],
+      ['2027-01-01T01:00:00+01:00', Date.UTC(2027, 0, 1, 0, 0, 0, 0)],
+      ['2026-12-31T23:00:00-01:00', Date.UTC(2027, 0, 1, 0, 0, 0, 0)],
+      ['2027-02-28T23:59:59.999Z', Date.UTC(2027, 1, 28, 23, 59, 59, 999)],
+      ['2028-02-29T00:00:00Z', Date.UTC(2028, 1, 29, 0, 0, 0, 0)],
+    ];
+    for (const [text, epochMs] of cases) {
+      expect(parseOperationalInstant(text, 'expiresAt').getTime(), text).toBe(epochMs);
+    }
+  });
+
+  it('refuses what the service would refuse, or would have to read differently', () => {
+    const refused = [
+      // A leap second: an instant a millisecond count cannot hold apart from its neighbours.
+      '2016-12-31T23:59:60Z',
+      // More precision than a millisecond, which Date.parse would silently drop.
+      '2027-01-01T00:00:00.1234Z',
+      '2027-01-01T00:00:00.123456789Z',
+      // No offset at all, so which instant it names depends on where it is read.
+      '2027-01-01T00:00:00',
+      // A day the month does not have, which Date.parse rolls forward instead.
+      '2027-02-30T00:00:00Z',
+      '2027-04-31T00:00:00Z',
+      '2027-02-29T00:00:00Z',
+      // Clocks and offsets outside their ranges.
+      '2027-01-01T00:00:00+24:00',
+      '2027-01-01T00:00:00-00:60',
+      '2027-01-01T24:00:00Z',
+      '2027-13-01T00:00:00Z',
+      // Not a timestamp at all.
+      'tomorrow',
+      '',
+      '1798761600000',
+    ];
+    for (const text of refused) {
+      expect(() => parseOperationalInstant(text, 'expiresAt'), text).toThrow(NotAnInstant);
+    }
+    for (const value of [undefined, null, 0, new Date(), {}]) {
+      expect(() => parseOperationalInstant(value, 'expiresAt')).toThrow(NotAnInstant);
+    }
+    // Three of those are exactly what an unrestricted parse would have accepted.
+    expect(Number.isFinite(Date.parse('2027-02-30T00:00:00Z'))).toBe(true);
+    expect(Date.parse('2027-01-01T00:00:00.1234Z')).toBe(Date.UTC(2027, 0, 1, 0, 0, 0, 123));
+    expect(Number.isFinite(Date.parse('2027-01-01T00:00:00'))).toBe(true);
   });
 });
