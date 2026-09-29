@@ -43,6 +43,39 @@ export interface ApiKeyPrincipal {
   readonly scopes: readonly ApiKeyScope[];
 }
 
+/** One key as an operator sees it: what it is for and what has happened to it, never its secret. */
+export interface ApiKeySummary {
+  readonly publicId: string;
+  readonly projectId: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly label: string | undefined;
+  readonly createdAt: Date;
+  readonly expiresAt: Date | undefined;
+  readonly revokedAt: Date | undefined;
+  /** True when it would authenticate right now: not revoked, and not past its expiry. */
+  readonly active: boolean;
+}
+
+export interface ListApiKeysRequest {
+  /** One project, or every project when it is omitted. */
+  readonly projectId?: string;
+  /** Include revoked and expired keys; by default only the ones that still work. */
+  readonly includeInactive?: boolean;
+  readonly limit?: number;
+  /** Continue after this public id, from a previous page's `next`. */
+  readonly after?: string;
+}
+
+export interface ApiKeyPage {
+  readonly keys: readonly ApiKeySummary[];
+  /** Pass as `after` to continue; absent when the listing reached the end. */
+  readonly next: string | undefined;
+}
+
+/** How many keys one page holds by default, and the most it may hold. */
+export const DEFAULT_API_KEY_PAGE = 50;
+export const MAX_API_KEY_PAGE = 500;
+
 /**
  * Project-scoped machine credentials in PostgreSQL. A token is `qer_k1_<publicId>_<secret>`: the
  * public id finds the row, and the secret proves it by its SHA-256, which is all that is stored.
@@ -117,6 +150,59 @@ export class PostgresApiKeys {
   }
 
   /** Revokes a key by its public id, at once; true when this call revoked it. */
+  /**
+   * A page of keys as metadata, for an operator deciding what to rotate. It cannot return a
+   * secret: the column holding one is not even selected, and nothing stored could reproduce a
+   * token anyway. Ordered by public id so that paging is stable while keys are being issued.
+   */
+  async list(request: ListApiKeysRequest = {}): Promise<ApiKeyPage> {
+    if (request.projectId !== undefined) checkProjectId(request.projectId);
+    const limit = pageSize(request.limit);
+    if (request.after !== undefined && !/^[a-z2-7]{16}$/u.test(request.after)) {
+      throw new TypeError('after must be the public id of a key');
+    }
+    const rows = await this.pool.query<{
+      public_id: string;
+      project_id: string;
+      scopes: string[];
+      label: string | null;
+      created_at: Date;
+      expires_at: Date | null;
+      revoked_at: Date | null;
+      active: boolean;
+    }>(
+      `SELECT public_id, project_id, scopes, label, created_at, expires_at, revoked_at,
+              (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())) AS active
+         FROM qe_project_api_keys
+        WHERE ($1::text IS NULL OR project_id = $1)
+          AND ($2::boolean OR (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())))
+          AND ($3::text IS NULL OR public_id > $3)
+        ORDER BY public_id
+        LIMIT $4`,
+      [
+        request.projectId ?? null,
+        request.includeInactive === true,
+        request.after ?? null,
+        limit + 1,
+      ],
+    );
+    const page = rows.rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return {
+      keys: page.map((r) => ({
+        publicId: r.public_id,
+        projectId: r.project_id,
+        scopes: r.scopes as ApiKeyScope[],
+        label: r.label ?? undefined,
+        createdAt: r.created_at,
+        expiresAt: r.expires_at ?? undefined,
+        revokedAt: r.revoked_at ?? undefined,
+        active: r.active,
+      })),
+      next: rows.rows.length > limit && last !== undefined ? last.public_id : undefined,
+    };
+  }
+
   async revoke(publicId: string): Promise<boolean> {
     if (typeof publicId !== 'string' || !/^[a-z2-7]{16}$/u.test(publicId)) {
       throw new TypeError('publicId must be the 16-character public id of a key');
@@ -220,4 +306,12 @@ function unbase32(text: string, length: number): Buffer | undefined {
   // The leftover bits of the last character must be zero, or two spellings would name one key.
   if ((value & ((1 << bits) - 1)) !== 0) return undefined;
   return out;
+}
+
+function pageSize(limit: number | undefined): number {
+  if (limit === undefined) return DEFAULT_API_KEY_PAGE;
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new TypeError('limit must be a whole number of keys of at least one');
+  }
+  return Math.min(limit, MAX_API_KEY_PAGE);
 }

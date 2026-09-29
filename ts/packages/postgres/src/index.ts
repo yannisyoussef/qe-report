@@ -52,6 +52,11 @@ export {
 export {
   API_KEY_SCOPES,
   PostgresApiKeys,
+  DEFAULT_API_KEY_PAGE,
+  MAX_API_KEY_PAGE,
+  type ApiKeyPage,
+  type ApiKeySummary,
+  type ListApiKeysRequest,
   parseApiKeyToken,
   type ApiKeyPrincipal,
   type ApiKeyScope,

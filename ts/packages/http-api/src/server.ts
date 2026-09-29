@@ -9,6 +9,8 @@ import {
 } from 'qe-report-postgres';
 import { createQeReportApi } from './app.js';
 import type { TransportLimits } from './limits.js';
+import { shutdownGraceFrom } from './lifecycle.js';
+import { resolveDatabaseUrl, safeMessage } from './secrets.js';
 
 /** The environment the standalone server reads, and nothing else. */
 export interface ServerConfig {
@@ -20,6 +22,8 @@ export interface ServerConfig {
   readonly port: number;
   readonly logLevel: string;
   readonly limits: Partial<TransportLimits>;
+  /** How long a shutdown may take before it is abandoned. */
+  readonly shutdownGraceMs: number;
 }
 
 /** Each limit and the variable that overrides it. */
@@ -54,13 +58,15 @@ export function configFrom(env: NodeJS.ProcessEnv): ServerConfig {
     limits[limit] = Number(value);
   }
   return {
-    databaseUrl: required('DATABASE_URL'),
+    // One of DATABASE_URL or DATABASE_URL_FILE, read once, and never repeated in a message.
+    databaseUrl: resolveDatabaseUrl(env),
     blobRoot: required('QE_REPORT_BLOB_ROOT'),
     stagingRoot: required('QE_REPORT_STAGING_ROOT'),
     host: env.QE_REPORT_HOST ?? '127.0.0.1',
     port,
     logLevel: env.QE_REPORT_LOG_LEVEL ?? 'info',
     limits,
+    shutdownGraceMs: shutdownGraceFrom(env),
   };
 }
 
@@ -68,6 +74,8 @@ export interface RunningServer {
   readonly app: FastifyInstance;
   /** Where it listens, as the operating system bound it. */
   readonly address: string;
+  /** The grace the deployment allows a shutdown, carried through from the configuration. */
+  readonly shutdownGraceMs: number;
   close(): Promise<void>;
 }
 
@@ -105,13 +113,18 @@ export async function startServer(config: ServerConfig): Promise<RunningServer> 
     return {
       app,
       address,
+      shutdownGraceMs: config.shutdownGraceMs,
       close: async () => {
+        // Fastify stops listening and lets the requests already running finish; then nothing of
+        // this process is holding a connection to the database.
         await app.close();
         await pool.end();
       },
     };
   } catch (e) {
     await pool.end().catch(() => undefined);
-    throw e;
+    // A driver that put the whole connection string into its message must not turn a failed
+    // start into a credential in a log.
+    throw new Error(safeMessage(e));
   }
 }
