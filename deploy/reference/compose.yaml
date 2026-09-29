@@ -1,0 +1,190 @@
+# The reference deployment: one API instance, one PostgreSQL, one attachment store, behind one
+# TLS edge. Only the edge publishes a port. Nothing here is highly available, and nothing here
+# scales horizontally; see ADR-0014 for what this arrangement does and does not claim.
+#
+#   HTTPS -> edge -> http://api:8080 (private network) -> postgres:5432 (private network)
+#
+# Start it in the documented order rather than trusting these dependencies alone: PostgreSQL
+# first, then `qe-report-admin migrate` as an explicit step, then the API, then the edge. The API
+# refuses to serve a schema it does not recognise, which is the invariant that makes that order
+# safe rather than merely conventional.
+
+name: qe-report-reference
+
+services:
+  postgres:
+    # postgres:16-bookworm, PostgreSQL 16.15
+    image: postgres@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-qe_report}
+      POSTGRES_USER: ${POSTGRES_USER:-qe_report}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # Initialise with scram rather than trust, even on a private network.
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+    secrets:
+      - postgres_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No ports: the database is reachable from this network and nowhere else.
+    networks:
+      - internal
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready --username "$${POSTGRES_USER:-qe_report}" --dbname "$${POSTGRES_DB:-qe_report}" --quiet']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${POSTGRES_MEMORY:-1g}
+    cpus: ${POSTGRES_CPUS:-1.0}
+    pids_limit: 512
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+
+  api:
+    image: ${QE_REPORT_IMAGE:-qe-report:local}
+    build:
+      context: ../..
+      dockerfile: deploy/reference/Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+    environment:
+      # The credential is a file, never an environment value that shows up in `docker inspect`.
+      DATABASE_URL_FILE: /run/secrets/database_url
+      QE_REPORT_BLOB_ROOT: /var/lib/qe-report/blobs
+      QE_REPORT_STAGING_ROOT: /var/lib/qe-report/staging
+      QE_REPORT_LOG_LEVEL: ${QE_REPORT_LOG_LEVEL:-info}
+      QE_REPORT_MAX_REQUEST_BYTES: ${QE_REPORT_MAX_REQUEST_BYTES:-536870912}
+      # Longer than a slow upload of the configured maximum, shorter than the stop grace below.
+      QE_REPORT_SHUTDOWN_GRACE_MS: ${QE_REPORT_SHUTDOWN_GRACE_MS:-30000}
+    secrets:
+      - database_url
+    volumes:
+      # Durable state. These two are always separate roots: removing a staged request can then
+      # never reach an archived attachment.
+      - blobs:/var/lib/qe-report/blobs
+      - staging:/var/lib/qe-report/staging
+    # No ports: the edge is the only way in.
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    user: '10001:10001'
+    read_only: true
+    # Node writes nothing outside /tmp, so the root filesystem stays read-only.
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      # Readiness, not liveness: the database and both roots have to be usable.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+    # Longer than QE_REPORT_SHUTDOWN_GRACE_MS, so the application's own drain decides, not Docker's.
+    stop_grace_period: 45s
+    mem_limit: ${QE_REPORT_MEMORY:-1g}
+    cpus: ${QE_REPORT_CPUS:-1.0}
+    pids_limit: 512
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+
+  edge:
+    # nginx:stable-bookworm, nginx 1.28.0
+    image: nginx@sha256:552e7481ca93ffccd046aa658dbbed22caefbc09c66fa7cd247cbb90b8a5c609
+    ports:
+      - '${QE_REPORT_PUBLIC_PORT:-8443}:8443'
+    environment:
+      QE_REPORT_SERVER_NAME: ${QE_REPORT_SERVER_NAME:-localhost}
+      # The edge limit must be at least the application's; see env.example.
+      QE_REPORT_EDGE_MAX_BODY: ${QE_REPORT_EDGE_MAX_BODY:-512m}
+      QE_REPORT_EDGE_RATE: ${QE_REPORT_EDGE_RATE:-30r/m}
+      QE_REPORT_EDGE_RATE_BURST: ${QE_REPORT_EDGE_RATE_BURST:-20}
+      QE_REPORT_EDGE_CONNECTIONS: ${QE_REPORT_EDGE_CONNECTIONS:-16}
+      QE_REPORT_EDGE_READ_TIMEOUT: ${QE_REPORT_EDGE_READ_TIMEOUT:-600s}
+    volumes:
+      - ./nginx/templates:/etc/nginx/templates:ro
+      # The operator's certificate and key, read-only, and never part of this repository.
+      - ${QE_REPORT_TLS_DIR:-./tls}:/etc/nginx/tls:ro
+    networks:
+      - internal
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD-SHELL', 'curl --fail --silent --insecure https://127.0.0.1:8443/healthz > /dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: ${QE_REPORT_EDGE_MEMORY:-256m}
+    cpus: ${QE_REPORT_EDGE_CPUS:-0.5}
+    pids_limit: 256
+
+  # Backup and restore only. It is not part of the serving path and is never started by default:
+  #   docker compose --profile tools run --rm operator ...
+  operator:
+    # postgres:16-bookworm, PostgreSQL 16.15: the client tools, at the server's own version.
+    image: postgres@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
+    profiles:
+      - tools
+    # Root, deliberately: its whole purpose is to read and replace the durable state that the API
+    # owns as 10001, it is never reachable from the public network, and it only runs when an
+    # operator starts it. The service that answers the port is the one that is hardened.
+    user: '0:0'
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-qe_report}
+      PGDATABASE: ${POSTGRES_DB:-qe_report}
+      PGPASSFILE: /run/secrets/pgpass
+    secrets:
+      - pgpass
+    volumes:
+      - blobs:/var/lib/qe-report/blobs
+      - ${QE_REPORT_BACKUP_DIR:-./backups}:/backups
+    networks:
+      - internal
+    # Cleared, so that `compose run operator pg_dump ...` runs pg_dump itself rather than the
+    # image's server entrypoint or a shell that would try to interpret it.
+    entrypoint: []
+    command:
+      ['bash', '-c', 'echo "give this service a command, such as: pg_dump --version" >&2; exit 2']
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:
+  blobs:
+  staging:
+
+secrets:
+  postgres_password:
+    file: ${QE_REPORT_SECRET_DIR:-./secrets}/postgres_password
+  database_url:
+    file: ${QE_REPORT_SECRET_DIR:-./secrets}/database_url
+  pgpass:
+    file: ${QE_REPORT_SECRET_DIR:-./secrets}/pgpass

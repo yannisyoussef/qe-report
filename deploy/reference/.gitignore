@@ -1,0 +1,5 @@
+# Runtime material an operator creates, and that must never be committed.
+.env
+secrets/
+tls/
+backups/

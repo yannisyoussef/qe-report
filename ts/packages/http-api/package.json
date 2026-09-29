@@ -33,7 +33,9 @@
     "test:junit-runs": "vitest run --config vitest.runs.config.ts test-runs/junit-runs.test.ts",
     "test:playwright-runs": "vitest run --config vitest.runs.config.ts test-runs/playwright-runs.test.ts",
     "openapi": "node scripts/openapi.mjs",
-    "openapi:check": "node scripts/openapi.mjs --check"
+    "openapi:check": "node scripts/openapi.mjs --check",
+    "test:deployment": "vitest run --config vitest.deployment.config.ts test-deployment/reference.test.ts",
+    "test:deployment-runs": "vitest run --config vitest.deployment.config.ts test-deployment/real-runs.test.ts"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "12.1.0",

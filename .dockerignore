@@ -1,0 +1,8 @@
+# Only the protocol schema and the TypeScript workspace reach the image build.
+*
+!protocol/schema
+!ts
+ts/**/node_modules
+ts/**/dist
+ts/**/.turbo
+**/.DS_Store

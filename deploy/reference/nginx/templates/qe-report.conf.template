@@ -1,0 +1,82 @@
+# The TLS edge in front of qe-report. The official image expands ${VARIABLES} in this template at
+# start-up and writes the result into /etc/nginx/conf.d/.
+#
+# What the edge owns: TLS, the public port, how many connections and requests one address may
+# make, the largest body it will pass on, and how long it waits. What it deliberately does not
+# own: authentication, which is the API's bearer key, and anything about a run's content.
+
+# Requests and connections are counted per client address. The zones are declared here and used
+# below; a valid key does not exempt anyone from them.
+limit_req_zone $binary_remote_addr zone=qe_report_api:10m rate=${QE_REPORT_EDGE_RATE};
+limit_conn_zone $binary_remote_addr zone=qe_report_conn:10m;
+
+# An access log that cannot leak a credential: no Authorization, no Cookie, no body. The fields
+# are the ones an operator needs to see a client, a route, an outcome, and a size.
+log_format qe_report escape=json
+  '{"at":"$time_iso8601","remote":"$remote_addr","method":"$request_method",'
+  '"uri":"$uri","status":$status,"bytes_sent":$body_bytes_sent,'
+  '"bytes_received":$request_length,"duration_s":$request_time,'
+  '"upstream_status":"$upstream_status","request_id":"$upstream_http_x_request_id"}';
+
+upstream qe_report_api {
+  server api:8080;
+  keepalive 16;
+}
+
+server {
+  listen 8443 ssl;
+  listen [::]:8443 ssl;
+  http2 on;
+  server_name ${QE_REPORT_SERVER_NAME};
+
+  ssl_certificate     /etc/nginx/tls/server.crt;
+  ssl_certificate_key /etc/nginx/tls/server.key;
+  # Both versions the brief requires, and nothing older.
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_cache shared:qe_report_tls:10m;
+  ssl_session_timeout 1h;
+  ssl_session_tickets off;
+
+  access_log /var/log/nginx/access.log qe_report;
+  error_log  /var/log/nginx/error.log warn;
+
+  # The application's own limit is the authority; this is the edge's, and it must not be the
+  # smaller of the two. See QE_REPORT_EDGE_MAX_BODY and QE_REPORT_MAX_REQUEST_BYTES in env.example.
+  client_max_body_size ${QE_REPORT_EDGE_MAX_BODY};
+  client_body_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
+
+  # Nothing here rewrites a response: the API's own no-store and nosniff headers reach the client
+  # as it sent them, and no content type is guessed at or transformed.
+  server_tokens off;
+
+  # A body over the limit, or too many requests, is answered by the edge itself.
+  limit_req_status 429;
+  limit_conn_status 429;
+
+  location / {
+    limit_req zone=qe_report_api burst=${QE_REPORT_EDGE_RATE_BURST} nodelay;
+    limit_conn qe_report_conn ${QE_REPORT_EDGE_CONNECTIONS};
+
+    proxy_pass http://qe_report_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Connection '';
+
+    # A run can be hundreds of megabytes. It streams through: the edge does not collect a whole
+    # upload before the application sees any of it, and does not collect a whole attachment before
+    # the client does.
+    proxy_request_buffering off;
+    proxy_buffering off;
+
+    # Long enough for an upload of the configured maximum size on a slow link.
+    proxy_connect_timeout 10s;
+    proxy_send_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
+    proxy_read_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
+
+    # A redirect from the API would be a bug; do not follow one on a client's behalf.
+    proxy_redirect off;
+  }
+}
