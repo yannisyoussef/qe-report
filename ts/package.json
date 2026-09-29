@@ -27,7 +27,10 @@
     "test:http-playwright": "pnpm --filter qe-report-http-api run test:playwright-runs",
     "test:http-client-integration": "pnpm --filter qe-report-http-client run test:integration",
     "test:http-client-junit": "pnpm --filter qe-report-http-client run test:junit-runs",
-    "test:http-client-playwright": "pnpm --filter qe-report-http-client run test:playwright-runs"
+    "test:http-client-playwright": "pnpm --filter qe-report-http-client run test:playwright-runs",
+    "test:deployment": "pnpm --filter qe-report-http-api run test:deployment",
+    "test:deployment-junit": "pnpm --filter qe-report-http-api run test:deployment-junit",
+    "test:deployment-playwright": "pnpm --filter qe-report-http-api run test:deployment-playwright"
   },
   "devDependencies": {
     "@types/node": "24.13.4",

@@ -73,6 +73,13 @@ jobs:
         if: matrix.node == 22
         working-directory: ts
         run: pnpm test:http-client-integration
+      - name: The reference deployment, end to end, including a destructive restore
+        if: matrix.node == 22
+        working-directory: ts
+        run: pnpm test:deployment
+      - name: Keep no deployment state behind
+        if: always() && matrix.node == 22
+        run: docker system prune --force --volumes
 
   playwright:
     name: Playwright reporter (Node ${{ matrix.node }}, Playwright ${{ matrix.playwright }})
@@ -127,6 +134,13 @@ jobs:
         if: matrix.node == 22 && matrix.playwright == '1.63.0'
         working-directory: ts
         run: pnpm test:http-client-playwright
+      - name: Upload a real Playwright run through the reference deployment
+        if: matrix.node == 22 && matrix.playwright == '1.63.0'
+        working-directory: ts
+        run: pnpm test:deployment-playwright
+      - name: Keep no deployment state behind
+        if: always() && matrix.node == 22 && matrix.playwright == '1.63.0'
+        run: docker system prune --force --volumes
 
   equivalence:
     name: Cross-language equivalence
@@ -171,3 +185,9 @@ jobs:
       - name: Upload a real JUnit run with the producer command after the build
         working-directory: ts
         run: pnpm test:http-client-junit
+      - name: Upload a real JUnit run through the reference deployment
+        working-directory: ts
+        run: pnpm test:deployment-junit
+      - name: Keep no deployment state behind
+        if: always()
+        run: docker system prune --force --volumes
