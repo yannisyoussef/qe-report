@@ -27,6 +27,8 @@ import {
 } from '../src/index.js';
 import { openPlanned } from '../src/local-run.js';
 import { multipartBody } from '../src/multipart.js';
+// The service's own parser, by source, so the comparison is against what API v1 actually does.
+import { parseOperationalInstant as serviceInstant } from '../../http-api/src/instants.js';
 import {
   archived,
   cleanup,
@@ -772,5 +774,74 @@ describe('a producer states a deadline the service accepts', () => {
     expect(Number.isFinite(Date.parse('2027-02-30T00:00:00Z'))).toBe(true);
     expect(Date.parse('2027-01-01T00:00:00.1234Z')).toBe(Date.UTC(2027, 0, 1, 0, 0, 0, 123));
     expect(Number.isFinite(Date.parse('2027-01-01T00:00:00'))).toBe(true);
+  });
+});
+
+describe('the producer reads a deadline exactly as the service does', () => {
+  /**
+   * Every four-digit year, including the ones a numeric `Date` constructor would quietly move to
+   * the twentieth century. The comparison is against the service's own parser, so this is the
+   * contract API v1 applies and not a second opinion about it.
+   */
+  const ACCEPTED = [
+    '0000-01-01T00:00:00Z',
+    '0001-01-01T00:00:00Z',
+    '0099-12-31T23:59:59.999Z',
+    '0100-01-01T00:00:00Z',
+    '2027-01-01T00:00:00Z',
+    '0000-01-01T00:00:00+01:00',
+    '0004-02-29T00:00:00Z',
+    '1900-03-01T00:00:00.001Z',
+    '2000-02-29T12:00:00.500-05:30',
+  ];
+
+  it('agrees with API v1 on every accepted instant, whatever the year', () => {
+    for (const text of ACCEPTED) {
+      const producer = parseOperationalInstant(text, 'expiresAt');
+      const service = serviceInstant(text, 'expiresAt');
+      expect(producer.getTime(), text).toBe(service.getTime());
+      // And the year it names is the year that was written, not one a century away.
+      expect(producer.toISOString(), text).toBe(service.toISOString());
+    }
+    // The years a numeric constructor would have moved, stated plainly.
+    expect(parseOperationalInstant('0000-01-01T00:00:00Z', 'x').toISOString()).toBe(
+      '0000-01-01T00:00:00.000Z',
+    );
+    expect(parseOperationalInstant('0099-12-31T23:59:59.999Z', 'x').toISOString()).toBe(
+      '0099-12-31T23:59:59.999Z',
+    );
+    // What the shorthand would have done with them, for the record.
+    expect(new Date(Date.UTC(99, 0, 1)).getUTCFullYear()).toBe(1999);
+  });
+
+  it('carries an offset across the start of the era', () => {
+    const text = '0000-01-01T00:00:00+01:00';
+    const producer = parseOperationalInstant(text, 'expiresAt');
+    const service = serviceInstant(text, 'expiresAt');
+    expect(producer.getTime()).toBe(service.getTime());
+    // An hour before the first instant of year zero is the last hour of the year before it,
+    // which JavaScript writes with a sign. The service accepts the timestamp, so the producer
+    // sends it rather than deciding on its own that the year is out of range.
+    expect(producer.toISOString()).toBe('-000001-12-31T23:00:00.000Z');
+    expect(producer.getTime()).toBe(Date.parse(text));
+  });
+
+  it('refuses exactly what API v1 refuses', () => {
+    const refused = [
+      '2016-12-31T23:59:60Z',
+      '2027-01-01T00:00:00.1234Z',
+      '2027-01-01T00:00:00',
+      '2027-02-30T00:00:00Z',
+      '0001-02-29T00:00:00Z',
+      '1900-02-29T00:00:00Z',
+      '2027-01-01T00:00:00+24:00',
+      '2027-13-01T00:00:00Z',
+      '0000-00-01T00:00:00Z',
+      'tomorrow',
+    ];
+    for (const text of refused) {
+      expect(() => parseOperationalInstant(text, 'expiresAt'), text).toThrow(NotAnInstant);
+      expect(() => serviceInstant(text, 'expiresAt'), text).toThrow();
+    }
   });
 });

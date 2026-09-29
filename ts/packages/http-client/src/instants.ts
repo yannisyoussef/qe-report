@@ -21,6 +21,8 @@ const OPERATIONAL =
 export const OPERATIONAL_INSTANT_GRAMMAR =
   'an RFC 3339 instant with an explicit offset, seconds 00 to 59, and at most millisecond precision, such as 2027-01-01T00:00:00Z or 2027-01-01T00:00:00.123Z';
 
+const DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 /** A value that is not an operational instant; each producer answers it in its own way. */
 export class NotAnInstant extends Error {
   constructor(what: string) {
@@ -45,30 +47,22 @@ export function parseOperationalInstant(text: unknown, what: string): Date {
   if (typeof text !== 'string') throw new NotAnInstant(what);
   const m = OPERATIONAL.exec(text);
   if (m === null) throw new NotAnInstant(what);
-  const [, y, mo, d, h, mi, s, fraction, sign, oh, om] = m as unknown as (string | undefined)[];
+  const [, y, mo, d, , , , , , oh, om] = m as unknown as (string | undefined)[];
   const year = Number(y);
   const month = Number(mo);
   const day = Number(d);
-  const millisecond = Number((fraction ?? '').padEnd(3, '0'));
-  const offsetHour = Number(oh ?? 0);
-  const offsetMinute = Number(om ?? 0);
-  if (offsetHour > 23 || offsetMinute > 59) throw new NotAnInstant(what);
-  const asUtc = Date.UTC(year, month - 1, day, Number(h), Number(mi), Number(s), millisecond);
-  if (!Number.isFinite(asUtc)) throw new NotAnInstant(what);
-  // A day the month does not have rolls forward silently; the components it comes back as must
-  // be the components that were written.
-  const probe = new Date(asUtc);
-  if (
-    probe.getUTCFullYear() !== year ||
-    probe.getUTCMonth() !== month - 1 ||
-    probe.getUTCDate() !== day
-  ) {
-    throw new NotAnInstant(what);
-  }
-  const offsetMs = (sign === '-' ? -1 : 1) * (offsetHour * 60 + offsetMinute) * 60_000;
-  const at = new Date(asUtc - offsetMs);
-  if (!Number.isFinite(at.getTime())) throw new NotAnInstant(what);
-  return at;
+  // The calendar, by the Gregorian rules, because the grammar only says how many digits each
+  // field has: a thirty-first of February is a shape it admits and a date that never existed.
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = month === 2 && leapYear ? 29 : (DAYS_IN_MONTH[month] ?? 0);
+  if (month < 1 || month > 12 || day < 1 || day > days) throw new NotAnInstant(what);
+  if (Number(oh ?? 0) > 23 || Number(om ?? 0) > 59) throw new NotAnInstant(what);
+  // Only now, and only to turn an approved timestamp into an instant. The text is read as
+  // written, four-digit year included: the numeric `Date.UTC(year, ...)` would read years 0 to
+  // 99 as 1900 to 1999 and make the producer refuse four-digit years the service accepts.
+  const epochMs = Date.parse(text);
+  if (!Number.isFinite(epochMs)) throw new NotAnInstant(what);
+  return new Date(epochMs);
 }
 
 /**
