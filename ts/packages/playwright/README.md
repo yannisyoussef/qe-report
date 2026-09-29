@@ -63,6 +63,12 @@ reporter: [['qe-report-playwright', { upload: { enabled: true, retentionMs: 30 *
 file is committed, and a key is not. Exactly one of `expiresAt` or `retentionMs` is required;
 there is no default retention, because a run is never archived without an expiry.
 
+`expiresAt` is read by the same parser the `qe-report-upload` command uses, so a deadline written
+here is one the service accepts as written: RFC 3339, an explicit offset, seconds 00 to 59, and at
+most millisecond precision. A value outside that prints one diagnostic and uploads nothing, even
+when `retentionMs` is also configured: a deadline that cannot be read is not replaced by one
+nobody asked for. The tests still run and their outcome is untouched.
+
 **Only a run this process owns is uploaded.** The reporter uploads after the session is finished
 and the sink is closed, and only when it generated the run id itself, which is the one case
 where no other shard or process can still add to the run. With a configured or shared

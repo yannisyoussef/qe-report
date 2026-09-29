@@ -265,7 +265,7 @@ describe('the reporter uploads only a run it owns', () => {
       },
     );
     expect(badInstant.deliveries).toEqual([]);
-    expect(badInstant.lines.join('')).toContain('not an instant');
+    expect(badInstant.lines.join('')).toContain('is not an RFC 3339 instant');
   });
 
   it('keeps a failed upload out of the test outcome', async () => {
@@ -279,6 +279,100 @@ describe('the reporter uploads only a run it owns', () => {
     expect(harness.lines.join('')).toContain('the run was not uploaded');
     expect(harness.lines.join('')).toContain('the run directory is kept at');
     // The local run is complete and untouched: another command can deliver it later.
+    const runDirectory = join(dir, 'runs', readdirSync(join(dir, 'runs'))[0] ?? '');
+    expect(eventTypes(runDirectory)).toContain('run.finished');
+  });
+});
+
+describe('the reporter states a deadline the service accepts', () => {
+  const ACCEPTED: [string, string][] = [
+    ['2027-01-01T00:00:00Z', '2027-01-01T00:00:00.000Z'],
+    ['2027-01-01T00:00:00.1Z', '2027-01-01T00:00:00.100Z'],
+    ['2027-01-01T00:00:00.12Z', '2027-01-01T00:00:00.120Z'],
+    ['2027-01-01T00:00:00.123Z', '2027-01-01T00:00:00.123Z'],
+    ['2027-01-01T01:00:00+01:00', '2027-01-01T00:00:00.000Z'],
+  ];
+  const REFUSED = [
+    '2016-12-31T23:59:60Z',
+    '2027-01-01T00:00:00.1234Z',
+    '2027-01-01T00:00:00.123456789Z',
+    '2027-01-01T00:00:00',
+    '2027-02-30T00:00:00Z',
+    '2027-01-01T00:00:00+24:00',
+  ];
+
+  it('reads the exact instant from an option and from the environment alike', async () => {
+    for (const [text, exact] of ACCEPTED) {
+      const asOption = await runOnce(
+        {
+          dir: temp(),
+          upload: { enabled: true, baseUrl: 'https://reports.example', expiresAt: text },
+        },
+        KEY,
+      );
+      expect(asOption.deliveries, text).toHaveLength(1);
+      expect(asOption.deliveries[0]?.expiresAt.toISOString(), text).toBe(exact);
+
+      const fromEnv = await runOnce(
+        { dir: temp() },
+        {
+          ...KEY,
+          QE_REPORT_UPLOAD: 'true',
+          QE_REPORT_URL: 'https://reports.example',
+          QE_REPORT_EXPIRES_AT: text,
+        },
+      );
+      expect(fromEnv.deliveries, text).toHaveLength(1);
+      expect(fromEnv.deliveries[0]?.expiresAt.toISOString(), text).toBe(exact);
+    }
+  });
+
+  it('says so and uploads nothing when the deadline is one the service would refuse', async () => {
+    for (const text of REFUSED) {
+      const asOption = await runOnce(
+        {
+          dir: temp(),
+          upload: {
+            enabled: true,
+            baseUrl: 'https://reports.example',
+            expiresAt: text,
+            // A relative retention is configured too, and is deliberately not used instead: a
+            // deadline that cannot be read is not quietly replaced by one nobody asked for.
+            retentionMs: 86_400_000,
+          },
+        },
+        KEY,
+      );
+      expect(asOption.deliveries, text).toEqual([]);
+      expect(asOption.lines.join(''), text).toContain('is not an RFC 3339 instant');
+      expect(asOption.lines.join(''), text).toContain('not uploading');
+
+      const fromEnv = await runOnce(
+        { dir: temp() },
+        {
+          ...KEY,
+          QE_REPORT_UPLOAD: 'true',
+          QE_REPORT_URL: 'https://reports.example',
+          QE_REPORT_EXPIRES_AT: text,
+          QE_REPORT_RETENTION_MS: '86400000',
+        },
+      );
+      expect(fromEnv.deliveries, text).toEqual([]);
+      expect(fromEnv.lines.join(''), text).toContain('is not an RFC 3339 instant');
+    }
+  });
+
+  it('leaves the run on disk and the test outcome alone when it refuses a deadline', async () => {
+    const dir = temp();
+    const harness = await runOnce(
+      {
+        dir,
+        upload: { enabled: true, baseUrl: 'https://reports.example', expiresAt: 'tomorrow' },
+      },
+      KEY,
+    );
+    expect(harness.deliveries).toEqual([]);
+    // The run is complete and kept: the command can deliver it once the deadline is corrected.
     const runDirectory = join(dir, 'runs', readdirSync(join(dir, 'runs'))[0] ?? '');
     expect(eventTypes(runDirectory)).toContain('run.finished');
   });

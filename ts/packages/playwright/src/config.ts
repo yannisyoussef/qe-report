@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { OPERATIONAL_INSTANT_GRAMMAR, parseOperationalInstant } from 'qe-report-http-client';
 import { resolveRunDirectory } from 'qe-report-sdk';
 
 /** Options given in `playwright.config`; each one wins over its environment variable. */
@@ -128,10 +129,6 @@ export function resolveConfig(
   };
 }
 
-/** The operational instant a service takes: RFC 3339, an offset, at most milliseconds. */
-const OPERATIONAL_INSTANT =
-  /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/u;
-
 function resolveUpload(
   options: QeReportUploadOptions | undefined,
   env: Readonly<Record<string, string | undefined>>,
@@ -151,12 +148,17 @@ function resolveUpload(
   const expiresValue = o.expiresAt ?? env.QE_REPORT_EXPIRES_AT;
   let expiresAt: Date | undefined;
   if (expiresValue !== undefined && expiresValue !== '') {
-    if (OPERATIONAL_INSTANT.test(expiresValue) && Number.isFinite(Date.parse(expiresValue))) {
-      expiresAt = new Date(expiresValue);
-    } else {
+    // One parser for every producer: the reporter states a deadline the same way the command
+    // does, so a value that reaches the service from here is one it accepts as written.
+    try {
+      expiresAt = parseOperationalInstant(expiresValue, 'expiresAt');
+    } catch {
       notes.push(
-        `expiresAt '${expiresValue.slice(0, 40)}' is not an instant with an explicit offset and at most millisecond precision; ignored`,
+        `expiresAt '${expiresValue.slice(0, 40)}' is not ${OPERATIONAL_INSTANT_GRAMMAR}; not uploading`,
       );
+      // A stated deadline that cannot be read is not replaced by a relative one: retention is
+      // the producer's decision, and guessing it is how a run gets deleted at the wrong time.
+      enabled = false;
     }
   }
   return {
