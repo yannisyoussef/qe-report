@@ -21,6 +21,7 @@ import {
   type ReportProblem,
   type ReportSink,
 } from 'qe-report-sdk';
+import { QeReportHttpClient, expiryAfter } from 'qe-report-http-client';
 import { resolveConfig, type QeReportReporterOptions, type ResolvedConfig } from './config.js';
 import { Diagnostics } from './diagnostics.js';
 import { hierarchy, historicalId, pathSegments } from './identity.js';
@@ -56,6 +57,24 @@ export interface ReporterHooks {
   readonly write?: (line: string) => void;
   /** Opens the sink; tests inject a failing one. Default: the SDK file sink. */
   readonly openSink?: (dir: string, sessionId: string, maxAttachmentBytes?: number) => ReportSink;
+  /** Delivers the finished run; tests inject one that records or fails. Default: the HTTP client. */
+  readonly upload?: (options: UploaderOptions) => RunUploader;
+}
+
+/** What the reporter needs of an uploader: one delivery of one finished directory. */
+export interface RunUploader {
+  uploadRunDirectory(request: {
+    runDirectory: string;
+    expiresAt: Date;
+  }): Promise<{ outcome: string; runId: string }>;
+}
+
+export interface UploaderOptions {
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly maxAttempts: number | undefined;
+  readonly attemptTimeoutMs: number | undefined;
+  readonly allowInsecureHttp: boolean;
 }
 
 interface OpenStep {
@@ -91,6 +110,7 @@ export class QeReportReporter implements Reporter {
     sessionId: string,
     maxAttachmentBytes?: number,
   ) => ReportSink;
+  private readonly makeUploader: (options: UploaderOptions) => RunUploader;
   private readonly attempts = new Map<string, OpenAttempt>();
   /** Errors of the invocation itself (global setup and teardown), for session.finished. */
   private readonly sessionFailures: Failure[] = [];
@@ -115,6 +135,20 @@ export class QeReportReporter implements Reporter {
       hooks.openSink ??
       ((dir, sessionId, max) =>
         FileSink.open(dir, sessionId, max === undefined ? {} : { maxAttachmentBytes: max }));
+    this.makeUploader =
+      hooks.upload ??
+      ((options) =>
+        new QeReportHttpClient({
+          baseUrl: options.baseUrl,
+          apiKey: options.apiKey,
+          ...(options.maxAttempts === undefined
+            ? {}
+            : { retry: { maxAttempts: options.maxAttempts } }),
+          ...(options.attemptTimeoutMs === undefined
+            ? {}
+            : { attemptTimeoutMs: options.attemptTimeoutMs }),
+          ...(options.allowInsecureHttp ? { allowInsecureHttp: true } : {}),
+        }));
   }
 
   printsToStdio(): boolean {
@@ -417,7 +451,13 @@ export class QeReportReporter implements Reporter {
     return relative?.file;
   }
 
-  onEnd(result: FullResult): void {
+  /**
+   * Closes the session, and then, when this process owns the whole run and an upload is asked
+   * for, delivers the finished directory. Playwright awaits this, so the upload happens before
+   * the process ends rather than being fired into the dark.
+   */
+  async onEnd(result: FullResult): Promise<void> {
+    const config = this.config;
     this.guard('onEnd', () => {
       const session = this.session;
       if (!session || !this.config) return;
@@ -442,6 +482,80 @@ export class QeReportReporter implements Reporter {
       session.close();
       this.session = undefined;
     });
+    // Only once the sink is closed: what is uploaded is the complete directory on disk.
+    await this.uploadRun(config);
+  }
+
+  /**
+   * Uploads the run this process wrote, when it can prove the run is its own. A run id that was
+   * configured or inherited may still be growing in another shard or another process, and
+   * archiving it now would make the archive refuse whatever arrives later: that case is left to
+   * the coordinator, which uploads the directory once everything has finished.
+   *
+   * An upload that fails is a reporting problem, never a test result: it is printed once and the
+   * run's outcome is untouched.
+   */
+  private async uploadRun(config: ResolvedConfig | undefined): Promise<void> {
+    if (config === undefined || !config.enabled || !config.upload.enabled) return;
+    if (!config.runIdGenerated) {
+      this.diagnostics.once(
+        'upload-shared-run',
+        'automatic upload skipped: this run id is shared or configured, so another shard or process may still add to the run; upload the run directory from the coordinator once every one of them has finished (qe-report-upload --run-dir ' +
+          `${config.runDirectory})`,
+      );
+      return;
+    }
+    const apiKey = this.env.QE_REPORT_API_KEY;
+    if (apiKey === undefined || apiKey === '') {
+      this.diagnostics.once(
+        'upload-no-key',
+        'automatic upload skipped: QE_REPORT_API_KEY is not set, and a key is never taken from the configuration file',
+      );
+      return;
+    }
+    if (config.upload.baseUrl === undefined) {
+      this.diagnostics.once(
+        'upload-no-url',
+        'automatic upload skipped: no service was configured; set QE_REPORT_URL or the reporter option baseUrl',
+      );
+      return;
+    }
+    const expiresAt = this.expiryOf(config);
+    if (expiresAt === undefined) return;
+    try {
+      const uploader = this.makeUploader({
+        baseUrl: config.upload.baseUrl,
+        apiKey,
+        maxAttempts: config.upload.maxAttempts,
+        attemptTimeoutMs: config.upload.attemptTimeoutMs,
+        allowInsecureHttp: config.upload.allowInsecureHttp,
+      });
+      const result = await uploader.uploadRunDirectory({
+        runDirectory: config.runDirectory,
+        expiresAt,
+      });
+      this.diagnostics.once('upload', `run ${result.runId} uploaded (${result.outcome})`);
+    } catch (e) {
+      // A run that was not delivered is still on disk, and a later `qe-report-upload` sends it.
+      this.diagnostics.once(
+        'upload-failed',
+        `the run was not uploaded: ${e instanceof Error ? e.message : 'unknown error'}; the run directory is kept at ${config.runDirectory}`,
+      );
+    }
+  }
+
+  /** The instant retention may delete the run; there is no default, so silence means no upload. */
+  private expiryOf(config: ResolvedConfig): Date | undefined {
+    if (config.upload.expiresAt !== undefined) return config.upload.expiresAt;
+    if (config.upload.retentionMs !== undefined) {
+      // Computed once, here, so every attempt of this upload offers the same deadline.
+      return expiryAfter(config.upload.retentionMs);
+    }
+    this.diagnostics.once(
+      'upload-no-retention',
+      'automatic upload skipped: no retention was configured; set expiresAt or retentionMs (QE_REPORT_EXPIRES_AT or QE_REPORT_RETENTION_MS), because a run is never archived without an expiry',
+    );
+    return undefined;
   }
 
   /**

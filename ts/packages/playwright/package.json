@@ -35,6 +35,7 @@
     "test:consumer": "vitest run --config vitest.consumer.config.ts"
   },
   "dependencies": {
+    "qe-report-http-client": "workspace:*",
     "qe-report-sdk": "workspace:*"
   },
   "peerDependencies": {

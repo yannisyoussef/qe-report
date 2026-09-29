@@ -24,7 +24,10 @@
     "openapi:check": "pnpm --filter qe-report-http-api run openapi:check",
     "test:http-integration": "pnpm --filter qe-report-http-api run test:integration",
     "test:http-junit": "pnpm --filter qe-report-http-api run test:junit-runs",
-    "test:http-playwright": "pnpm --filter qe-report-http-api run test:playwright-runs"
+    "test:http-playwright": "pnpm --filter qe-report-http-api run test:playwright-runs",
+    "test:http-client-integration": "pnpm --filter qe-report-http-client run test:integration",
+    "test:http-client-junit": "pnpm --filter qe-report-http-client run test:junit-runs",
+    "test:http-client-playwright": "pnpm --filter qe-report-http-client run test:playwright-runs"
   },
   "devDependencies": {
     "@types/node": "24.13.4",

@@ -69,6 +69,10 @@ jobs:
         if: matrix.node == 22
         working-directory: ts
         run: pnpm test:http-integration
+      - name: Producer uploads against a real service, PostgreSQL 16, and a staging directory
+        if: matrix.node == 22
+        working-directory: ts
+        run: pnpm test:http-client-integration
 
   playwright:
     name: Playwright reporter (Node ${{ matrix.node }}, Playwright ${{ matrix.playwright }})
@@ -119,6 +123,10 @@ jobs:
         if: matrix.node == 22 && matrix.playwright == '1.63.0'
         working-directory: ts
         run: pnpm test:http-playwright
+      - name: Upload real Playwright runs from the reporter itself
+        if: matrix.node == 22 && matrix.playwright == '1.63.0'
+        working-directory: ts
+        run: pnpm test:http-client-playwright
 
   equivalence:
     name: Cross-language equivalence
@@ -160,3 +168,6 @@ jobs:
       - name: Upload a real JUnit run through HTTP and read it back
         working-directory: ts
         run: pnpm test:http-junit
+      - name: Upload a real JUnit run with the producer command after the build
+        working-directory: ts
+        run: pnpm test:http-client-junit

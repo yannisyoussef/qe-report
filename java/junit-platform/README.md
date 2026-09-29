@@ -78,6 +78,18 @@ a run with the qe-report validator:
 qe-report-validate build/qe-report/runs/<run directory> --require-complete
 ```
 
+Deliver a run to a qe-report service after the build, never from inside it: a fork cannot know
+that no other fork is still writing, and archiving a run too early would refuse whatever came
+next. The coordinator uploads the finished directory with the producer-neutral command, and no
+Java code speaks HTTP:
+
+```
+./gradlew test
+QE_REPORT_API_KEY=... qe-report-upload \
+  --run-dir build/qe-report/runs/<run directory> \
+  --url https://reports.example.com --retention-ms 2592000000
+```
+
 ## What is reported
 
 | JUnit                                                                                                                               | Protocol                                                                                                                                                                                                                                                                                              |
