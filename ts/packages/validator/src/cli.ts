@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { statSync } from 'node:fs';
 import { formatDiagnostic, validateFile, validateRunDirectory, type Report } from './validator.js';
+import { VERSION } from './version.js';
 
 const USAGE = `usage: qe-report-validate <run directory | events file> [--attachments <dir>] [--require-complete] [--json]
 
 Validates a qe-report run directory (events/*.ndjson plus attachments/) or one event file
-(compatibility line 0.3). Exit status: 0 valid, 1 invalid, 2 usage or I/O error.`;
+(compatibility line 0.3). Exit status: 0 valid, 1 invalid, 2 usage or I/O error.
+
+  --version   print the version of this command and exit`;
 
 function main(argv: string[]): Promise<number> {
   let target: string | undefined;
@@ -21,6 +24,10 @@ function main(argv: string[]): Promise<number> {
     else if (a === '--json') json = true;
     else if (a === '-h' || a === '--help') {
       process.stdout.write(USAGE + '\n');
+      return Promise.resolve(0);
+    } else if (a === '--version' || a === '-V') {
+      // The package's own version, so an installed copy can say which one it is.
+      process.stdout.write(VERSION + '\n');
       return Promise.resolve(0);
     } else if (a !== undefined && a.startsWith('-')) return usage(`unknown option ${a}`);
     else if (target === undefined) target = a;
