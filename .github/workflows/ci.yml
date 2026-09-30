@@ -73,6 +73,20 @@ jobs:
         if: matrix.node == 22
         working-directory: ts
         run: pnpm test:http-client-integration
+      - name: The reference deployment, end to end, including a destructive restore
+        if: matrix.node == 22
+        working-directory: ts
+        run: pnpm test:deployment
+      # Scoped to what the rehearsal made. `docker system prune` would also reach anything else on
+      # the machine, which is harmless on a hosted runner and is not on a self-hosted one. Each
+      # stack already removes its own containers and volumes; this is for one that could not.
+      - name: Keep no deployment state behind
+        if: always() && matrix.node == 22
+        run: |
+          for project in $(docker compose ls --all --quiet | grep '^qe-ref-' || true); do
+            docker compose --project-name "$project" down --volumes --remove-orphans --timeout 30 || true
+          done
+          docker image rm --force qe-report:test || true
 
   playwright:
     name: Playwright reporter (Node ${{ matrix.node }}, Playwright ${{ matrix.playwright }})
@@ -127,6 +141,17 @@ jobs:
         if: matrix.node == 22 && matrix.playwright == '1.63.0'
         working-directory: ts
         run: pnpm test:http-client-playwright
+      - name: Upload a real Playwright run through the reference deployment
+        if: matrix.node == 22 && matrix.playwright == '1.63.0'
+        working-directory: ts
+        run: pnpm test:deployment-playwright
+      - name: Keep no deployment state behind
+        if: always() && matrix.node == 22 && matrix.playwright == '1.63.0'
+        run: |
+          for project in $(docker compose ls --all --quiet | grep '^qe-ref-' || true); do
+            docker compose --project-name "$project" down --volumes --remove-orphans --timeout 30 || true
+          done
+          docker image rm --force qe-report:test || true
 
   equivalence:
     name: Cross-language equivalence
@@ -171,3 +196,13 @@ jobs:
       - name: Upload a real JUnit run with the producer command after the build
         working-directory: ts
         run: pnpm test:http-client-junit
+      - name: Upload a real JUnit run through the reference deployment
+        working-directory: ts
+        run: pnpm test:deployment-junit
+      - name: Keep no deployment state behind
+        if: always()
+        run: |
+          for project in $(docker compose ls --all --quiet | grep '^qe-ref-' || true); do
+            docker compose --project-name "$project" down --volumes --remove-orphans --timeout 30 || true
+          done
+          docker image rm --force qe-report:test || true

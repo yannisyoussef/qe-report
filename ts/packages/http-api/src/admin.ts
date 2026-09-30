@@ -1,25 +1,69 @@
 import { parseArgs } from 'node:util';
 import pg from 'pg';
+import { FileBlobStore } from 'qe-report-blob-fs';
 import { parseOperationalInstant } from './instants.js';
+import { scrubConnectionStrings } from './secrets.js';
+import { StagingMaintenance, type StagingReport } from './staging-maintenance.js';
+import { checkRoots } from './staging.js';
 import {
   API_KEY_SCOPES,
   PostgresApiKeys,
+  PostgresQueries,
+  RetentionMaintenance,
   migrate,
   schemaStatus,
   type ApiKeyScope,
+  type MaintenanceOptions,
 } from 'qe-report-postgres';
 
-export const USAGE = `qe-report-admin: operator actions against DATABASE_URL; nothing here is reachable over HTTP
+/**
+ * Problems that report contention rather than failure: nothing was changed, and a later pass
+ * does the work. They are printed, because an operator watching a pass should see them, but they
+ * do not fail the command, or a cleanup that found one stray file in a staging root would exit
+ * non-zero after having done exactly what it was asked to do.
+ */
+const SELF_RESOLVING: ReadonlySet<string> = new Set([
+  'RUN_DELETE_DECLINED',
+  'CATALOG_ROW_RETAINED',
+  'BLOB_CHANGED',
+  'NOT_A_REQUEST_ID',
+  'NOT_A_DIRECTORY',
+]);
+
+export const USAGE = `qe-report-admin: operator actions against the database named by DATABASE_URL
+or DATABASE_URL_FILE; nothing here is reachable over HTTP
 
   qe-report-admin migrate
       Applies pending schema migrations.
-  qe-report-admin schema
+  qe-report-admin schema [--json]
       Reports whether the schema is current, without changing it.
   qe-report-admin key create --project <projectId> --scope <runs:read|runs:write> [--scope ...]
                              [--label <text>] [--expires-at <RFC 3339 instant, offset, <=ms>]
       Issues a project-scoped API key and prints its bearer token, once, on standard output.
   qe-report-admin key revoke --public-id <publicId>
       Revokes a key at once.
+  qe-report-admin key list [--project <projectId>] [--all] [--limit <n>] [--after <publicId>] [--json]
+      Lists key metadata. Never a secret: no token can be recovered once it was shown.
+  qe-report-admin index status --project <projectId> [--json]
+      Reports how much of a project's query index is current.
+  qe-report-admin index rebuild --project <projectId> [--max-runs <n>]
+                               [--after-sequence <ingestionSequence>] [--json]
+      Rebuilds derived query rows from the archived source, one bounded pass.
+  qe-report-admin index verify --project <projectId> --run-id <runId> [--json]
+      Replays one archived run and reports any drift from its indexed rows.
+  qe-report-admin maintenance preview|run (--as-of <instant> | --now)
+      [--lock-timeout-ms <n>] [--temp-before <instant>] [--orphan-objects-before <instant>]
+      [--max-runs <n>] [--max-blobs <n>] [--max-uncatalogued-blobs <n>]
+      [--max-bytes-examined <n>] [--max-temporary-files <n>] [--max-legacy-reported <n>]
+      [--after-sha256 <hex>] [--json]
+      Retention and blob collection. preview changes nothing; run deletes what is eligible.
+      Needs QE_REPORT_BLOB_ROOT.
+  qe-report-admin staging preview (--before <instant> | --older-than-ms <n>) [--max <n>] [--json]
+  qe-report-admin staging clean   (--before <instant> | --older-than-ms <n>) [--max <n>] [--json]
+                                  --execute
+      Removes request directories a killed server left behind. Stop the API instance that owns the
+      staging root first: nothing here can tell an abandoned request from one still being written.
+      Needs QE_REPORT_STAGING_ROOT.
 `;
 
 /** Where the command writes: the token alone goes to `out`, everything else to `err`. */
@@ -30,11 +74,15 @@ export interface Streams {
 
 class UsageError extends Error {}
 
-/** Runs one command against a pool; returns the process exit code. */
+/**
+ * Runs one command against a pool; returns the process exit code. The environment is read only
+ * by the commands that need a filesystem root, and only for that root.
+ */
 export async function runAdmin(
   argv: readonly string[],
   pool: pg.Pool,
   streams: Streams,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
   try {
     const [command, sub] = argv;
@@ -49,7 +97,15 @@ export async function runAdmin(
       return 0;
     }
     if (command === 'schema') {
+      const { values } = parseArgs({
+        args: argv.slice(1),
+        options: { json: { type: 'boolean' } },
+        strict: true,
+      });
       const status = await schemaStatus(pool);
+      // On standard output, so a deployment script can record the version it backed up without
+      // knowing the name of a table. The human form stays on standard error, as everywhere else.
+      if (values.json === true) streams.out(`${asJson(status)}\n`);
       streams.err(
         status.current
           ? `the schema is current at version ${status.expectedVersion}\n`
@@ -108,6 +164,261 @@ export async function runAdmin(
       streams.err(revoked ? 'revoked\n' : 'no active key has that public id\n');
       return revoked ? 0 : 1;
     }
+    if (command === 'key' && sub === 'list') {
+      const { values } = parseArgs({
+        args: argv.slice(2),
+        options: {
+          project: { type: 'string' },
+          all: { type: 'boolean' },
+          limit: { type: 'string' },
+          after: { type: 'string' },
+          json: { type: 'boolean' },
+        },
+        strict: true,
+      });
+      const page = await new PostgresApiKeys(pool).list({
+        ...(values.project === undefined ? {} : { projectId: values.project }),
+        ...(values.all === true ? { includeInactive: true } : {}),
+        ...(values.limit === undefined ? {} : { limit: whole('--limit', values.limit) }),
+        ...(values.after === undefined ? {} : { after: values.after }),
+      });
+      if (values.json === true) {
+        streams.out(`${asJson({ keys: page.keys, next: page.next })}\n`);
+        return 0;
+      }
+      if (page.keys.length === 0) streams.err('no key matches\n');
+      for (const key of page.keys) {
+        streams.out(
+          `${key.publicId}  ${key.active ? 'active  ' : 'inactive'}  ${JSON.stringify(key.projectId)}  ${key.scopes.join(',')}  created ${key.createdAt.toISOString()}${
+            key.expiresAt === undefined ? '' : `  expires ${key.expiresAt.toISOString()}`
+          }${key.revokedAt === undefined ? '' : `  revoked ${key.revokedAt.toISOString()}`}${
+            key.label === undefined ? '' : `  ${JSON.stringify(key.label)}`
+          }\n`,
+        );
+      }
+      if (page.next !== undefined) streams.err(`more keys follow; continue after ${page.next}\n`);
+      return 0;
+    }
+    if (command === 'index') {
+      const { values } = parseArgs({
+        args: argv.slice(2),
+        options: {
+          project: { type: 'string' },
+          'run-id': { type: 'string' },
+          'max-runs': { type: 'string' },
+          'after-sequence': { type: 'string' },
+          json: { type: 'boolean' },
+        },
+        strict: true,
+      });
+      if (values.project === undefined) throw new UsageError('--project is required');
+      const queries = new PostgresQueries(pool);
+      const json = values.json === true;
+      if (sub === 'status') {
+        const status = await queries.getIndexStatus(values.project);
+        if (json) streams.out(`${asJson(status)}\n`);
+        else {
+          streams.out(
+            `${status.complete ? 'complete' : 'incomplete'}: ${status.currentRuns} of ${status.totalRuns} runs indexed, ${status.missingRuns} missing, ${status.staleRuns} stale\n`,
+          );
+        }
+        return status.complete ? 0 : 1;
+      }
+      if (sub === 'rebuild') {
+        const result = await queries.rebuildProjectIndex({
+          projectId: values.project,
+          ...(values['max-runs'] === undefined
+            ? {}
+            : { maxRuns: whole('--max-runs', values['max-runs']) }),
+          ...(values['after-sequence'] === undefined
+            ? {}
+            : { afterIngestionSequence: bigWhole('--after-sequence', values['after-sequence']) }),
+        });
+        if (json) streams.out(`${asJson(result)}\n`);
+        else {
+          streams.out(
+            `rebuilt ${result.rebuilt}, skipped ${result.skipped}${result.problems.length === 0 ? '' : `, ${result.problems.length} could not be indexed`}\n`,
+          );
+          for (const problem of result.problems) {
+            streams.err(`  ${problem.runId}: ${problem.message}\n`);
+          }
+          if (result.more) {
+            streams.err(
+              `more runs remain; continue with --after-sequence ${String(result.lastIngestionSequence ?? '')}\n`,
+            );
+          }
+        }
+        return result.problems.length === 0 ? 0 : 1;
+      }
+      if (sub === 'verify') {
+        if (values['run-id'] === undefined) throw new UsageError('--run-id is required');
+        const drift = await queries.verifyIndexedRun(values.project, values['run-id']);
+        if (json) streams.out(`${asJson(drift)}\n`);
+        else {
+          streams.out(
+            drift.agrees
+              ? `${drift.runId} agrees with its indexed rows\n`
+              : `${drift.runId} differs from its indexed rows:\n${drift.differences.map((d) => `  ${d}\n`).join('')}`,
+          );
+        }
+        return drift.agrees ? 0 : 1;
+      }
+      throw new UsageError(`unknown command ${argv.join(' ')}`);
+    }
+    if (command === 'maintenance' && (sub === 'preview' || sub === 'run')) {
+      const { values } = parseArgs({
+        args: argv.slice(2),
+        options: {
+          'as-of': { type: 'string' },
+          now: { type: 'boolean' },
+          'lock-timeout-ms': { type: 'string' },
+          'temp-before': { type: 'string' },
+          'orphan-objects-before': { type: 'string' },
+          'max-runs': { type: 'string' },
+          'max-blobs': { type: 'string' },
+          'max-uncatalogued-blobs': { type: 'string' },
+          'max-bytes-examined': { type: 'string' },
+          'max-temporary-files': { type: 'string' },
+          'max-legacy-reported': { type: 'string' },
+          'after-sha256': { type: 'string' },
+          json: { type: 'boolean' },
+        },
+        strict: true,
+      });
+      if ((values['as-of'] === undefined) === (values.now !== true)) {
+        throw new UsageError('exactly one of --as-of or --now is required');
+      }
+      // A destructive pass never reads a clock the operator did not ask it to read, and when
+      // they do ask, the instant it settled on is printed before anything is deleted.
+      const asOf = values.now === true ? new Date() : instant('--as-of', values['as-of'] as string);
+      if (values.now === true) {
+        streams.err(`--now resolved to ${asOf.toISOString()}\n`);
+      }
+      const options: MaintenanceOptions = {
+        asOf,
+        ...maybeInstant<MaintenanceOptions>('--temp-before', values['temp-before'], 'tempBefore'),
+        ...maybeInstant<MaintenanceOptions>(
+          '--orphan-objects-before',
+          values['orphan-objects-before'],
+          'orphanObjectsBefore',
+        ),
+        ...maybeWhole<MaintenanceOptions>(
+          '--lock-timeout-ms',
+          values['lock-timeout-ms'],
+          'lockTimeoutMs',
+        ),
+        ...maybeWhole<MaintenanceOptions>('--max-runs', values['max-runs'], 'maxRuns'),
+        ...maybeWhole<MaintenanceOptions>('--max-blobs', values['max-blobs'], 'maxBlobs'),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-uncatalogued-blobs',
+          values['max-uncatalogued-blobs'],
+          'maxUncataloguedBlobs',
+        ),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-bytes-examined',
+          values['max-bytes-examined'],
+          'maxBytesExamined',
+        ),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-temporary-files',
+          values['max-temporary-files'],
+          'maxTemporaryFiles',
+        ),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-legacy-reported',
+          values['max-legacy-reported'],
+          'maxLegacyReported',
+        ),
+        ...(values['after-sha256'] === undefined
+          ? {}
+          : { afterSha256: sha256('--after-sha256', values['after-sha256']) }),
+      };
+      const maintenance = new RetentionMaintenance(
+        pool,
+        new FileBlobStore(rootFrom(env, 'QE_REPORT_BLOB_ROOT')),
+      );
+      const report =
+        sub === 'preview' ? await maintenance.preview(options) : await maintenance.run(options);
+      if (values.json === true) {
+        streams.out(`${asJson(report)}\n`);
+      } else {
+        streams.out(
+          `${report.dryRun ? 'preview' : 'run'} as of ${report.asOf.toISOString()}\n` +
+            `  runs expired            ${report.expiredRuns.length}\n` +
+            `  source lines released   ${report.sourceLinesReleased}\n` +
+            `  blob relations released ${report.blobRelationsReleased}\n` +
+            `  blobs reclaimed         ${report.blobs.filter((b) => b.origin === 'catalogued').length} catalogued, ${report.blobs.filter((b) => b.origin === 'uncatalogued').length} uncatalogued\n` +
+            `  temporary files         ${report.temporaryFiles.length}\n` +
+            `  bytes reclaimed         ${report.bytesReclaimed}\n` +
+            `  unmanaged runs          ${report.legacyRunCount}\n` +
+            `  problems                ${report.problems.length}\n` +
+            `  truncated               runs ${report.truncated.runs}, blobs ${report.truncated.blobs}, temporary ${report.truncated.temporaryFiles}\n`,
+        );
+        for (const problem of report.problems) {
+          const where =
+            problem.sha256 ?? (problem.path === undefined ? undefined : `./${problem.path}`);
+          streams.err(
+            `  ${problem.code}${where === undefined ? '' : ` ${where}`}: ${problem.message}\n`,
+          );
+        }
+      }
+      return report.problems.some((p) => !SELF_RESOLVING.has(p.code)) ? 1 : 0;
+    }
+    if (command === 'staging' && (sub === 'preview' || sub === 'clean')) {
+      const { values } = parseArgs({
+        args: argv.slice(2),
+        options: {
+          before: { type: 'string' },
+          'older-than-ms': { type: 'string' },
+          max: { type: 'string' },
+          execute: { type: 'boolean' },
+          json: { type: 'boolean' },
+        },
+        strict: true,
+      });
+      if ((values.before === undefined) === (values['older-than-ms'] === undefined)) {
+        throw new UsageError('exactly one of --before or --older-than-ms is required');
+      }
+      // One absolute cutoff, decided here, so a long pass does not move its own boundary.
+      const before =
+        values.before !== undefined
+          ? instant('--before', values.before)
+          : new Date(Date.now() - positive('--older-than-ms', values['older-than-ms'] as string));
+      if (sub === 'clean' && values.execute !== true) {
+        throw new UsageError(
+          'staging clean removes directories; pass --execute, and stop the API instance that owns the staging root first',
+        );
+      }
+      // Every argument first, then the environment: an operator who mistyped a bound should be
+      // told about the bound, not about a variable they have not got to yet.
+      const options = {
+        before,
+        ...(values.max === undefined ? {} : { max: positive('--max', values.max) }),
+      };
+      // The same check the server applies at start-up, so a mistyped root is refused here rather
+      // than treated as a staging directory whose contents this command may delete.
+      const maintenance = new StagingMaintenance(
+        stagingRoot(rootFrom(env, 'QE_REPORT_STAGING_ROOT'), rootFrom(env, 'QE_REPORT_BLOB_ROOT')),
+      );
+      const report: StagingReport =
+        sub === 'preview' ? maintenance.preview(options) : maintenance.clean(options);
+      if (values.json === true) {
+        streams.out(`${asJson(report)}\n`);
+      } else {
+        streams.out(
+          `${report.dryRun ? 'preview' : 'clean'}: ${report.entries.length} abandoned request ${
+            report.entries.length === 1 ? 'directory' : 'directories'
+          } before ${report.before.toISOString()}${report.dryRun ? '' : `, ${report.removed} removed`}${report.truncated ? ', more remain' : ''}\n`,
+        );
+        for (const entry of report.entries) {
+          streams.out(`  ${entry.requestId}  ${entry.modifiedAt.toISOString()}\n`);
+        }
+        for (const problem of report.problems) {
+          streams.err(`  ${problem.code} ${JSON.stringify(problem.name)}: ${problem.message}\n`);
+        }
+      }
+      return report.problems.some((p) => !SELF_RESOLVING.has(p.code)) ? 1 : 0;
+    }
     throw new UsageError(
       command === undefined ? 'a command is required' : `unknown command ${argv.join(' ')}`,
     );
@@ -117,9 +428,99 @@ export async function runAdmin(
       return 2;
     }
     if (e instanceof TypeError) {
-      streams.err(`${e.message}\n`);
+      streams.err(`${scrubConnectionStrings(e.message)}\n`);
       return 2;
     }
     throw e;
   }
+}
+
+/** The staging root, checked the way the server checks it, as a usage error if it does not hold. */
+function stagingRoot(staging: string, blobs: string): string {
+  try {
+    return checkRoots(staging, blobs);
+  } catch (e) {
+    throw new UsageError((e as Error).message);
+  }
+}
+
+/** A filesystem root a command needs, or a usage error naming the variable that supplies it. */
+function rootFrom(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
+  if (value === undefined || value === '') throw new UsageError(`${name} must be set`);
+  return value;
+}
+
+function instant(name: string, text: string): Date {
+  try {
+    return parseOperationalInstant(text, name);
+  } catch (e) {
+    throw new UsageError((e as Error).message);
+  }
+}
+
+/**
+ * The members of `T` that hold a given kind of value. The two mappers below are spread into an
+ * options literal, and a spread defeats excess-property checking, so the key each one is given is
+ * constrained here instead: a mistyped option name, or one whose member is not of the kind being
+ * parsed, does not compile. Eleven bounds reach retention this way, and nothing at run time would
+ * notice one of them silently going nowhere.
+ */
+type KeysHolding<T, V> = {
+  [K in keyof T]-?: T[K] extends V | undefined ? K : never;
+}[keyof T];
+
+function maybeInstant<T>(
+  name: string,
+  text: string | undefined,
+  key: KeysHolding<T, Date>,
+): Partial<T> {
+  return text === undefined ? {} : ({ [key]: instant(name, text) } as Partial<T>);
+}
+
+function maybeWhole<T>(
+  name: string,
+  text: string | undefined,
+  key: KeysHolding<T, number>,
+): Partial<T> {
+  return text === undefined ? {} : ({ [key]: whole(name, text) } as Partial<T>);
+}
+
+function whole(name: string, value: string): number {
+  if (!/^[0-9]{1,15}$/u.test(value)) {
+    throw new UsageError(`${name} must be a whole number`);
+  }
+  return Number(value);
+}
+
+/**
+ * A bound that must mean something. Zero is rejected because for a cutoff it means "everything",
+ * which is the one answer a mandatory cutoff exists to prevent an operator from giving by
+ * accident, and for a ceiling it means "nothing", which is a command that does no work while
+ * reporting success.
+ */
+function positive(name: string, value: string): number {
+  const parsed = whole(name, value);
+  if (parsed === 0) throw new UsageError(`${name} must be greater than zero`);
+  return parsed;
+}
+
+function sha256(name: string, value: string): string {
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new UsageError(`${name} must be 64 lowercase hexadecimal characters`);
+  }
+  return value;
+}
+
+function bigWhole(name: string, value: string): bigint {
+  if (!/^[0-9]{1,19}$/u.test(value)) throw new UsageError(`${name} must be a whole number`);
+  return BigInt(value);
+}
+
+/**
+ * Operator output a script can read. A sequence counted by the database is a `bigint`, which JSON
+ * has no room for, so it is written as the decimal string it already is everywhere else.
+ */
+function asJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => (typeof v === 'bigint' ? v.toString() : v), 2);
 }

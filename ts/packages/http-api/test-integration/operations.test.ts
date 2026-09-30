@@ -70,6 +70,7 @@ describe('the standalone server', () => {
         port: 0,
         logLevel: 'silent',
         limits: {},
+        shutdownGraceMs: 5_000,
         ...freshRoots(),
       }),
     ).rejects.toThrow(/migration 5 is not applied.*qe-report-admin migrate/u);
@@ -85,6 +86,7 @@ describe('the standalone server', () => {
         port: 0,
         logLevel: 'silent',
         limits: {},
+        shutdownGraceMs: 5_000,
         ...freshRoots(),
       }),
     ).rejects.toThrow(/never been migrated/u);
@@ -99,6 +101,7 @@ describe('the standalone server', () => {
       port: 0,
       logLevel: 'silent',
       limits: {},
+      shutdownGraceMs: 5_000,
       ...paths,
     });
     try {
@@ -135,6 +138,7 @@ describe('the standalone server', () => {
         port: 0,
         logLevel: 'silent',
         limits: {},
+        shutdownGraceMs: 5_000,
         blobRoot: paths.blobRoot,
         stagingRoot: nested,
       }),

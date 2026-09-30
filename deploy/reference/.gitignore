@@ -1,0 +1,7 @@
+# Runtime material an operator creates, and that must never be committed.
+.env
+secrets/
+tls/
+backups/
+# The rehearsal authority's private key, kept out of the directory the edge mounts.
+rehearsal-ca/
