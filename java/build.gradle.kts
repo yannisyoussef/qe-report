@@ -206,6 +206,38 @@ tasks.register("verifyPublicationBoundary") {
 // The root project has no `check` of its own, so every module's does.
 subprojects { tasks.named("check") { dependsOn(rootProject.tasks.named("verifyPublicationBoundary")) } }
 
+// What a Java consumer of this release actually gets on its runtime classpath, written where the
+// release SBOM can read it. Registered per module and resolving only that module's own
+// configuration: the configuration cache forbids one project resolving another's, and reading the
+// answer out of a text report instead would mean parsing Gradle's output rather than asking it.
+subprojects {
+    tasks.register("releaseDependencies") {
+        description = "Writes this module's resolved runtime dependencies for the release SBOM"
+        group = "publishing"
+        val output = layout.buildDirectory.file("release-dependencies.txt")
+        val artifactId = "qe-report-${project.name}"
+        val coordinates =
+            configurations.named("runtimeClasspath").map { configuration ->
+                configuration.incoming.resolutionResult.allComponents
+                    .map { it.id.displayName }
+                    .filterNot { it.startsWith("project ") }
+                    .sorted()
+            }
+        outputs.file(output)
+        doLast {
+            output.get().asFile.writeText(
+                coordinates.get().joinToString("\n", postfix = "\n") { "$artifactId\t$it" },
+            )
+        }
+    }
+}
+
+tasks.register("releaseDependencies") {
+    description = "Writes every published module's resolved runtime dependencies"
+    group = "publishing"
+    dependsOn(subprojects.map { "${it.path}:releaseDependencies" })
+}
+
 // Published libraries target Java 17 bytecode. With -PtestJavaVersions=17,21 the test suites also
 // run on those runtimes (toolchains are provisioned by the foojay resolver); CI always passes it.
 val extraTestJavaVersions =
