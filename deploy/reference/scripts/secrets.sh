@@ -33,6 +33,18 @@ printf 'postgres://%s:%s@postgres:5432/%s' "$user" "$password" "$db" > "$secrets
 # reporting database, and an entry naming only that database would leave it prompting for a
 # password it can never be given.
 printf 'postgres:5432:*:%s:%s\n' "$user" "$password" > "$secrets/pgpass"
-chmod 0600 "$secrets/postgres_password" "$secrets/database_url" "$secrets/pgpass"
+
+# Compose outside swarm mounts a secret as the host file it is, with the host's owner and mode:
+# `uid`, `gid` and `mode` in a secret definition are swarm-only and are ignored here. So the modes
+# below are the modes the containers see.
+#
+#   postgres_password  0600  read by the postgres entrypoint, which starts as root
+#   pgpass             0600  libpq refuses a password file that is group- or world-readable
+#   database_url       0644  read by the API, which runs as 10001 and is not the owner
+#
+# The 0644 is not a weakening: the directory above stays 0700, so nobody who cannot already read
+# the whole directory can reach the file through it.
+chmod 0600 "$secrets/postgres_password" "$secrets/pgpass"
+chmod 0644 "$secrets/database_url"
 
 echo "wrote postgres_password, database_url and pgpass to $secrets" >&2

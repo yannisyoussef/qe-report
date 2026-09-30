@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   attachment,
   attemptFinished,
@@ -14,7 +14,7 @@ import {
   testCase,
   writeRun,
 } from '../../read-model/test/synthetic.js';
-import { ReferenceStack, sleep } from './stack.js';
+import { ReferenceStack, eventually, multipartBody, sleep, type UploadPart } from './stack.js';
 
 const run = promisify(execFile);
 
@@ -51,6 +51,79 @@ function writeCompletedRun(label: string, runId: string): { directory: string; b
     [bytes],
   );
   return { directory, bytes };
+}
+
+/** What the API's staging root holds right now, by name, read from inside the container. */
+async function stagingNames(): Promise<string[]> {
+  const listed = await stack.compose([
+    'exec',
+    '-T',
+    'api',
+    'sh',
+    '-c',
+    'ls -1 /var/lib/qe-report/staging 2>/dev/null || true',
+  ]);
+  return listed.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '');
+}
+
+/**
+ * The request directory the server has staged for an upload that is still open. The upload has to
+ * be one that will not finish on its own: `docker compose exec` takes about a second, and an
+ * upload that completes by itself is gone before the first look.
+ */
+async function stagedRequest(): Promise<string> {
+  let name = '';
+  await eventually(
+    'the server staged the request',
+    async () => {
+      name = (await stagedRequests())[0] ?? '';
+      return name !== '';
+    },
+    60,
+  );
+  return name;
+}
+
+/** The staging entries that are request directories, ignoring anything else in the root. */
+async function stagedRequests(): Promise<string[]> {
+  return (await stagingNames()).filter((n) => /^[0-9a-f-]{36}$/u.test(n));
+}
+
+/** Whether the API's staging root holds a directory of this name. */
+async function stackHolds(name: string): Promise<boolean> {
+  return (await stagingNames()).includes(name);
+}
+
+/** A run directory as the parts of an upload: its expiry, its event streams, its attachments. */
+function partsFor(directory: string, retentionMs = 86_400_000): UploadPart[] {
+  const parts: UploadPart[] = [
+    { name: 'expiresAt', text: new Date(Date.now() + retentionMs).toISOString() },
+  ];
+  for (const name of readdirSync(join(directory, 'events')).sort()) {
+    if (!name.endsWith('.ndjson')) continue;
+    parts.push({
+      name: 'events',
+      bytes: readFileSync(join(directory, 'events', name)),
+      filename: name,
+    });
+  }
+  let attachments: string[] = [];
+  try {
+    attachments = readdirSync(join(directory, 'attachments')).sort();
+  } catch {
+    attachments = [];
+  }
+  for (const name of attachments) {
+    parts.push({
+      name: 'attachment',
+      bytes: readFileSync(join(directory, 'attachments', name)),
+      filename: name,
+    });
+  }
+  return parts;
 }
 
 let writeToken = '';
@@ -226,6 +299,34 @@ describe('the deployment a clean machine can bring up', () => {
     const api = await stack.compose(['logs', '--no-log-prefix', 'api']);
     expect(`${api.stdout}${api.stderr}`).not.toContain('qer_k1_');
   });
+
+  it('passes its own smoke script, which is what an operator runs after a restore', async () => {
+    // The committed script, against the running deployment, doing everything through the public
+    // interfaces: health, readiness, a key it issues and revokes, a real upload by the producer
+    // command, every read, and an attachment verified byte for byte. The README tells an operator
+    // to run this after a restore and after an upgrade, so it is run here too.
+    const { directory } = writeCompletedRun('deploy-smoke', 'run-deploy-smoke');
+    const smoked = await stack.script('smoke.sh', [directory]);
+    expect(smoked.code, `${smoked.stdout}\n${smoked.stderr}`).toBe(0);
+    expect(smoked.stderr).toContain('verifying the edge against the authority');
+    expect(smoked.stderr).toContain('issuing a short-lived key');
+    // Every numbered step ran; none was skipped for want of something to prove.
+    for (const step of ['1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.']) {
+      expect(smoked.stderr, step).toContain(`\n${step} `);
+    }
+    expect(smoked.stderr).toContain('verified byte for byte');
+    expect(smoked.stderr).toContain('serves run-deploy-smoke over HTTPS');
+    // The token it used is nowhere in its output.
+    expect(smoked.stdout).not.toContain('qer_k1_');
+    expect(smoked.stderr).not.toContain('qer_k1_');
+
+    // And it left no credential behind: the key it issued is revoked on the way out.
+    const listed = await stack.admin(['key', 'list', '--project', 'smoke', '--all', '--json']);
+    expect(listed.code, listed.stderr).toBe(0);
+    const keys = JSON.parse(listed.stdout) as { keys: { active: boolean }[] };
+    expect(keys.keys.length).toBeGreaterThan(0);
+    expect(keys.keys.every((k) => !k.active)).toBe(true);
+  });
 });
 
 describe('what the edge refuses', () => {
@@ -243,6 +344,17 @@ describe('what the edge refuses', () => {
       expect(statuses).toContain(429);
       expect(statuses.filter((s) => s === 200).length).toBeGreaterThan(0);
       expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0);
+
+      // And it tells the client how long to wait, rather than leaving it to guess: the producer
+      // treats 429 as retryable and honours this header.
+      const refused = await stack.request('/v1/runs?limit=1', { token: readToken });
+      expect(refused.status).toBe(429);
+      expect(refused.headers['retry-after']).toBe('2');
+
+      // Health and readiness have their own budget, so a probe is not refused because a client
+      // spent the API's, and a probe cannot spend a client's either.
+      expect((await stack.request('/healthz')).status).toBe(200);
+      expect((await stack.request('/readyz')).status).toBe(200);
     } finally {
       expect((await stack.compose(['up', '-d', '--force-recreate', 'edge'])).code).toBe(0);
       await stack.waitHealthy('edge');
@@ -292,86 +404,222 @@ describe('what the edge refuses', () => {
     expect(oversized.status).toBe(413);
     expect(oversized.text()).toContain('urn:qe-report:problem');
   });
+
+  it('refuses a second simultaneous connection from one address when it is allowed one', async () => {
+    // One connection per address, applied to this test only. The limit is the edge's, so what is
+    // proven is that the edge refuses it: an application that never sees the request cannot.
+    const single = { QE_REPORT_EDGE_CONNECTIONS: '1' };
+    expect((await stack.compose(['up', '-d', '--force-recreate', 'edge'], single)).code).toBe(0);
+    await stack.waitHealthy('edge');
+    try {
+      // A request that is deliberately unfinished, so its connection is genuinely held open while
+      // the second one is made. Its body is announced and never completely sent.
+      const { directory } = writeCompletedRun('deploy-conn', 'run-deploy-conn');
+      const { boundary, body } = multipartBody(partsFor(directory));
+      const held = stack.beginUpload(writeToken, body, boundary);
+      held.answered.catch(() => undefined);
+      await held.onTheWire;
+
+      // Polled rather than asserted on the first try: the bytes have left this process, and the
+      // edge counting the connection is a moment later. What is being tested is that a second
+      // connection is refused while the first is open, not how quickly nginx notices.
+      let second = await stack.request('/v1/runs?limit=1', { token: readToken });
+      for (let i = 0; i < 20 && second.status !== 429; i += 1) {
+        await sleep(500);
+        second = await stack.request('/v1/runs?limit=1', { token: readToken });
+      }
+      expect(second.status, second.text()).toBe(429);
+      // NGINX answered it; the application was never asked.
+      expect(second.text()).not.toContain('urn:qe-report:problem');
+
+      held.abandon();
+      // With the connection let go, the next request is served again: the limit counts
+      // connections that are open, not requests that were once made.
+      await eventually(
+        'the held connection was released',
+        async () => (await stack.request('/v1/runs?limit=1', { token: readToken })).status === 200,
+        30,
+      );
+
+      // What an abandoned upload leaves behind is worth knowing here rather than discovering it
+      // as someone else's failure: a request that merely died is the running server's to tidy up,
+      // and only a server that was killed leaves a staged request behind.
+      await eventually(
+        'the abandoned upload left no staged request behind',
+        async () => (await stagedRequests()).length === 0,
+        30,
+      );
+    } finally {
+      expect((await stack.compose(['up', '-d', '--force-recreate', 'edge'])).code).toBe(0);
+      await stack.waitHealthy('edge');
+    }
+  });
+
+  it('follows the application to a new container without being reloaded', async () => {
+    // What an upgrade does: a new image means a new container, on a new address. An edge that
+    // resolved the name once at start-up would answer 502 from here until someone reloaded it,
+    // and the documented upgrade does not reload it.
+    const before = await stack.compose(['ps', '--quiet', 'api']);
+    expect((await stack.compose(['up', '-d', '--force-recreate', 'api'])).code).toBe(0);
+    await stack.waitHealthy('api');
+    const after = await stack.compose(['ps', '--quiet', 'api']);
+    expect(after.stdout.trim()).not.toBe(before.stdout.trim());
+
+    // The edge was not touched, and the deployment answers through it.
+    const served = await stack.request('/v1/runs?limit=1', { token: readToken });
+    expect(served.status).toBe(200);
+    expect((await stack.request('/healthz')).status).toBe(200);
+  });
 });
 
 describe('the lifecycle of the process', () => {
+  // These phases stop and kill the API on purpose. If one of them fails partway, the next should
+  // fail on its own merits rather than on a deployment the previous one left down.
+  beforeEach(async () => {
+    if ((await stack.health('api')) !== 'healthy') {
+      await stack.compose(['up', '-d', 'api']);
+      await stack.waitHealthy('api');
+    }
+  }, 300_000);
+
   it('finishes an upload that is already running, then stops, and comes back', async () => {
     const { directory } = writeCompletedRun('deploy-restart', 'run-deploy-restart');
-    // The upload starts, and the container is asked to stop while it is in flight.
-    const uploading = stack.uploadRun(directory, writeToken);
-    await sleep(300);
-    const stopped = await stack.compose(['stop', 'api']);
-    expect(stopped.code).toBe(0);
-    const result = await uploading;
+    const { boundary, body } = multipartBody(partsFor(directory));
+    // Almost all of the body, then nothing: the request is open and staged, and stays that way
+    // until this test finishes it. The producer command is exercised elsewhere; what is needed
+    // here is a request whose lifetime the test decides, so the drain has something to drain.
+    const upload = stack.beginUpload(writeToken, body, boundary);
+    await upload.onTheWire;
+    const staged = await stagedRequest();
+
+    // Not awaited: `docker compose stop` does not return until the container has exited, and the
+    // container cannot exit until this request finishes, so awaiting it here would deadlock the
+    // pair and spend the whole grace doing it.
+    const stopping = stack.compose(['stop', 'api']);
+    await eventually(
+      'the api began draining',
+      async () =>
+        (await stack.compose(['logs', '--no-log-prefix', '--tail', '20', 'api'])).stdout.includes(
+          'shutdown requested',
+        ),
+      60,
+    );
+
+    // The rest of the body, after the signal: this is the request the drain is waiting for.
+    upload.finish();
+    const answer = await upload.answered;
+    expect(answer.status, answer.text()).toBe(201);
+    expect(answer.json<{ outcome: string; runId: string }>()).toMatchObject({
+      outcome: 'inserted',
+      runId: 'run-deploy-restart',
+    });
 
     const logs = await stack.compose(['logs', '--no-log-prefix', 'api']);
     expect(logs.stdout).toContain('shutdown requested');
+    // It drained rather than being given up on: the grace was not what ended it.
     expect(logs.stdout).toContain('shutdown completed');
-    // Nothing about the request itself is in those lines.
+    expect(logs.stdout).not.toContain('shutdown grace exceeded');
+    // Nothing that could be replayed is in those lines, and no path either: the request id is
+    // logged on purpose, as the correlation id a caller can quote, but the staging root it names a
+    // directory under is redacted wherever it appears.
     expect(logs.stdout).not.toContain('qer_k1_');
+    expect(logs.stdout).not.toContain('/var/lib/qe-report/staging');
+    expect(staged).toMatch(/^[0-9a-f-]{36}$/u);
 
+    // It stopped of its own accord, cleanly, once that request was done.
+    expect((await stopping).code).toBe(0);
     expect((await stack.compose(['up', '-d', 'api'])).code).toBe(0);
     await stack.waitHealthy('api');
-    expect((await stack.compose(['up', '-d', '--force-recreate', 'edge'])).code).toBe(0);
-    await stack.waitHealthy('edge');
 
-    // Whatever happened to that attempt, the producer can repeat it: the same run is one archive.
-    const again = await stack.uploadRun(directory, writeToken);
-    expect(again.code, again.stderr).toBe(0);
-    const answer = JSON.parse(again.stdout) as { runId: string; outcome: string };
-    expect(['inserted', 'already_present']).toContain(answer.outcome);
-    const listed = await stack.request('/v1/runs?limit=50', { token: readToken });
-    const runs = listed.json<{ runs: { runId: string }[] }>().runs;
-    expect(runs.filter((r) => r.runId === 'run-deploy-restart')).toHaveLength(1);
-    void result;
-  });
-
-  it('leaves a staged request behind when it is killed, and cleans it up offline', async () => {
-    // A request directory as a killed server leaves one: the server's own name, old enough to be
-    // certainly abandoned. Written from inside the container, under the account that owns the root.
-    const abandoned = '11111111-2222-4333-8444-555555555555';
-    const planted = await stack.compose([
-      'exec',
-      '-T',
-      'api',
-      'sh',
-      '-c',
-      `mkdir -p /var/lib/qe-report/staging/${abandoned}/events && ` +
-        `echo '{}' > /var/lib/qe-report/staging/${abandoned}/events/000001.ndjson && ` +
-        `touch -d '2020-01-01T00:00:00Z' /var/lib/qe-report/staging/${abandoned}`,
-    ]);
-    expect(planted.code, planted.stderr).toBe(0);
-
-    // Hard-killed, so nothing had a chance to tidy up.
-    expect((await stack.compose(['kill', '--signal', 'SIGKILL', 'api'])).code).toBe(0);
-    expect((await stack.compose(['up', '-d', 'api'])).code).toBe(0);
-    await stack.waitHealthy('api');
-    // The archive is untouched: the canonical runs are still exactly the ones that committed.
+    // The run it finished during the drain is archived, exactly once, and the request directory
+    // it was using went with the request.
     const listed = await stack.request('/v1/runs?limit=50', { token: readToken });
     expect(listed.status).toBe(200);
+    expect(
+      listed
+        .json<{ runs: { runId: string }[] }>()
+        .runs.filter((r) => r.runId === 'run-deploy-restart'),
+    ).toHaveLength(1);
+    expect(await stackHolds(staged)).toBe(false);
 
-    // Cleanup is offline, and says so if the instance is still running.
-    const preview = await stack.admin(['staging', 'preview', '--older-than-ms', '60000']);
+    // And the producer may repeat it: the same run is one archive.
+    const again = await stack.uploadRun(directory, writeToken);
+    expect(again.code, again.stderr).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({ outcome: 'already_present' });
+  });
+
+  it('leaves a staged request behind when it is killed during an upload, and cleans it up offline', async () => {
+    const { directory } = writeCompletedRun('deploy-killed', 'run-deploy-killed');
+    const { boundary, body } = multipartBody(partsFor(directory));
+    const upload = stack.beginUpload(writeToken, body, boundary);
+    await upload.onTheWire;
+    // A real request, staged by the server, killed before it could finish. Nothing is planted
+    // here: what is being tested is what a killed server leaves, not what a test can create.
+    const abandoned = await stagedRequest();
+    upload.answered.catch(() => undefined);
+
+    expect((await stack.compose(['kill', '--signal', 'SIGKILL', 'api'])).code).toBe(0);
+    upload.abandon();
+
+    expect((await stack.compose(['up', '-d', 'api'])).code).toBe(0);
+    await stack.waitHealthy('api');
+
+    // The archive committed nothing: a run becomes archived in one transaction, so a killed
+    // ingestion leaves no half-run and no attachment row pointing at nothing.
+    const listed = await stack.request('/v1/runs?limit=50', { token: readToken });
+    expect(listed.status).toBe(200);
+    expect(
+      listed
+        .json<{ runs: { runId: string }[] }>()
+        .runs.filter((r) => r.runId === 'run-deploy-killed'),
+    ).toHaveLength(0);
+
+    // The request's directory is what did survive, which is the one known cost of being killed,
+    // and start-up did not quietly delete it: nothing can tell an abandoned request from a live
+    // one, and start-up is exactly when no operator is watching.
+    expect(await stackHolds(abandoned)).toBe(true);
+    const preview = await stack.admin(['staging', 'preview', '--older-than-ms', '1']);
     expect(preview.code).toBe(0);
     expect(preview.stdout).toContain(abandoned);
-    const refused = await stack.admin(['staging', 'clean', '--older-than-ms', '60000']);
+
+    // Cleanup is offline, and says so while the instance that owns the root is still running.
+    const refused = await stack.admin(['staging', 'clean', '--older-than-ms', '1']);
     expect(refused.code).toBe(2);
     expect(refused.stderr).toContain('--execute');
 
     expect((await stack.compose(['stop', 'api'])).code).toBe(0);
-    const cleaned = await stack.admin([
-      'staging',
-      'clean',
-      '--older-than-ms',
-      '60000',
-      '--execute',
-    ]);
-    expect(cleaned.code, cleaned.stderr).toBe(0);
-    expect(cleaned.stdout).toContain('1 removed');
-    expect((await stack.compose(['up', '-d', 'api'])).code).toBe(0);
-    await stack.waitHealthy('api');
-    const after = await stack.admin(['staging', 'preview', '--older-than-ms', '60000']);
-    expect(after.stdout).not.toContain(abandoned);
+    try {
+      const cleaned = await stack.admin([
+        'staging',
+        'clean',
+        '--older-than-ms',
+        '1',
+        '--execute',
+        '--json',
+      ]);
+      expect(cleaned.code, cleaned.stderr).toBe(0);
+      // By name, from the report itself: a count would depend on what every earlier phase
+      // happened to leave, and this phase is about this request directory.
+      const report = JSON.parse(cleaned.stdout) as {
+        dryRun: boolean;
+        removed: number;
+        entries: { requestId: string }[];
+      };
+      expect(report.dryRun).toBe(false);
+      expect(report.entries.map((e) => e.requestId)).toContain(abandoned);
+      expect(report.removed).toBe(report.entries.length);
+    } finally {
+      // Whatever the assertions above decide, the deployment is handed back running: an API left
+      // stopped here would fail every phase after it for a reason that is not theirs.
+      expect((await stack.compose(['up', '-d', 'api'])).code).toBe(0);
+      await stack.waitHealthy('api');
+    }
+    expect(await stackHolds(abandoned)).toBe(false);
+
+    // And the run the killed upload was carrying can simply be uploaded again.
+    const again = await stack.uploadRun(directory, writeToken);
+    expect(again.code, again.stderr).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({ outcome: 'inserted' });
   });
 });
 
@@ -563,7 +811,7 @@ describe('backup and a restore that really destroys what was there', () => {
 
     expect((await stack.compose(['up', '-d', 'postgres'])).code).toBe(0);
     await stack.waitHealthy('postgres');
-    const restored = await stack.script('restore.sh', ['rehearsal']);
+    const restored = await stack.script('restore.sh', ['rehearsal', '--yes']);
     expect(restored.code, `${restored.stdout}\n${restored.stderr}`).toBe(0);
     await stack.waitHealthy('api');
     await stack.waitHealthy('edge');
@@ -628,7 +876,7 @@ describe('backup and a restore that really destroys what was there', () => {
     dump[dump.length - 1] = dump[dump.length - 1] === 0 ? 1 : 0;
     writeFileSync(join(directory, 'database.dump'), dump);
 
-    const refused = await stack.script('restore.sh', ['tampered']);
+    const refused = await stack.script('restore.sh', ['tampered', '--yes']);
     expect(refused.code).not.toBe(0);
     expect(refused.stderr).toContain('checksum');
     // And it stopped before touching anything: the deployment still serves what it served.
@@ -638,9 +886,150 @@ describe('backup and a restore that really destroys what was there', () => {
     // A directory with no manifest is incomplete, and is refused on that ground alone.
     const incomplete = join(stack.backupDir, 'incomplete');
     mkdirSync(incomplete, { recursive: true });
-    const noManifest = await stack.script('restore.sh', ['incomplete']);
+    const noManifest = await stack.script('restore.sh', ['incomplete', '--yes']);
     expect(noManifest.code).not.toBe(0);
     expect(noManifest.stderr).toContain('manifest');
     expect(existsSync(join(incomplete, 'manifest.json'))).toBe(false);
+
+    // And a restore is destructive enough that it will not run on a positional argument alone.
+    const unconfirmed = await stack.script('restore.sh', ['rehearsal']);
+    expect(unconfirmed.code).not.toBe(0);
+    expect(unconfirmed.stderr).toContain('--yes');
+  });
+
+  it('refuses a manifest whose digests disagree with the files, even when the file list does not', async () => {
+    // The manifest and checksums.sha256 are written by separate steps and both are inside the
+    // integrity envelope, so this is a backup rewritten by someone who recomputed one and not the
+    // other. It must not be a backup this deployment will restore.
+    const directory = join(stack.backupDir, 'mismatched');
+    mkdirSync(directory, { recursive: true });
+    for (const file of ['database.dump', 'blobs.tar', 'checksums.sha256', 'manifest.json']) {
+      writeFileSync(join(directory, file), readFileSync(join(stack.backupDir, 'rehearsal', file)));
+    }
+    const manifest = readFileSync(join(directory, 'manifest.json'), 'utf8');
+    const digest = /"database": \{[^}]*"sha256": "([0-9a-f]{64})"/u.exec(manifest)?.[1] as string;
+    const swapped = manifest.replace(digest, `${'0'.repeat(63)}1`);
+    writeFileSync(join(directory, 'manifest.json'), swapped);
+    // Rewritten consistently, so the checksum file itself still verifies.
+    const checksums = readFileSync(join(directory, 'checksums.sha256'), 'utf8')
+      .split('\n')
+      .filter((line) => !line.endsWith('manifest.json'))
+      .join('\n');
+    const { createHash } = await import('node:crypto');
+    const manifestDigest = createHash('sha256').update(swapped).digest('hex');
+    writeFileSync(
+      join(directory, 'checksums.sha256'),
+      `${checksums.trimEnd()}\n${manifestDigest}  manifest.json\n`,
+    );
+
+    const refused = await stack.script('restore.sh', ['mismatched', '--yes']);
+    expect(refused.code).not.toBe(0);
+    expect(refused.stderr).toContain("manifest's digest");
+    expect((await stack.request('/readyz')).status).toBe(200);
+  });
+
+  it('fails a backup loudly, writes no manifest, and hands the deployment back', async () => {
+    // A name that already exists. The check is there so that a backup never writes into a
+    // directory whose other half belongs to a different moment.
+    const existing = await stack.script('backup.sh', ['rehearsal']);
+    expect(existing.code).not.toBe(0);
+    expect(existing.stderr).toContain('already exists');
+
+    // And a name that is not a path component, because the name becomes a directory that is
+    // bind-mounted into a container running as root.
+    for (const name of ['../escape', '.hidden', 'has space']) {
+      const refused = await stack.script('backup.sh', [name]);
+      expect(refused.code, name).not.toBe(0);
+      expect(refused.stderr).toContain('a backup name may hold');
+    }
+
+    // A backup that cannot take the maintenance lock: retention could otherwise delete bytes the
+    // dump still references, between the dump and the copy. Held here by another session, which is
+    // what an operator running `maintenance run` would be.
+    const holder = await stack.compose([
+      '--profile',
+      'tools',
+      'run',
+      '--detach',
+      '--name',
+      `${stack.project}-other-holder`,
+      '-T',
+      '--entrypoint',
+      'psql',
+      'operator',
+      '--no-password',
+      '--no-psqlrc',
+      '--quiet',
+      '-c',
+      'SET statement_timeout = 0',
+      '-c',
+      'SELECT pg_advisory_lock(7248134620002)',
+      '-c',
+      'SELECT pg_sleep(180)',
+    ]);
+    expect(holder.code, holder.stderr).toBe(0);
+    try {
+      await eventually(
+        'another session took the maintenance lock',
+        async () => {
+          const held = await stack.compose([
+            '--profile',
+            'tools',
+            'run',
+            '--rm',
+            '-T',
+            '--entrypoint',
+            'psql',
+            'operator',
+            '--no-password',
+            '--no-psqlrc',
+            '--quiet',
+            '--tuples-only',
+            '--no-align',
+            '-c',
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted",
+          ]);
+          return held.stdout.trim() === '1';
+        },
+        30,
+      );
+
+      const blocked = await stack.script('backup.sh', ['contended']);
+      expect(blocked.code).not.toBe(0);
+      expect(blocked.stderr).toContain('could not take the maintenance lock');
+      // No manifest, so nothing will ever restore it.
+      expect(existsSync(join(stack.backupDir, 'contended', 'manifest.json'))).toBe(false);
+    } finally {
+      // The container goes, and so does its database session: PostgreSQL does not notice a dead
+      // client while it is sleeping, so a lock released only by removing the container would go on
+      // being held for the rest of its ceiling.
+      await run('docker', ['rm', '--force', `${stack.project}-other-holder`]).catch(
+        () => undefined,
+      );
+      await stack.compose([
+        '--profile',
+        'tools',
+        'run',
+        '--rm',
+        '-T',
+        '--entrypoint',
+        'psql',
+        'operator',
+        '--no-password',
+        '--no-psqlrc',
+        '--quiet',
+        '-c',
+        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks WHERE locktype = 'advisory'",
+      ]);
+    }
+
+    // A failed backup stops the API and must not leave it stopped: that would turn a backup
+    // failure at three in the morning into an outage.
+    await eventually(
+      'the deployment is serving again after the failed backup',
+      async () => (await stack.request('/readyz')).status === 200,
+      60,
+    );
+    expect((await stack.request('/v1/runs?limit=5', { token: readToken })).status).toBe(200);
   });
 });

@@ -79,7 +79,11 @@ export class ReferenceStack {
       // can still be refused by the application and each protection is visible on its own.
       QE_REPORT_MAX_REQUEST_BYTES: '8388608',
       QE_REPORT_EDGE_MAX_BODY: '16m',
-      QE_REPORT_SHUTDOWN_GRACE_MS: '10000',
+      // Shorter than the api service's stop_grace_period, as the reference requires, and long
+      // enough that a rehearsal that has to notice a drain has begun before finishing a request
+      // is not racing the grace itself. The grace being exceeded is proven against a real process
+      // in test-integration/shutdown.test.ts, where it can be forced exactly.
+      QE_REPORT_SHUTDOWN_GRACE_MS: '25000',
       QE_REPORT_LOG_LEVEL: 'info',
     };
   }
@@ -235,6 +239,79 @@ export class ReferenceStack {
     });
   }
 
+  /**
+   * An upload that has begun and has not finished. Everything but the last few bytes of the body
+   * goes out at once, so the server has genuinely staged the request, and the tail is sent when
+   * the caller says so.
+   *
+   * It exists because an upload that completes on its own is not a reliable way to test what
+   * happens to a request in flight: a few megabytes over loopback finish in less time than it
+   * takes to ask a container what it is doing, so anything that waited to observe one would be
+   * racing it. Here the request lasts exactly as long as the test wants.
+   */
+  beginUpload(
+    token: string,
+    body: Buffer,
+    boundary: string,
+    holdBack = 256,
+  ): {
+    /** Resolves once the first and larger part of the body has left this process. */
+    readonly onTheWire: Promise<void>;
+    /** The server's answer, once it gives one. */
+    readonly answered: Promise<Answer>;
+    /** Sends the rest of the body, so the request can complete. */
+    finish(): void;
+    /** Gives up on it, closing the connection with the body unfinished. */
+    abandon(): void;
+  } {
+    const url = new URL('/v1/runs', this.baseUrl);
+    const client = httpsRequest({
+      method: 'POST',
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+        'content-length': String(body.length),
+      },
+      ca: this.ca,
+      servername: this.host,
+    });
+    const answered = new Promise<Answer>((resolve, reject) => {
+      client.on('response', (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => {
+          const whole = Buffer.concat(chunks);
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: whole,
+            text: () => whole.toString('utf8'),
+            json: <T>() => JSON.parse(whole.toString('utf8')) as T,
+          });
+        });
+      });
+      client.on('error', reject);
+    });
+    const head = body.subarray(0, Math.max(0, body.length - holdBack));
+    // Resolved from the write's own callback: the bytes have left this process by then, which is
+    // what "in flight" has to mean for a test that is about to interrupt it.
+    const onTheWire = new Promise<void>((resolve, reject) => {
+      client.write(head, (e) => (e ? reject(e) : resolve()));
+    });
+    return {
+      onTheWire,
+      answered,
+      finish: () => {
+        client.write(body.subarray(head.length));
+        client.end();
+      },
+      abandon: () => client.destroy(),
+    };
+  }
+
   /** Issues a key and returns its token; the operator command is the only way to get one. */
   async createKey(
     projectId: string,
@@ -272,6 +349,38 @@ export class ReferenceStack {
     this.up = false;
     rmSync(dirname(this.secretDir), { recursive: true, force: true });
   }
+}
+
+/** One part of an upload: a text field, or a file with its own name and type. */
+export type UploadPart =
+  | { readonly name: string; readonly text: string }
+  | {
+      readonly name: string;
+      readonly bytes: Buffer;
+      readonly filename?: string;
+      readonly type?: string;
+    };
+
+/**
+ * A run directory as a multipart body, built here rather than by a client library, so that a test
+ * can decide how much of it to send and when.
+ */
+export function multipartBody(parts: readonly UploadPart[]): { boundary: string; body: Buffer } {
+  const boundary = `qeReferenceBoundary${randomBytes(8).toString('hex')}`;
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    const head =
+      'text' in part
+        ? `--${boundary}\r\nContent-Disposition: form-data; name="${part.name}"\r\n\r\n`
+        : `--${boundary}\r\nContent-Disposition: form-data; name="${part.name}"; ` +
+          `filename="${part.filename ?? 'part'}"\r\n` +
+          `Content-Type: ${part.type ?? 'application/octet-stream'}\r\n\r\n`;
+    chunks.push(Buffer.from(head, 'utf8'));
+    chunks.push('text' in part ? Buffer.from(part.text, 'utf8') : part.bytes);
+    chunks.push(Buffer.from('\r\n', 'utf8'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  return { boundary, body: Buffer.concat(chunks) };
 }
 
 export function sleep(ms: number): Promise<void> {

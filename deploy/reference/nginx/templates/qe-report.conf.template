@@ -7,8 +7,17 @@
 
 # Requests and connections are counted per client address. The zones are declared here and used
 # below; a valid key does not exempt anyone from them.
+#
+# Per address means what the edge can see. Behind NAT, or behind another load balancer, every
+# client shares one $binary_remote_addr and therefore one bucket, which makes these limits
+# effectively global. If something else terminates connections in front of this, set
+# set_real_ip_from and real_ip_header for it, or the limits will count that one hop.
 limit_req_zone $binary_remote_addr zone=qe_report_api:10m rate=${QE_REPORT_EDGE_RATE};
 limit_conn_zone $binary_remote_addr zone=qe_report_conn:10m;
+# Health and readiness get their own budget. They are cheap, they are polled by things whose job is
+# to poll them, and a probe should not spend a client's request allowance or be refused because a
+# client spent it.
+limit_req_zone $binary_remote_addr zone=qe_report_health:1m rate=${QE_REPORT_EDGE_HEALTH_RATE};
 
 # An access log that cannot leak a credential: no Authorization, no Cookie, no body. The fields
 # are the ones an operator needs to see a client, a route, an outcome, and a size.
@@ -18,21 +27,28 @@ log_format qe_report escape=json
   '"bytes_received":$request_length,"duration_s":$request_time,'
   '"upstream_status":"$upstream_status","request_id":"$upstream_http_x_request_id"}';
 
-upstream qe_report_api {
-  server api:8080;
-  keepalive 16;
-}
-
 server {
   listen 8443 ssl;
   listen [::]:8443 ssl;
   http2 on;
   server_name ${QE_REPORT_SERVER_NAME};
 
+  # Docker's embedded DNS. The address the API answers on changes whenever its container is
+  # recreated, which the documented upgrade does on purpose, and an `upstream` block resolves its
+  # server names once at start-up and then holds them. So the name is resolved per request through
+  # a variable instead, at the cost of keepalive to the application: one extra local TCP handshake
+  # per request, against an edge that returns 502 after every upgrade until someone reloads it.
+  resolver ${QE_REPORT_EDGE_RESOLVER} valid=10s ipv6=off;
+  resolver_timeout 5s;
+
   ssl_certificate     /etc/nginx/tls/server.crt;
   ssl_certificate_key /etc/nginx/tls/server.key;
   # Both versions the brief requires, and nothing older.
   ssl_protocols TLSv1.2 TLSv1.3;
+  # Forward secrecy and AEAD only. nginx's default list still permits static RSA key exchange and
+  # CBC with SHA-1, which is not a choice worth inheriting. TLS 1.3 ignores this list and uses its
+  # own suites, all of which are already AEAD.
+  ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
   ssl_prefer_server_ciphers off;
   ssl_session_cache shared:qe_report_tls:10m;
   ssl_session_timeout 1h;
@@ -41,8 +57,9 @@ server {
   access_log /var/log/nginx/access.log qe_report;
   error_log  /var/log/nginx/error.log warn;
 
-  # The application's own limit is the authority; this is the edge's, and it must not be the
-  # smaller of the two. See QE_REPORT_EDGE_MAX_BODY and QE_REPORT_MAX_REQUEST_BYTES in env.example.
+  # The edge's limit, deliberately larger than the application's own QE_REPORT_MAX_REQUEST_BYTES:
+  # what is absurd is refused here, as 413, and what is merely too large reaches the application
+  # and is refused there, as a problem document. See both in env.example.
   client_max_body_size ${QE_REPORT_EDGE_MAX_BODY};
   client_body_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
 
@@ -50,33 +67,56 @@ server {
   # as it sent them, and no content type is guessed at or transformed.
   server_tokens off;
 
-  # A body over the limit, or too many requests, is answered by the edge itself.
+  # Too many requests, or too many connections, from one address. A body over the limit is a
+  # different answer, 413, and comes from client_max_body_size above.
   limit_req_status 429;
   limit_conn_status 429;
+
+  # How the edge talks to the application, declared once at server level and inherited by every
+  # location below, so a health route and an API route cannot drift apart in anything but limits.
+  # Only proxy_pass itself has to be repeated, because only a location may have one.
+  #
+  # The upstream is named through a variable so that it is re-resolved per request, and
+  # $request_uri is appended explicitly because a variable in proxy_pass replaces the URI rather
+  # than being prefixed to it.
+  set $qe_report_upstream api:8080;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto https;
+  proxy_set_header Connection '';
+
+  # A run can be hundreds of megabytes. It streams through: the edge does not collect a whole
+  # upload before the application sees any of it, and does not collect a whole attachment before
+  # the client does.
+  proxy_request_buffering off;
+  proxy_buffering off;
+
+  # Long enough for an upload of the configured maximum size on a slow link.
+  proxy_connect_timeout 10s;
+  proxy_send_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
+  proxy_read_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
+
+  # A redirect from the API would be a bug; do not follow one on a client's behalf.
+  proxy_redirect off;
+
+  location = /healthz {
+    limit_req zone=qe_report_health burst=5 nodelay;
+    proxy_pass http://$qe_report_upstream$request_uri;
+  }
+
+  location = /readyz {
+    limit_req zone=qe_report_health burst=5 nodelay;
+    proxy_pass http://$qe_report_upstream$request_uri;
+  }
 
   location / {
     limit_req zone=qe_report_api burst=${QE_REPORT_EDGE_RATE_BURST} nodelay;
     limit_conn qe_report_conn ${QE_REPORT_EDGE_CONNECTIONS};
+    # So a refused client waits a stated interval rather than guessing one. `always`, because the
+    # header belongs on a refusal, which is not one of the codes add_header covers by default.
+    add_header Retry-After ${QE_REPORT_EDGE_RETRY_AFTER} always;
 
-    proxy_pass http://qe_report_api;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header Connection '';
-
-    # A run can be hundreds of megabytes. It streams through: the edge does not collect a whole
-    # upload before the application sees any of it, and does not collect a whole attachment before
-    # the client does.
-    proxy_request_buffering off;
-    proxy_buffering off;
-
-    # Long enough for an upload of the configured maximum size on a slow link.
-    proxy_connect_timeout 10s;
-    proxy_send_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
-    proxy_read_timeout ${QE_REPORT_EDGE_READ_TIMEOUT};
-
-    # A redirect from the API would be a bug; do not follow one on a client's behalf.
-    proxy_redirect off;
+    proxy_pass http://$qe_report_upstream$request_uri;
   }
 }

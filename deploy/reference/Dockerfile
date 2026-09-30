@@ -57,7 +57,9 @@ RUN printf '#!/bin/sh\nexec node /app/dist/bin/server.js "$@"\n' > /usr/local/bi
 RUN mkdir -p /var/lib/qe-report/blobs /var/lib/qe-report/staging \
  && chown -R 10001:10001 /var/lib/qe-report \
  && chmod 0700 /var/lib/qe-report/blobs /var/lib/qe-report/staging
-VOLUME ["/var/lib/qe-report/blobs", "/var/lib/qe-report/staging"]
+# No VOLUME for either root. It would add nothing the compose file does not already say, and it
+# would make every `docker compose run --rm --entrypoint qe-report-admin api ...` -- the shape the
+# operator guide uses throughout -- leave two anonymous volumes behind on the host.
 
 # The container network is the boundary, so the server binds every interface inside it. Outside a
 # container the server still defaults to loopback; nothing about that default changes here.

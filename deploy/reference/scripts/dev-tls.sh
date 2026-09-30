@@ -10,16 +10,28 @@
 set -eu
 
 name=${1:-localhost}
+# It ends up in a certificate extension and in a subject; a comma would add a name nobody asked
+# for, and anything else here would be shell input inside a generated file.
+case $name in
+  '' | *[!A-Za-z0-9.-]*)
+    echo "a certificate name may hold letters, digits, dot and dash" >&2
+    exit 2
+    ;;
+esac
+
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tls=${QE_REPORT_TLS_DIR:-"$here/tls"}
+# The authority's private key is kept out of $tls, because $tls is mounted into the edge container
+# and the edge has no business holding the key that signs its own certificates.
+authority=${QE_REPORT_TLS_CA_DIR:-"$tls/../rehearsal-ca"}
 
-mkdir -p "$tls"
-chmod 0700 "$tls"
+mkdir -p "$tls" "$authority"
+chmod 0700 "$tls" "$authority"
 umask 077
 
 # The authority.
 openssl req -x509 -newkey rsa:2048 -sha256 -days 30 -nodes \
-  -keyout "$tls/ca.key" -out "$tls/ca.crt" \
+  -keyout "$authority/ca.key" -out "$tls/ca.crt" \
   -subj "/CN=qe-report rehearsal authority" \
   -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
   -addext 'keyUsage=critical,keyCertSign,cRLSign' 2>/dev/null
@@ -29,20 +41,23 @@ openssl req -newkey rsa:2048 -sha256 -nodes \
   -keyout "$tls/server.key" -out "$tls/server.csr" \
   -subj "/CN=$name" 2>/dev/null
 
-cat > "$tls/server.ext" <<EXT
+# Quoted delimiter, so nothing in this file is expanded by the shell; the one value that varies is
+# written with printf, after the check above.
+cat > "$tls/server.ext" <<'EXT'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=DNS:$name,DNS:localhost,IP:127.0.0.1,IP:::1
 EXT
+printf 'subjectAltName=DNS:%s,DNS:localhost,IP:127.0.0.1,IP:::1\n' "$name" >> "$tls/server.ext"
 
 openssl x509 -req -in "$tls/server.csr" -sha256 -days 30 \
-  -CA "$tls/ca.crt" -CAkey "$tls/ca.key" -CAcreateserial \
+  -CA "$tls/ca.crt" -CAkey "$authority/ca.key" -CAcreateserial \
   -extfile "$tls/server.ext" -out "$tls/server.crt" 2>/dev/null
 
-rm -f "$tls/server.csr" "$tls/server.ext" "$tls/ca.srl"
+rm -f "$tls/server.csr" "$tls/server.ext" "$tls/ca.srl" "$authority/ca.srl"
 # The edge reads these as a user that is not root.
 chmod 0644 "$tls/ca.crt" "$tls/server.crt"
 chmod 0640 "$tls/server.key"
 
 echo "issued a rehearsal certificate for $name in $tls (trust $tls/ca.crt)" >&2
+echo "the authority's private key is in $authority and is not mounted anywhere" >&2
