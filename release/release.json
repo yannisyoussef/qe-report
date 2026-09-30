@@ -37,11 +37,7 @@
   "maven": {
     "groupId": "io.github.yannisyoussef",
     "$comment2": "Every Gradle module is published; the consumer fixtures are separate builds, not modules of this one.",
-    "public": [
-      "qe-report-protocol",
-      "qe-report-sdk",
-      "qe-report-junit-platform"
-    ],
+    "public": ["qe-report-protocol", "qe-report-sdk", "qe-report-junit-platform"],
     "internal": []
   },
   "container": {

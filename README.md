@@ -157,23 +157,20 @@ TypeScript:
 ```ts
 const session = ReportSession.start(
   {
-    runId: "run-42",
-    sessionId: "worker-1",
-    sink: FileSink.open("qe-report", "worker-1"),
+    runId: 'run-42',
+    sessionId: 'worker-1',
+    sink: FileSink.open('qe-report', 'worker-1'),
   },
-  { producer: { name: "my-adapter", version: "0.1.0" } },
+  { producer: { name: 'my-adapter', version: '0.1.0' } },
 );
 session.emit({
-  eventType: "attempt.started",
-  payload: { attemptId: "a-1", attemptNumber: 1, test },
+  eventType: 'attempt.started',
+  payload: { attemptId: 'a-1', attemptNumber: 1, test },
 });
-session.attach(
-  { attemptId: "a-1", name: "log", mediaType: "text/plain" },
-  logBytes,
-);
+session.attach({ attemptId: 'a-1', name: 'log', mediaType: 'text/plain' }, logBytes);
 session.emit({
-  eventType: "attempt.finished",
-  payload: { attemptId: "a-1", status: "passed" },
+  eventType: 'attempt.finished',
+  payload: { attemptId: 'a-1', status: 'passed' },
 });
 session.close();
 ```

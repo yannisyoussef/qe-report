@@ -38,6 +38,7 @@ class ConsumerFixturesTest {
 
   /** The version the fixtures resolve, so they prove the artifact this build actually published. */
   private static final String ADAPTER_VERSION = System.getProperty("qe.adapterVersion");
+
   private static final int CLASSES = 6;
   private static final int ATTEMPTS_PER_CLASS = 5;
 

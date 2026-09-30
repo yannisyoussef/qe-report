@@ -10,15 +10,13 @@
  * The deployment itself is rehearsed elsewhere, against PostgreSQL, an attachment volume and a TLS
  * edge. This is about release identity, not about whether the service works.
  */
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const contract = JSON.parse(
-  readFileSync(join(ROOT, "release", "release.json"), "utf8"),
-);
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
 const { productVersion, container, repository } = contract;
 
 /** The tag this rehearsal builds. Deliberately not a registry name: nothing here may be pushed. */
@@ -26,11 +24,11 @@ export const REHEARSAL_TAG = `qe-report-release-rehearsal:${productVersion}`;
 
 function run(file, args, options = {}) {
   const finished = spawnSync(file, args, {
-    encoding: "utf8",
+    encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     ...options,
   });
-  const output = `${finished.stdout ?? ""}${finished.stderr ?? ""}`;
+  const output = `${finished.stdout ?? ''}${finished.stderr ?? ''}`;
   if (finished.status !== 0)
     throw new Error(`${file} exited ${finished.status}: ${output.slice(-800)}`);
   return output;
@@ -38,44 +36,37 @@ function run(file, args, options = {}) {
 
 export function verifyContainer({ commit } = {}) {
   const problems = [];
-  const revision =
-    commit ?? run("git", ["-C", ROOT, "rev-parse", "HEAD"]).trim();
+  const revision = commit ?? run('git', ['-C', ROOT, 'rev-parse', 'HEAD']).trim();
 
-  run("docker", [
-    "build",
-    "--tag",
+  run('docker', [
+    'build',
+    '--tag',
     REHEARSAL_TAG,
-    "--file",
-    join(ROOT, "deploy", "reference", "Dockerfile"),
-    "--build-arg",
+    '--file',
+    join(ROOT, 'deploy', 'reference', 'Dockerfile'),
+    '--build-arg',
     `PRODUCT_VERSION=${productVersion}`,
-    "--build-arg",
+    '--build-arg',
     `SOURCE_REVISION=${revision}`,
     ROOT,
   ]);
 
-  const inspected = JSON.parse(
-    run("docker", ["image", "inspect", REHEARSAL_TAG]),
-  )[0];
+  const inspected = JSON.parse(run('docker', ['image', 'inspect', REHEARSAL_TAG]))[0];
   const labels = inspected.Config?.Labels ?? {};
   const expectedLabels = {
-    "org.opencontainers.image.version": productVersion,
-    "org.opencontainers.image.revision": revision,
-    "org.opencontainers.image.source": repository.url,
-    "org.opencontainers.image.licenses": repository.license,
+    'org.opencontainers.image.version': productVersion,
+    'org.opencontainers.image.revision': revision,
+    'org.opencontainers.image.source': repository.url,
+    'org.opencontainers.image.licenses': repository.license,
   };
   for (const [label, wanted] of Object.entries(expectedLabels)) {
     if (labels[label] !== wanted) {
-      problems.push(
-        `${label} is ${JSON.stringify(labels[label])}, not ${JSON.stringify(wanted)}`,
-      );
+      problems.push(`${label} is ${JSON.stringify(labels[label])}, not ${JSON.stringify(wanted)}`);
     }
   }
   // The hardening the reference deployment depends on, still there in the release image.
-  if (inspected.Config?.User !== "10001:10001") {
-    problems.push(
-      `the image runs as ${JSON.stringify(inspected.Config?.User)}, not 10001:10001`,
-    );
+  if (inspected.Config?.User !== '10001:10001') {
+    problems.push(`the image runs as ${JSON.stringify(inspected.Config?.User)}, not 10001:10001`);
   }
   const architecture = `${inspected.Os}/${inspected.Architecture}`;
   // One architecture is claimed, and only where it was built; a rehearsal on another machine
@@ -95,20 +86,19 @@ export function verifyContainer({ commit } = {}) {
     /npm_[A-Za-z0-9]{20}/u,
   ]) {
     const found = leak.exec(configured);
-    if (found !== null)
-      problems.push(`the image configuration contains ${found[0]}`);
+    if (found !== null) problems.push(`the image configuration contains ${found[0]}`);
   }
 
   // What the running container says it is. Neither command needs a database to answer this.
   const reported = {};
-  for (const command of ["qe-report-server", "qe-report-admin"]) {
-    const said = run("docker", [
-      "run",
-      "--rm",
-      "--entrypoint",
+  for (const command of ['qe-report-server', 'qe-report-admin']) {
+    const said = run('docker', [
+      'run',
+      '--rm',
+      '--entrypoint',
       command,
       REHEARSAL_TAG,
-      "--version",
+      '--version',
     ]).trim();
     reported[command] = said;
     if (said !== productVersion) {
@@ -132,23 +122,20 @@ export function verifyContainer({ commit } = {}) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const result = verifyContainer();
   process.stdout.write(
-    `release image built for ${result.architecture}: ${Object.entries(
-      result.reported,
-    )
+    `release image built for ${result.architecture}: ${Object.entries(result.reported)
       .map(([c, v]) => `${c} ${v}`)
-      .join(", ")}\n`,
+      .join(', ')}\n`,
   );
   if (!result.architectureIsReleasePlatform) {
     process.stdout.write(
-      `note: built on ${result.architecture}; the release platform is ${result.releasePlatforms.join(", ")}, ` +
-        "which is what CI builds and what the release claims\n",
+      `note: built on ${result.architecture}; the release platform is ${result.releasePlatforms.join(', ')}, ` +
+        'which is what CI builds and what the release claims\n',
     );
   }
-  process.stdout.write(`would publish as: ${result.releaseTags.join(", ")}\n`);
+  process.stdout.write(`would publish as: ${result.releaseTags.join(', ')}\n`);
   if (result.problems.length > 0) {
-    process.stderr.write("\nthe release image is not ready:\n");
-    for (const problem of result.problems)
-      process.stderr.write(`  - ${problem}\n`);
+    process.stderr.write('\nthe release image is not ready:\n');
+    for (const problem of result.problems) process.stderr.write(`  - ${problem}\n`);
     process.exit(1);
   }
 }

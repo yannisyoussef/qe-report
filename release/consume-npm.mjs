@@ -15,7 +15,7 @@
  *   - `qe-report-upload --version` reporting the release version;
  *   - that nothing resolved back into the workspace.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -24,24 +24,22 @@ import {
   rmSync,
   statSync,
   writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const contract = JSON.parse(
-  readFileSync(join(ROOT, "release", "release.json"), "utf8"),
-);
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
 const { productVersion, npm } = contract;
-const NPM_OUT = join(ROOT, "build", "release", productVersion, "npm");
+const NPM_OUT = join(ROOT, 'build', 'release', productVersion, 'npm');
 
 const problems = [];
 
 /** Runs a command in the consumer directory and returns its output, failing loudly. */
 function run(file, args, options = {}) {
   return execFileSync(file, args, {
-    encoding: "utf8",
+    encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     ...options,
   });
@@ -49,18 +47,15 @@ function run(file, args, options = {}) {
 
 export function consumeNpm() {
   const tarballs = npm.public.map((name) => {
-    const directory = name.replace(/^qe-report-/u, "");
+    const directory = name.replace(/^qe-report-/u, '');
     const path = join(NPM_OUT, `${name}-${productVersion}.tgz`);
-    if (!existsSync(path))
-      throw new Error(`${path} is missing; run release/audit-npm.mjs first`);
+    if (!existsSync(path)) throw new Error(`${path} is missing; run release/audit-npm.mjs first`);
     // A tarball older than the code it was made from would let a stale release candidate look
     // valid, which is the one thing a clean-room check must not do.
     const packed = statSync(path).mtimeMs;
-    const dist = join(ROOT, "ts", "packages", directory, "dist");
+    const dist = join(ROOT, 'ts', 'packages', directory, 'dist');
     const newest = existsSync(dist)
-      ? Math.max(
-          ...readdirSync(dist).map((f) => statSync(join(dist, f)).mtimeMs),
-        )
+      ? Math.max(...readdirSync(dist).map((f) => statSync(join(dist, f)).mtimeMs))
       : 0;
     if (newest > packed) {
       throw new Error(
@@ -70,48 +65,38 @@ export function consumeNpm() {
     return path;
   });
 
-  const consumer = mkdtempSync(join(tmpdir(), "qe-consumer-npm-"));
-  const cache = join(consumer, ".npm-cache");
+  const consumer = mkdtempSync(join(tmpdir(), 'qe-consumer-npm-'));
+  const cache = join(consumer, '.npm-cache');
   try {
     writeFileSync(
-      join(consumer, "package.json"),
-      `${JSON.stringify({ name: "qe-report-clean-consumer", private: true, version: "0.0.0", type: "module" }, null, 2)}\n`,
+      join(consumer, 'package.json'),
+      `${JSON.stringify({ name: 'qe-report-clean-consumer', private: true, version: '0.0.0', type: 'module' }, null, 2)}\n`,
     );
     // Its own cache and no workspace above it: nothing here can resolve into the repository.
-    run(
-      "npm",
-      ["install", "--no-audit", "--no-fund", "--cache", cache, ...tarballs],
-      {
-        cwd: consumer,
-      },
-    );
+    run('npm', ['install', '--no-audit', '--no-fund', '--cache', cache, ...tarballs], {
+      cwd: consumer,
+    });
 
-    const installed = readdirSync(join(consumer, "node_modules")).filter((d) =>
-      d.startsWith("qe-report-"),
+    const installed = readdirSync(join(consumer, 'node_modules')).filter((d) =>
+      d.startsWith('qe-report-'),
     );
     for (const name of npm.public) {
       if (!installed.includes(name)) problems.push(`${name} did not install`);
       const manifest = JSON.parse(
-        readFileSync(
-          join(consumer, "node_modules", name, "package.json"),
-          "utf8",
-        ),
+        readFileSync(join(consumer, 'node_modules', name, 'package.json'), 'utf8'),
       );
       if (manifest.version !== productVersion) {
-        problems.push(
-          `${name} installed as ${manifest.version}, not ${productVersion}`,
-        );
+        problems.push(`${name} installed as ${manifest.version}, not ${productVersion}`);
       }
     }
     // An internal package reaching a consumer would mean a runtime dependency on one.
     for (const name of npm.internal) {
-      if (installed.includes(name))
-        problems.push(`the internal package ${name} was installed`);
+      if (installed.includes(name)) problems.push(`the internal package ${name} was installed`);
     }
 
     // ESM, and the SDK writing a run the installed validator then reads.
     writeFileSync(
-      join(consumer, "use.mjs"),
+      join(consumer, 'use.mjs'),
       `import { PROTOCOL_VERSION, parseEvent } from 'qe-report-protocol';
 import { FileSink, ReportSession, resolveRunDirectory } from 'qe-report-sdk';
 import { mkdirSync } from 'node:fs';
@@ -146,16 +131,15 @@ if (event.eventType !== 'session.finished') throw new Error('the protocol packag
 process.stdout.write(runDirectory + '\\n');
 `,
     );
-    const runRoot = join(consumer, "runs-root");
-    const runDirectory = run(process.execPath, ["use.mjs", runRoot], {
+    const runRoot = join(consumer, 'runs-root');
+    const runDirectory = run(process.execPath, ['use.mjs', runRoot], {
       cwd: consumer,
     }).trim();
-    if (!existsSync(runDirectory))
-      problems.push("the SDK wrote no run directory");
+    if (!existsSync(runDirectory)) problems.push('the SDK wrote no run directory');
 
     // CommonJS, for the packages whose published contract has both forms.
     writeFileSync(
-      join(consumer, "use.cjs"),
+      join(consumer, 'use.cjs'),
       `const protocol = require('qe-report-protocol');
 const sdk = require('qe-report-sdk');
 const validator = require('qe-report-validator');
@@ -165,33 +149,24 @@ if (typeof validator.validateRunDirectory !== 'function') throw new Error('qe-re
 process.stdout.write('cjs ok\\n');
 `,
     );
-    const cjs = run(process.execPath, ["use.cjs"], { cwd: consumer }).trim();
-    if (cjs !== "cjs ok")
-      problems.push(`the CommonJS entry points did not load: ${cjs}`);
+    const cjs = run(process.execPath, ['use.cjs'], { cwd: consumer }).trim();
+    if (cjs !== 'cjs ok') problems.push(`the CommonJS entry points did not load: ${cjs}`);
 
     // The installed CLIs, from node_modules/.bin, which is how a consumer invokes them.
-    const bin = join(consumer, "node_modules", ".bin");
-    const validated = run(
-      join(bin, "qe-report-validate"),
-      [runDirectory, "--require-complete"],
-      {
-        cwd: consumer,
-      },
-    );
+    const bin = join(consumer, 'node_modules', '.bin');
+    const validated = run(join(bin, 'qe-report-validate'), [runDirectory, '--require-complete'], {
+      cwd: consumer,
+    });
     if (!/valid/iu.test(validated)) {
-      problems.push(
-        `qe-report-validate did not accept the run it was given: ${validated.trim()}`,
-      );
+      problems.push(`qe-report-validate did not accept the run it was given: ${validated.trim()}`);
     }
-    const validatorVersion = run(
-      join(bin, "qe-report-validate"),
-      ["--version"],
-      { cwd: consumer },
-    ).trim();
+    const validatorVersion = run(join(bin, 'qe-report-validate'), ['--version'], {
+      cwd: consumer,
+    }).trim();
     if (validatorVersion !== productVersion) {
       problems.push(`qe-report-validate --version said ${validatorVersion}`);
     }
-    const uploadVersion = run(join(bin, "qe-report-upload"), ["--version"], {
+    const uploadVersion = run(join(bin, 'qe-report-upload'), ['--version'], {
       cwd: consumer,
     }).trim();
     if (uploadVersion !== productVersion) {
@@ -202,7 +177,7 @@ process.stdout.write('cjs ok\\n');
       problems,
       node: process.version,
       installed: installed.sort(),
-      runDirectory: runDirectory.replace(consumer, "<consumer>"),
+      runDirectory: runDirectory.replace(consumer, '<consumer>'),
     };
   } finally {
     rmSync(consumer, { recursive: true, force: true });
@@ -212,17 +187,12 @@ process.stdout.write('cjs ok\\n');
 if (import.meta.url === `file://${process.argv[1]}`) {
   const result = consumeNpm();
   process.stdout.write(
-    `clean npm consumer on Node ${result.node}: installed ${result.installed.join(", ")}\n`,
+    `clean npm consumer on Node ${result.node}: installed ${result.installed.join(', ')}\n`,
   );
   if (result.problems.length > 0) {
-    process.stderr.write(
-      "\nthe published tarballs do not work from a clean install:\n",
-    );
-    for (const problem of result.problems)
-      process.stderr.write(`  - ${problem}\n`);
+    process.stderr.write('\nthe published tarballs do not work from a clean install:\n');
+    for (const problem of result.problems) process.stderr.write(`  - ${problem}\n`);
     process.exit(1);
   }
-  process.stdout.write(
-    "ESM, CommonJS, the SDK, the validator CLI and the uploader CLI all work\n",
-  );
+  process.stdout.write('ESM, CommonJS, the SDK, the validator CLI and the uploader CLI all work\n');
 }

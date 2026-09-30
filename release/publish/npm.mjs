@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+/**
+ * Publishes the packed tarballs to npm, in dependency order, resuming safely.
+ *
+ * Run only by the release workflow, from the release environment. It is in this directory, rather
+ * than beside the rehearsal, because the rehearsal asserts that nothing it runs can publish and
+ * that boundary is a directory a person can see.
+ *
+ * Registry publication is not atomic and a run may be a resume, so for each package: if the version
+ * is absent, publish it; if it is present and its integrity matches the tarball built here, it was
+ * already done; if it is present and differs, stop. A published version is never replaced.
+ */
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
+const { productVersion, npm } = contract;
+const NPM_OUT = join(ROOT, 'build', 'release', productVersion, 'npm');
+
+if (process.env.NODE_AUTH_TOKEN === undefined || process.env.NODE_AUTH_TOKEN === '') {
+  process.stderr.write('no npm credential: refusing to continue rather than skipping npm\n');
+  process.exit(1);
+}
+
+const integrityOf = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+
+for (const name of npm.public) {
+  const tarball = join(NPM_OUT, `${name}-${productVersion}.tgz`);
+  if (!existsSync(tarball)) {
+    process.stderr.write(`${name} was not packed; the preflight should have produced it\n`);
+    process.exit(1);
+  }
+  const bytes = readFileSync(tarball);
+  const local = integrityOf(bytes);
+
+  const response = await fetch(`https://registry.npmjs.org/${name}/${productVersion}`, {
+    headers: { accept: 'application/json' },
+  });
+  if (response.ok) {
+    const published = await response.json();
+    const registry = published.dist?.integrity;
+    if (registry === local) {
+      process.stdout.write(`${name}@${productVersion} is already published and matches\n`);
+      continue;
+    }
+    process.stderr.write(
+      `${name}@${productVersion} is already published and does NOT match what this release built.\n` +
+        `  registry: ${registry}\n  here:     ${local}\n` +
+        'A published version is immutable. Do not replace it: release the fix as a new version.\n',
+    );
+    process.exit(1);
+  }
+  if (response.status !== 404) {
+    process.stderr.write(`the registry answered ${response.status} for ${name}; stopping\n`);
+    process.exit(1);
+  }
+
+  process.stdout.write(`publishing ${name}@${productVersion}\n`);
+  const published = spawnSync('npm', ['publish', tarball, '--provenance', '--access', 'public'], {
+    stdio: 'inherit',
+    cwd: ROOT,
+  });
+  if (published.status !== 0) {
+    process.stderr.write(`${name} did not publish; later packages were not attempted\n`);
+    process.exit(1);
+  }
+}
+process.stdout.write(`all ${npm.public.length} packages are published at ${productVersion}\n`);

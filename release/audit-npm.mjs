@@ -21,35 +21,29 @@
  * installs the devDependencies of a dependency, and rewriting a manifest at pack time to tidy a
  * field nothing reads would add a moving part for no gain.
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, rmSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readdirSync, rmSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const contract = JSON.parse(
-  readFileSync(join(ROOT, "release", "release.json"), "utf8"),
-);
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
 const { productVersion, npm, repository } = contract;
 
 /** Where the release candidate is assembled. Build output, never committed. */
-export const NPM_OUT = join(ROOT, "build", "release", productVersion, "npm");
+export const NPM_OUT = join(ROOT, 'build', 'release', productVersion, 'npm');
 
 /** Dependency fields a consumer actually installs from. `devDependencies` is deliberately absent. */
-const RUNTIME_FIELDS = [
-  "dependencies",
-  "peerDependencies",
-  "optionalDependencies",
-];
+const RUNTIME_FIELDS = ['dependencies', 'peerDependencies', 'optionalDependencies'];
 
 /** Names that belong to this repository's tests and must never reach a consumer. */
 const TEST_INFRASTRUCTURE = [
-  "testcontainers",
-  "@testcontainers/postgresql",
-  "vitest",
-  "@playwright/test",
-  "pg",
-  "@types/pg",
+  'testcontainers',
+  '@testcontainers/postgresql',
+  'vitest',
+  '@playwright/test',
+  'pg',
+  '@types/pg',
 ];
 
 /** Paths in a tarball that mean something unintended was packed. */
@@ -84,31 +78,30 @@ const LEAKS = [
 
 /** A literal, safe to put inside a pattern: only the characters a regex gives meaning to. */
 function escapeRegExp(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 const problems = [];
 const report = [];
 
 function tar(args) {
-  return execFileSync("tar", args, {
-    encoding: "utf8",
+  return execFileSync('tar', args, {
+    encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
   });
 }
 
 /** Packs one package and returns the tarball's path. */
 function pack(directory) {
-  const out = execFileSync("pnpm", ["pack", "--pack-destination", NPM_OUT], {
-    cwd: join(ROOT, "ts", "packages", directory),
-    encoding: "utf8",
+  const out = execFileSync('pnpm', ['pack', '--pack-destination', NPM_OUT], {
+    cwd: join(ROOT, 'ts', 'packages', directory),
+    encoding: 'utf8',
   });
   const line = out
-    .split("\n")
+    .split('\n')
     .map((l) => l.trim())
-    .findLast((l) => l.endsWith(".tgz"));
-  if (line === undefined)
-    throw new Error(`pnpm pack printed no tarball for ${directory}`);
+    .findLast((l) => l.endsWith('.tgz'));
+  if (line === undefined) throw new Error(`pnpm pack printed no tarball for ${directory}`);
   return line;
 }
 
@@ -116,22 +109,18 @@ export function auditNpm() {
   rmSync(NPM_OUT, { recursive: true, force: true });
   mkdirSync(NPM_OUT, { recursive: true });
   // The licence is staged rather than committed five times over, so stage it before packing.
-  execFileSync(
-    process.execPath,
-    [join(ROOT, "release", "stage-licenses.mjs")],
-    {
-      stdio: "ignore",
-    },
-  );
+  execFileSync(process.execPath, [join(ROOT, 'release', 'stage-licenses.mjs')], {
+    stdio: 'ignore',
+  });
 
   for (const name of npm.public) {
-    const directory = name.replace(/^qe-report-/u, "");
+    const directory = name.replace(/^qe-report-/u, '');
     const tarball = pack(directory);
-    const entries = tar(["-tzf", tarball])
-      .split("\n")
+    const entries = tar(['-tzf', tarball])
+      .split('\n')
       .map((l) => l.trim())
-      .filter((l) => l !== "" && !l.endsWith("/"))
-      .map((l) => l.replace(/^package\//u, ""));
+      .filter((l) => l !== '' && !l.endsWith('/'))
+      .map((l) => l.replace(/^package\//u, ''));
 
     const say = (problem) => problems.push(`${name}: ${problem}`);
 
@@ -141,39 +130,28 @@ export function auditNpm() {
         if (pattern.test(entry)) say(`the tarball contains ${entry}`);
       }
     }
-    if (!entries.includes("LICENSE")) say("the tarball has no LICENSE");
-    if (!entries.includes("README.md")) say("the tarball has no README.md");
-    if (!entries.includes("package.json"))
-      say("the tarball has no package.json");
-    if (!entries.some((e) => e.startsWith("dist/")))
-      say("the tarball has no dist");
+    if (!entries.includes('LICENSE')) say('the tarball has no LICENSE');
+    if (!entries.includes('README.md')) say('the tarball has no README.md');
+    if (!entries.includes('package.json')) say('the tarball has no package.json');
+    if (!entries.some((e) => e.startsWith('dist/'))) say('the tarball has no dist');
 
     // 2 and 3. What a consumer would install.
-    const packed = JSON.parse(tar(["-xzOf", tarball, "package/package.json"]));
+    const packed = JSON.parse(tar(['-xzOf', tarball, 'package/package.json']));
     if (packed.version !== productVersion) {
       say(`the packed version is ${packed.version}, not ${productVersion}`);
     }
-    if (packed.license !== repository.license)
-      say(`the packed license is ${packed.license}`);
-    if (packed.private === true) say("the packed manifest still says private");
+    if (packed.license !== repository.license) say(`the packed license is ${packed.license}`);
+    if (packed.private === true) say('the packed manifest still says private');
     for (const field of RUNTIME_FIELDS) {
       for (const [dependency, range] of Object.entries(packed[field] ?? {})) {
         if (npm.internal.includes(dependency)) {
           say(`${field} names the internal package ${dependency}`);
         }
-        if (
-          TEST_INFRASTRUCTURE.includes(dependency) &&
-          field !== "peerDependencies"
-        ) {
+        if (TEST_INFRASTRUCTURE.includes(dependency) && field !== 'peerDependencies') {
           say(`${field} names the test-only dependency ${dependency}`);
         }
-        if (
-          typeof range === "string" &&
-          /^(workspace|file|link):/u.test(range)
-        ) {
-          say(
-            `${field}.${dependency} is ${range}, which resolves nowhere outside this repository`,
-          );
+        if (typeof range === 'string' && /^(workspace|file|link):/u.test(range)) {
+          say(`${field}.${dependency} is ${range}, which resolves nowhere outside this repository`);
         }
       }
     }
@@ -181,39 +159,32 @@ export function auditNpm() {
     const devNames = Object.keys(packed.devDependencies ?? {});
 
     // 4. Dev-only code bundled into dist, and 5. leaks, both read from the bytes.
-    const distFiles = entries.filter((e) => e.startsWith("dist/"));
+    const distFiles = entries.filter((e) => e.startsWith('dist/'));
     for (const file of distFiles) {
-      const bytes = tar(["-xzOf", tarball, `package/${file}`]);
+      const bytes = tar(['-xzOf', tarball, `package/${file}`]);
       for (const forbidden of [...npm.internal, ...TEST_INFRASTRUCTURE]) {
         // A module specifier, not a mention: an error message naming a package is not a dependency.
         const specifier = new RegExp(
           `(from|require\\()\\s*['"\`]${escapeRegExp(forbidden)}(/[^'"\`]*)?['"\`]`,
-          "u",
+          'u',
         );
         if (specifier.test(bytes)) {
           // A peer dependency is the one legitimate case: the reporter imports Playwright's types.
-          const isPeer = Object.keys(packed.peerDependencies ?? {}).includes(
-            forbidden,
-          );
-          if (!isPeer)
-            say(
-              `${file} imports ${forbidden}, which a consumer does not install`,
-            );
+          const isPeer = Object.keys(packed.peerDependencies ?? {}).includes(forbidden);
+          if (!isPeer) say(`${file} imports ${forbidden}, which a consumer does not install`);
         }
       }
       for (const leak of LEAKS) {
         const found = leak.exec(bytes);
-        if (found !== null)
-          say(`${file} contains ${JSON.stringify(found[0].slice(0, 60))}`);
+        if (found !== null) say(`${file} contains ${JSON.stringify(found[0].slice(0, 60))}`);
       }
     }
     // The manifest and the readme go through the same leak check.
-    for (const file of ["package.json", "README.md"]) {
-      const bytes = tar(["-xzOf", tarball, `package/${file}`]);
+    for (const file of ['package.json', 'README.md']) {
+      const bytes = tar(['-xzOf', tarball, `package/${file}`]);
       for (const leak of LEAKS) {
         const found = leak.exec(bytes);
-        if (found !== null)
-          say(`${file} contains ${JSON.stringify(found[0].slice(0, 60))}`);
+        if (found !== null) say(`${file} contains ${JSON.stringify(found[0].slice(0, 60))}`);
       }
     }
 
@@ -225,7 +196,7 @@ export function auditNpm() {
       dependencies: packed.dependencies ?? {},
       peerDependencies: packed.peerDependencies ?? {},
       devDependencies: devNames.length,
-      tarball: tarball.replace(`${ROOT}/`, ""),
+      tarball: tarball.replace(`${ROOT}/`, ''),
     });
   }
   return { problems, report };
@@ -242,11 +213,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     );
   }
   if (found.length > 0) {
-    process.stderr.write("\nthe npm release candidate is not publishable:\n");
+    process.stderr.write('\nthe npm release candidate is not publishable:\n');
     for (const problem of found) process.stderr.write(`  - ${problem}\n`);
     process.exit(1);
   }
-  process.stdout.write(
-    `\n${packages.length} npm tarballs audited and publishable\n`,
-  );
+  process.stdout.write(`\n${packages.length} npm tarballs audited and publishable\n`);
 }

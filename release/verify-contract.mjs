@@ -15,12 +15,12 @@
  *
  * No network, no build, no database: it reads source. Run it with `node release/verify-contract.mjs`.
  */
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const read = (...parts) => readFileSync(join(ROOT, ...parts), "utf8");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const read = (...parts) => readFileSync(join(ROOT, ...parts), 'utf8');
 const json = (...parts) => JSON.parse(read(...parts));
 
 const problems = [];
@@ -34,35 +34,25 @@ function expect(what, actual, wanted) {
   }
 }
 
-const contract = json("release", "release.json");
-const {
-  productVersion,
-  gitTag,
-  compatibility,
-  runtimes,
-  npm,
-  maven,
-  container,
-  repository,
-} = contract;
+const contract = json('release', 'release.json');
+const { productVersion, gitTag, compatibility, runtimes, npm, maven, container, repository } =
+  contract;
 
 // The tag is the product version with one prefix, and nothing else decides either.
-expect("the git tag", gitTag, `v${productVersion}`);
+expect('the git tag', gitTag, `v${productVersion}`);
 if (!/^[0-9]+\.[0-9]+\.[0-9]+$/u.test(productVersion)) {
-  problems.push(
-    `the product version ${productVersion} is not a release SemVer triple`,
-  );
+  problems.push(`the product version ${productVersion} is not a release SemVer triple`);
 }
 
 // ---------------------------------------------------------------------------------------------
 // npm: the boundary, the versions, and the runtime floor
 // ---------------------------------------------------------------------------------------------
-const packagesDir = join(ROOT, "ts", "packages");
+const packagesDir = join(ROOT, 'ts', 'packages');
 const manifests = new Map();
 for (const entry of readdirSync(packagesDir)) {
   let manifest;
   try {
-    manifest = json("ts", "packages", entry, "package.json");
+    manifest = json('ts', 'packages', entry, 'package.json');
   } catch {
     continue;
   }
@@ -76,9 +66,9 @@ const actuallyPublishable = [...manifests.values()]
   .map(({ manifest }) => manifest.name)
   .sort();
 // Both directions: nothing public that the contract does not name, and nothing named that is not.
-expect("the publishable npm packages", actuallyPublishable, declaredPublic);
+expect('the publishable npm packages', actuallyPublishable, declaredPublic);
 expect(
-  "every npm package",
+  'every npm package',
   [...manifests.keys()].sort(),
   [...declaredPublic, ...declaredInternal].sort(),
 );
@@ -86,51 +76,34 @@ expect(
 for (const name of npm.public) {
   const found = manifests.get(name);
   if (found === undefined) {
-    problems.push(
-      `the contract names the npm package ${name}, which does not exist`,
-    );
+    problems.push(`the contract names the npm package ${name}, which does not exist`);
     continue;
   }
   const { manifest } = found;
   expect(`${name} version`, manifest.version, productVersion);
   expect(`${name} engines.node`, manifest.engines?.node, runtimes.node);
   expect(`${name} license`, manifest.license, repository.license);
-  expect(
-    `${name} publishConfig.access`,
-    manifest.publishConfig?.access,
-    "public",
-  );
+  expect(`${name} publishConfig.access`, manifest.publishConfig?.access, 'public');
   if (
-    typeof manifest.repository?.url !== "string" ||
-    !manifest.repository.url.includes(repository.url.replace("https://", ""))
+    typeof manifest.repository?.url !== 'string' ||
+    !manifest.repository.url.includes(repository.url.replace('https://', ''))
   ) {
     problems.push(`${name} repository.url does not point at ${repository.url}`);
   }
-  for (const field of [
-    "description",
-    "homepage",
-    "bugs",
-    "files",
-    "exports",
-    "types",
-  ]) {
+  for (const field of ['description', 'homepage', 'bugs', 'files', 'exports', 'types']) {
     if (manifest[field] === undefined) problems.push(`${name} has no ${field}`);
   }
   // A published package may not depend on something that only exists in this workspace.
-  for (const [dependency, range] of Object.entries(
-    manifest.dependencies ?? {},
-  )) {
+  for (const [dependency, range] of Object.entries(manifest.dependencies ?? {})) {
     if (npm.internal.includes(dependency)) {
       problems.push(`${name} depends on the internal package ${dependency}`);
     }
     if (
-      typeof range === "string" &&
+      typeof range === 'string' &&
       /^(workspace|file|link):/u.test(range) &&
       !npm.public.includes(dependency)
     ) {
-      problems.push(
-        `${name} depends on ${dependency} through ${range}, which cannot be published`,
-      );
+      problems.push(`${name} depends on ${dependency} through ${range}, which cannot be published`);
     }
   }
 }
@@ -138,75 +111,57 @@ for (const name of npm.public) {
 for (const name of npm.internal) {
   const found = manifests.get(name);
   if (found === undefined) {
-    problems.push(
-      `the contract names the internal npm package ${name}, which does not exist`,
-    );
+    problems.push(`the contract names the internal npm package ${name}, which does not exist`);
     continue;
   }
   if (found.manifest.private !== true) {
-    problems.push(
-      `${name} is internal in the contract but is not private in its manifest`,
-    );
+    problems.push(`${name} is internal in the contract but is not private in its manifest`);
   }
 }
 
 // The Playwright peer range is a compatibility promise, so it lives in the contract too.
-const playwright = manifests.get("qe-report-playwright")?.manifest;
+const playwright = manifests.get('qe-report-playwright')?.manifest;
 expect(
-  "the Playwright peer range",
-  playwright?.peerDependencies?.["@playwright/test"],
+  'the Playwright peer range',
+  playwright?.peerDependencies?.['@playwright/test'],
   runtimes.playwrightPeer,
 );
 
 // ---------------------------------------------------------------------------------------------
 // The independent compatibility lines
 // ---------------------------------------------------------------------------------------------
-const protocolSource = read("ts", "packages", "protocol", "src", "version.ts");
-const protocolVersion = /PROTOCOL_VERSION = '([0-9]+\.[0-9]+\.[0-9]+)'/u.exec(
-  protocolSource,
-)?.[1];
+const protocolSource = read('ts', 'packages', 'protocol', 'src', 'version.ts');
+const protocolVersion = /PROTOCOL_VERSION = '([0-9]+\.[0-9]+\.[0-9]+)'/u.exec(protocolSource)?.[1];
 if (protocolVersion === undefined) {
-  problems.push("PROTOCOL_VERSION could not be read from the protocol package");
+  problems.push('PROTOCOL_VERSION could not be read from the protocol package');
 } else {
   // The compatibility unit is `0.minor`, so the line is the version without its patch.
   expect(
-    "the protocol compatibility line",
-    protocolVersion.split(".").slice(0, 2).join("."),
+    'the protocol compatibility line',
+    protocolVersion.split('.').slice(0, 2).join('.'),
     compatibility.protocolCompatibility,
   );
 }
 
-const openapi = json("openapi", "qe-report-api-v1.json");
-expect(
-  "the OpenAPI document version",
-  Number(openapi.info?.version),
-  compatibility.httpApiVersion,
-);
+const openapi = json('openapi', 'qe-report-api-v1.json');
+expect('the OpenAPI document version', Number(openapi.info?.version), compatibility.httpApiVersion);
 
-const migrations = read("ts", "packages", "postgres", "src", "migrations.ts");
-const versions = [...migrations.matchAll(/^ {4}version: ([0-9]+),$/gmu)].map(
-  (m) => Number(m[1]),
-);
+const migrations = read('ts', 'packages', 'postgres', 'src', 'migrations.ts');
+const versions = [...migrations.matchAll(/^ {4}version: ([0-9]+),$/gmu)].map((m) => Number(m[1]));
 if (versions.length === 0) {
-  problems.push(
-    "no migration versions could be read from the postgres package",
-  );
+  problems.push('no migration versions could be read from the postgres package');
 } else {
-  expect(
-    "the database schema version",
-    Math.max(...versions),
-    compatibility.databaseSchemaVersion,
-  );
+  expect('the database schema version', Math.max(...versions), compatibility.databaseSchemaVersion);
   // Append-only: the versions are 1..n with nothing missing and nothing repeated.
   const expectedSequence = versions.map((_, i) => i + 1);
   expect(
-    "the migration sequence",
+    'the migration sequence',
     [...versions].sort((a, b) => a - b),
     expectedSequence,
   );
 }
 
-const apiKeys = read("ts", "packages", "postgres", "src", "api-keys.ts");
+const apiKeys = read('ts', 'packages', 'postgres', 'src', 'api-keys.ts');
 if (!apiKeys.includes(`${compatibility.apiKeyFormat}_`)) {
   problems.push(
     `the API key format ${compatibility.apiKeyFormat} does not appear in the key implementation`,
@@ -216,69 +171,51 @@ if (!apiKeys.includes(`${compatibility.apiKeyFormat}_`)) {
 // ---------------------------------------------------------------------------------------------
 // Maven: the version, the boundary, and the bytecode floor
 // ---------------------------------------------------------------------------------------------
-const gradle = read("java", "build.gradle.kts");
+const gradle = read('java', 'build.gradle.kts');
 // The group and the version both come from this contract, so there is no literal in the build to
 // compare against; what is checked is that the build reads them from here and carries neither.
 if (!gradle.includes('mavenContract["groupId"]')) {
-  problems.push(
-    "java/build.gradle.kts does not take its group from release/release.json",
-  );
+  problems.push('java/build.gradle.kts does not take its group from release/release.json');
 }
 // A Maven group has dots in it; `group = "verification"` is a Gradle task group and is not one.
 if (/^\s*group = "[a-z0-9]+(\.[a-z0-9]+)+"/mu.test(gradle)) {
-  problems.push("java/build.gradle.kts still carries a literal Maven group");
+  problems.push('java/build.gradle.kts still carries a literal Maven group');
 }
 const bytecode = /options\.release\.set\(([0-9]+)\)/u.exec(gradle)?.[1];
-expect("the Java bytecode floor", Number(bytecode), runtimes.javaBytecode);
+expect('the Java bytecode floor', Number(bytecode), runtimes.javaBytecode);
 const toolchain = /JavaLanguageVersion\.of\(([0-9]+)\)/u.exec(gradle)?.[1];
-expect(
-  "the Java build toolchain",
-  Number(toolchain),
-  runtimes.javaBuildToolchain,
-);
+expect('the Java build toolchain', Number(toolchain), runtimes.javaBuildToolchain);
 
 // The Java version comes from the contract itself, so there is nothing to compare: assert that the
 // build reads it rather than carrying a literal of its own.
 if (/^\s*version = "[0-9]/mu.test(gradle)) {
-  problems.push(
-    "java/build.gradle.kts still carries a literal version; it must read release.json",
-  );
+  problems.push('java/build.gradle.kts still carries a literal version; it must read release.json');
 }
-if (!gradle.includes("release.json")) {
-  problems.push(
-    "java/build.gradle.kts does not read release/release.json for its version",
-  );
+if (!gradle.includes('release.json')) {
+  problems.push('java/build.gradle.kts does not read release/release.json for its version');
 }
 
-const settings = read("java", "settings.gradle.kts");
+const settings = read('java', 'settings.gradle.kts');
 // One `include` call naming several modules, so the names are read from its argument list.
-const includeCall = /include\(([^)]*)\)/u.exec(settings)?.[1] ?? "";
-const includes = [...includeCall.matchAll(/"([^"]+)"/gu)].map((m) =>
-  m[1].replace(/^:/u, ""),
-);
+const includeCall = /include\(([^)]*)\)/u.exec(settings)?.[1] ?? '';
+const includes = [...includeCall.matchAll(/"([^"]+)"/gu)].map((m) => m[1].replace(/^:/u, ''));
 const declaredMaven = [...maven.public, ...maven.internal]
-  .map((a) => a.replace(/^qe-report-/u, ""))
+  .map((a) => a.replace(/^qe-report-/u, ''))
   .sort();
-expect("the Gradle modules", [...includes].sort(), declaredMaven);
+expect('the Gradle modules', [...includes].sort(), declaredMaven);
 
 // ---------------------------------------------------------------------------------------------
 // The container
 // ---------------------------------------------------------------------------------------------
-const compose = read("deploy", "reference", "compose.yaml");
-if (!compose.includes("QE_REPORT_IMAGE")) {
-  problems.push(
-    "the reference deployment does not take its image from QE_REPORT_IMAGE",
-  );
+const compose = read('deploy', 'reference', 'compose.yaml');
+if (!compose.includes('QE_REPORT_IMAGE')) {
+  problems.push('the reference deployment does not take its image from QE_REPORT_IMAGE');
 }
 if (container.tags[0] !== productVersion) {
-  problems.push(
-    `the first container tag ${container.tags[0]} is not the product version`,
-  );
+  problems.push(`the first container tag ${container.tags[0]} is not the product version`);
 }
-if (container.tags.includes("latest")) {
-  problems.push(
-    "the initial v1 release must not publish a `latest` container tag",
-  );
+if (container.tags.includes('latest')) {
+  problems.push('the initial v1 release must not publish a `latest` container tag');
 }
 
 // ---------------------------------------------------------------------------------------------
