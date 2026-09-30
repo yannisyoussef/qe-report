@@ -22,6 +22,9 @@ nothing has established, so nothing here suggests it.
 
 - Docker with Compose v2.
 - `openssl`, for a rehearsal certificate. A real deployment brings its own.
+- `curl` and `node`, for `scripts/smoke.sh`. Nothing in the serving path needs either.
+- The ability to run `docker compose`. That is root-equivalent on the host, which is why the
+  `operator` service running as root adds no privilege anyone did not already have.
 - A host with room for PostgreSQL, the attachment store, and staging. Watching that space is the
   operator's job: nothing deletes a run because a disk is filling. Retention is the only thing
   that removes data, and only when asked.
@@ -34,10 +37,12 @@ cp env.example .env          # every setting, with safe placeholders
 ./scripts/dev-tls.sh localhost   # a rehearsal certificate; skip it in production
 ```
 
-`env.example` documents each setting. Two deserve attention together: the application's
-`QE_REPORT_MAX_REQUEST_BYTES` and the edge's `QE_REPORT_EDGE_MAX_BODY`. The edge's limit must be
-at least the application's, or the proxy will refuse uploads the service would have accepted.
-Raise them together.
+`env.example` lists every setting the deployment reads, including the ones fixed by the image.
+Two deserve attention together: the application's `QE_REPORT_MAX_REQUEST_BYTES` and the edge's
+`QE_REPORT_EDGE_MAX_BODY`. The edge's is deliberately the larger of the two, so the protections
+stay separable: the edge refuses what is absurd, with its own 413, and a body between the two
+limits reaches the application and is refused there as a problem document. Making them equal hides
+the second one. Raise them together, keeping the edge's the larger.
 
 `.env`, `secrets/`, `tls/`, and `backups/` are ignored by Git and must stay that way. Nothing in
 this directory should ever hold a certificate, a private key, a password, an API key, or a backup.
@@ -169,14 +174,27 @@ docker compose up -d api
 ```
 
 Only the server's own request-id directories are candidates, only real directories, and only ones
-older than the cutoff. A link is never followed; an unfamiliar name is reported, not removed.
+older than the cutoff. A link is never followed; an unfamiliar name is reported, not removed. An
+unfamiliar name does not fail the command either: a stray file in the staging root is something to
+know about, not a reason for a cleanup that did its job to exit non-zero.
+
+Both roots have to be set, as they are for the server, because the check that they are separate is
+what stops a mistyped staging root from being a directory whose contents this command deletes. The
+cutoff has to be greater than zero: `--older-than-ms 0` would mean "everything".
 
 ## Backup
 
 The reference backup is quiesced: the API stops, the database is dumped, the attachment store is
 copied, and the API starts again. An ingestion publishes attachment bytes before it commits the
-rows that reference them, and maintenance only runs when started, so with no writer running the
-two halves describe the same moment. This is not a zero-downtime backup.
+rows that reference them, so with no writer running the two halves describe the same moment. This
+is not a zero-downtime backup.
+
+Stopping the API does not stop an operator, so the backup also holds the exclusive maintenance
+lock, in one session, across both halves, and proves afterwards that the same session held it the
+whole time. Without that, a retention pass started between the dump and the copy could delete
+bytes the dump still references, and the result would pass every check and restore an archive
+pointing at objects that are not there. A maintenance command started while a backup runs waits
+for the lock and then fails on its own timeout, which is the outcome to want.
 
 ```sh
 ./scripts/backup.sh              # names it after the current instant
@@ -186,9 +204,16 @@ two halves describe the same moment. This is not a zero-downtime backup.
 A backup holds the database dump, the attachment store as opaque files in its own layout,
 checksums, and a manifest. It does not hold staging, edge logs, TLS keys, or secrets; those have
 their own lifecycle. The manifest is written last, so a directory without one is incomplete and
-must not be restored. Any failure exits non-zero and says what failed.
+must not be restored, and the manifest is itself one of the checksummed files. Any failure exits
+non-zero, says what failed, and starts the API again: a backup that fails at three in the morning
+must not also be an outage.
 
-A backup does contain reporting data and the hashes of API keys. Treat it as sensitive.
+A backup directory is a trust boundary. It contains reporting data and the hashes of API keys, and
+`checksums.sha256` sits beside the files it describes, so anyone who can rewrite one can rewrite
+the other; `pg_restore` then executes whatever the dump contains, as the reporting role. The
+checksums detect bit rot and truncation, not an adversary. Protect a backup exactly as you protect
+the database: the files are written 0600 in a 0700 directory, and where they go from there is
+yours to decide.
 
 ## Restore
 
@@ -196,13 +221,28 @@ Destructive and explicit. It replaces the database and the attachment store; it 
 backup into a live archive.
 
 ```sh
-./scripts/restore.sh before-upgrade
+./scripts/restore.sh before-upgrade --yes
 ./scripts/smoke.sh <a completed run directory>   # prove it before trusting it
 ```
 
-It stops on a bad checksum, a missing or unreadable manifest, a different PostgreSQL major, a
-failed database or store restore, or a schema this build does not recognise, and it does not start
-the API when any step has failed.
+`--yes` is required. Everything now in the deployment is destroyed and no copy of it is taken
+first, so the confirmation is the only thing between a name typed at a prompt and an archive that
+is gone.
+
+It stops on a bad checksum, a manifest whose own recorded digests disagree with the verified ones,
+a missing or unreadable manifest, a different PostgreSQL major, a failed database or store
+restore, or a schema this build does not recognise, and it does not start the API when any step
+has failed. The attachment store is extracted without the archive's own owners and modes, and its
+owner is then set to the account the application runs as: a tar that claimed otherwise could
+otherwise leave objects the API can neither read nor let retention delete.
+
+A restore brings back the API keys as they were when the backup was taken. **A key revoked since
+then authenticates again.** Review them and revoke what should not be live:
+
+```sh
+admin key list --all
+admin key revoke --public-id <publicId>
+```
 
 ## Upgrade
 
@@ -215,6 +255,10 @@ docker compose up -d api
 curl --cacert tls/ca.crt https://localhost:8443/readyz
 ./scripts/smoke.sh <a completed run directory>
 ```
+
+The edge needs no reload. A new image means a new container on a new address, and the edge
+re-resolves the application's name per request rather than once at start-up, which is why this
+sequence does not include a step to tell it what happened.
 
 ## Rollback
 
@@ -245,11 +289,19 @@ it, and never names the file it came from.
 docker compose stop api      # SIGTERM; requests already running are allowed to finish
 ```
 
-The first signal drains: the listener closes, in-flight requests finish, the pool closes, and the
-process exits 0. A drain that outlasts `QE_REPORT_SHUTDOWN_GRACE_MS` gives up, logs one line, and
-exits non-zero rather than hanging. A second signal stops it at once. The api service's
-`stop_grace_period` in compose.yaml is deliberately longer than the application's own grace, so
-the application decides, not Docker.
+The first signal drains: the listener closes, the requests already running are given the grace
+period to finish, the pool closes, and the process exits 0. Nothing new is served from the moment
+the drain begins, on a new connection or on one already open.
+
+A drain that outlasts `QE_REPORT_SHUTDOWN_GRACE_MS` gives up, logs one line, and exits non-zero
+rather than hanging. An upload still running at that point is abandoned: the transfer fails, the
+producer retries, and nothing is half-written, because a run becomes archived in one transaction.
+The default grace is 30 seconds, which is not long enough for an upload near the configured
+maximum on a slow link; if that is normal here, raise `QE_REPORT_SHUTDOWN_GRACE_MS` and the api
+service's `stop_grace_period` together, keeping `stop_grace_period` the larger, so the application
+decides rather than Docker.
+
+A second signal stops it at once, for an operator who has waited long enough.
 
 ## When it will not start
 
@@ -261,9 +313,48 @@ docker compose logs api | tail -40
 docker compose run --rm --entrypoint qe-report-admin api schema
 ```
 
-Common causes, all deliberate refusals: the schema is not the one this build expects (run
-`migrate`), both `DATABASE_URL` and `DATABASE_URL_FILE` are set, the secret file is empty or
-missing, or a filesystem root is unusable or is nested inside the other.
+Common causes, all deliberate refusals:
+
+- The schema is not the one this build expects. Run `migrate`.
+- Both `DATABASE_URL` and `DATABASE_URL_FILE` are set. An empty value still counts as set.
+- The secret file is empty, missing, or holds more than one line.
+- A filesystem root is unusable, or is nested inside the other.
+- `/readyz` says the blob root is not usable, on a deployment using **bind mounts** rather than
+  named volumes. A fresh named volume takes its ownership from the image; a bind mount keeps the
+  host's. Run `chown 10001:10001` on the host directories, which is the uid and gid the
+  application runs as.
+
+The logs say which of these it is, without printing a credential and without naming the file one
+came from.
+
+## Rate and connection limits
+
+The edge counts requests and simultaneous connections per client address, and answers 429 with a
+`Retry-After` the producer honours. Health and readiness have their own allowance, so a probe never
+spends a client's and is never refused because a client spent it.
+
+Two things to know before trusting the defaults:
+
+- `30r/m` is half a request a second sustained, with a burst of 20. That suits a handful of
+  producers. A CI fleet needs more.
+- Per address means per address *the edge can see*. A fleet behind one NAT address is one client
+  here. If something else terminates connections in front of this, its own address is the one being
+  counted, and every client shares one bucket; set `set_real_ip_from` and `real_ip_header` in
+  `nginx/templates/qe-report.conf.template` for that case.
+
+None of this is authentication. Every route authenticates independently, and a valid key is subject
+to these limits like anything else.
+
+## What the network reaches
+
+Two networks. `frontend` carries HTTP between the edge and the application; `backend` carries SQL
+and is `internal`, so neither the database nor the application has a route off the host. Only the
+edge publishes a port.
+
+"Unreachable from outside" holds because the host does not route the bridge subnet, not because
+something refuses the connection. On a Linux host with forwarding enabled and a route to that
+subnet, `api:8080` would be reachable from the LAN with no published port at all. If that describes
+your host, the container network is not the boundary you are relying on.
 
 ## Resource bounds
 

@@ -77,9 +77,16 @@ jobs:
         if: matrix.node == 22
         working-directory: ts
         run: pnpm test:deployment
+      # Scoped to what the rehearsal made. `docker system prune` would also reach anything else on
+      # the machine, which is harmless on a hosted runner and is not on a self-hosted one. Each
+      # stack already removes its own containers and volumes; this is for one that could not.
       - name: Keep no deployment state behind
         if: always() && matrix.node == 22
-        run: docker system prune --force --volumes
+        run: |
+          for project in $(docker compose ls --all --quiet | grep '^qe-ref-' || true); do
+            docker compose --project-name "$project" down --volumes --remove-orphans --timeout 30 || true
+          done
+          docker image rm --force qe-report:test || true
 
   playwright:
     name: Playwright reporter (Node ${{ matrix.node }}, Playwright ${{ matrix.playwright }})
@@ -140,7 +147,11 @@ jobs:
         run: pnpm test:deployment-playwright
       - name: Keep no deployment state behind
         if: always() && matrix.node == 22 && matrix.playwright == '1.63.0'
-        run: docker system prune --force --volumes
+        run: |
+          for project in $(docker compose ls --all --quiet | grep '^qe-ref-' || true); do
+            docker compose --project-name "$project" down --volumes --remove-orphans --timeout 30 || true
+          done
+          docker image rm --force qe-report:test || true
 
   equivalence:
     name: Cross-language equivalence
@@ -190,4 +201,8 @@ jobs:
         run: pnpm test:deployment-junit
       - name: Keep no deployment state behind
         if: always()
-        run: docker system prune --force --volumes
+        run: |
+          for project in $(docker compose ls --all --quiet | grep '^qe-ref-' || true); do
+            docker compose --project-name "$project" down --volumes --remove-orphans --timeout 30 || true
+          done
+          docker image rm --force qe-report:test || true

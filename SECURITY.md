@@ -50,7 +50,16 @@ These are the points that are a security matter rather than a preference:
   on the internal network alone; exposing either is a misconfiguration.
 - The application runs as a non-root user with a read-only root
   filesystem, no added capabilities, and writable space only for its two
-  data roots and a temporary directory.
+  data roots and a temporary directory, which is mounted `noexec`. The
+  other services keep only the capabilities they need to start. The
+  deployment's own networks are separate: the edge can reach the
+  application and not the database, and the network carrying SQL has no
+  route off the host.
+- "Unreachable from outside" holds because the host does not route the
+  container subnet, not because something refuses the connection. A host
+  with forwarding and a route to that subnet exposes the application and
+  the database on it, with no published port. That is a property of the
+  host, and it is the operator's to check.
 - Keys are issued and revoked by the operator command. There is no HTTP
   route for key or maintenance operations, and none should be added
   without deciding the authorisation question first, which this milestone
@@ -58,6 +67,14 @@ These are the points that are a security matter rather than a preference:
 - A backup contains reporting data and the hashes of API keys. It is
   sensitive, and it is not a place for TLS private keys, the database
   password, or plaintext tokens; the reference backup holds none of them.
+- A backup directory is a trust boundary. Its checksums sit beside the
+  files they describe, so they detect bit rot and truncation rather than an
+  adversary, and `pg_restore` executes whatever the dump contains. Protect
+  a backup as you protect the database.
+- A restore replaces the whole database, so it brings back every API key as
+  it was when the backup was taken. A key revoked since then authenticates
+  again from the moment the application starts. Reviewing and re-revoking
+  is part of the restore procedure, not an afterthought.
 - TLS certificates and private keys are the operator's to manage. Nothing
   in this repository issues, stores, or commits them.
 - Staging cleanup is an offline action. Nothing can tell an abandoned
@@ -65,4 +82,11 @@ These are the points that are a security matter rather than a preference:
   requires the instance that owns the staging root to be stopped.
 - Nothing is logged that could be replayed: no `Authorization` header, no
   cookie, no request body, no attachment bytes, no connection string, and
-  no secret-file contents, at the edge or in the application.
+  no secret-file contents, at the edge or in the application. Connection
+  strings are taken out of every line as it is written, not only at
+  start-up, because a driver error raised while serving a request carries
+  its own message.
+- The edge's rate and connection limits are not authentication. Every route
+  authenticates independently, and the limits count the client address the
+  edge can see, which behind NAT or another proxy is one address for many
+  clients.
