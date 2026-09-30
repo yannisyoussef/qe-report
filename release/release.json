@@ -1,0 +1,59 @@
+{
+  "$comment": "The release contract for qe-report. One committed source of truth for what a release is, checked against the code by release/verify-contract.mjs, which CI runs. Every fact here is derived from somewhere else in the repository and is verified against it; nothing here is a second place to edit a number.",
+  "productVersion": "1.0.0",
+  "gitTag": "v1.0.0",
+  "compatibility": {
+    "$comment": "Independent version domains. None of these follows the product version, and none of them is renamed because the product reached 1.0.0.",
+    "protocolCompatibility": "0.3",
+    "httpApiVersion": 1,
+    "databaseSchemaVersion": 5,
+    "apiKeyFormat": "qer_k1"
+  },
+  "runtimes": {
+    "node": ">=22",
+    "nodeVerified": [22, 24],
+    "java": ">=17",
+    "javaBytecode": 17,
+    "javaBuildToolchain": 25,
+    "playwrightPeer": ">=1.57.0 <2"
+  },
+  "npm": {
+    "$comment": "The five consumer-facing surfaces. Publication order is dependency order.",
+    "public": [
+      "qe-report-protocol",
+      "qe-report-sdk",
+      "qe-report-validator",
+      "qe-report-http-client",
+      "qe-report-playwright"
+    ],
+    "internal": [
+      "qe-report-read-model",
+      "qe-report-blob-fs",
+      "qe-report-postgres",
+      "qe-report-http-api",
+      "qe-report-equivalence"
+    ]
+  },
+  "maven": {
+    "groupId": "io.github.yannisyoussef",
+    "$comment2": "Every Gradle module is published; the consumer fixtures are separate builds, not modules of this one.",
+    "public": [
+      "qe-report-protocol",
+      "qe-report-sdk",
+      "qe-report-junit-platform"
+    ],
+    "internal": []
+  },
+  "container": {
+    "repository": "ghcr.io/yannisyoussef/qe-report",
+    "tags": ["1.0.0", "1.0", "1"],
+    "$comment": "No `latest` in the initial v1 release, and one architecture, because one is what the rehearsal proves.",
+    "platforms": ["linux/amd64"]
+  },
+  "repository": {
+    "url": "https://github.com/yannisyoussef/qe-report",
+    "license": "Apache-2.0",
+    "releaseBranch": "master",
+    "integrationBranch": "develop"
+  }
+}

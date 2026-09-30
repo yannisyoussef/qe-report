@@ -19,6 +19,7 @@ import org.jspecify.annotations.Nullable;
  * every fork.
  *
  * <table>
+ * <caption>Where each setting comes from, and what it is when nothing sets it</caption>
  * <tr><th>System property</th><th>Environment variable</th><th>Default</th></tr>
  * <tr><td>{@code qe.report.enabled}</td><td>{@code QE_REPORT_ENABLED}</td><td>{@code true}</td></tr>
  * <tr><td>{@code qe.report.dir}</td><td>{@code QE_REPORT_DIR}</td><td>output root {@code qe-report} under the working directory; the run is written to {@code <root>/runs/<run directory>}</td></tr>
