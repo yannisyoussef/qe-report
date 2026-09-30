@@ -5,28 +5,96 @@ binding, producer SDKs, and a validator. Part of the
 [QE ecosystem](https://github.com/yannisyoussef/qe-ecosystem); the
 ecosystem architecture and decision records apply here.
 
-Status: protocol compatibility line 0.3 is defined and implemented in both
-languages; a JUnit Platform adapter produces it from real Gradle and Maven
-builds, and a Playwright Test reporter from real Playwright runs; an
-in-memory read model projects validated runs into runs, test histories,
-and flakiness, a PostgreSQL store archives complete validated runs as
-their original protocol source for replay through that read model, and a
-content-addressed blob store on the local filesystem keeps their
-attachment bytes durable under the SHA-256 the events declare, with
-explicit run expiry and bounded maintenance that deletes expired runs and
-reclaims bytes no run anywhere still references. Rebuildable PostgreSQL
-indexes answer run listings, exact test history, and flakiness without
-replaying every archived run, while one run is still reconstructed from
-its own stored source. An authenticated HTTP API (version 1) over those
-same operations takes runs as streamed multipart uploads and answers
-runs, histories, flakiness, and attachment downloads, with the project
-decided by a project-scoped API key alone. Producers write their run
-directory locally as before and then deliver it explicitly: a command and
-a client library upload a completed directory, whichever runner wrote it,
-and the Playwright reporter can deliver a run it alone owns. A reference
-deployment runs all of it as a single instance behind a TLS proxy, with
-rehearsed backup and restore and every maintenance action in an operator's
-hands. No user accounts and no UI exist yet. Nothing is published.
+qe-report records what a test run did, as events rather than as a report, and
+keeps them long enough to answer questions across runs: what happened, what is
+flaky, and what a given test has done over time. Any runner can produce it; two
+adapters already do.
+
+**Status: preparing the first stable release, `1.0.0`.** Everything below is
+implemented and exercised by CI. The packages, Maven artifacts and container
+image are release-ready and **not yet published**: publication happens from a
+tag on `master`, after the account preconditions in
+[`RELEASING.md`](RELEASING.md) are met.
+
+## Install
+
+These are the coordinates the first release publishes. They do not resolve until
+it is made.
+
+Producers, on npm:
+
+```sh
+npm install --save-dev qe-report-playwright@1.0.0   # a Playwright Test reporter
+npm install qe-report-http-client@1.0.0             # upload a finished run directory
+npm install qe-report-validator@1.0.0               # validate one, as a library or a CLI
+```
+
+The JUnit Platform adapter, on Maven Central. Gradle:
+
+```kotlin
+testRuntimeOnly("io.github.yannisyoussef:qe-report-junit-platform:1.0.0")
+```
+
+Maven:
+
+```xml
+<dependency>
+  <groupId>io.github.yannisyoussef</groupId>
+  <artifactId>qe-report-junit-platform</artifactId>
+  <version>1.0.0</version>
+  <scope>test</scope>
+</dependency>
+```
+
+The service, as a container:
+
+```sh
+docker pull ghcr.io/yannisyoussef/qe-report:1.0.0
+```
+
+Pin the digest in production rather than a tag. `1.0` and `1` are moving
+aliases; `latest` is not published.
+
+## What is stable, and what is not
+
+|                             |         |
+| --------------------------- | ------- |
+| Product                     | `1.0.0` |
+| Protocol compatibility line | `0.3`   |
+| HTTP API                    | `v1`    |
+| Database schema             | `5`     |
+
+Those are four independent version domains, and
+[`COMPATIBILITY.md`](COMPATIBILITY.md) explains what each promises. The public
+surfaces are five npm packages and three Maven artifacts; every other package in
+this repository is internal and carries no compatibility promise.
+
+Deliberately not in 1.0.0: no dashboard or UI, no user accounts or OIDC, no
+highly available deployment, no Kubernetes distribution, no object-store backend.
+[`CHANGELOG.md`](CHANGELOG.md) lists the limitations in full.
+
+## How it fits together
+
+Protocol compatibility line 0.3 is defined and implemented in both languages; a
+JUnit Platform adapter produces it from real Gradle and Maven builds, and a
+Playwright Test reporter from real Playwright runs; an in-memory read model
+projects validated runs into runs, test histories, and flakiness, a PostgreSQL
+store archives complete validated runs as their original protocol source for
+replay through that read model, and a content-addressed blob store on the local
+filesystem keeps their attachment bytes durable under the SHA-256 the events
+declare, with explicit run expiry and bounded maintenance that deletes expired
+runs and reclaims bytes no run anywhere still references. Rebuildable PostgreSQL
+indexes answer run listings, exact test history, and flakiness without replaying
+every archived run, while one run is still reconstructed from its own stored
+source. An authenticated HTTP API (version 1) over those same operations takes
+runs as streamed multipart uploads and answers runs, histories, flakiness, and
+attachment downloads, with the project decided by a project-scoped API key
+alone. Producers write their run directory locally and then deliver it
+explicitly: a command and a client library upload a completed directory,
+whichever runner wrote it, and the Playwright reporter can deliver a run it alone
+owns. A [reference deployment](deploy/reference/README.md) runs all of it as a
+single instance behind a TLS proxy, with rehearsed backup and restore and every
+maintenance action in an operator's hands.
 
 ## What is here
 
@@ -36,7 +104,7 @@ hands. No user accounts and no UI exist yet. Nothing is published.
 | [`java/`](java/)                                                     | Gradle build. `protocol` (model and codec), `sdk` (session writer, file sink, redaction), and [`junit-platform`](java/junit-platform/README.md) (a `TestExecutionListener` discovered through ServiceLoader). Library bytecode targets Java 17.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | [`java/consumer-fixtures/`](java/consumer-fixtures/README.md)        | Gradle and Maven Surefire projects that consume the adapter as a published artifact; run by the adapter's tests, not part of the build.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | [`ts/`](ts/)                                                         | pnpm workspace. `protocol` (types and codec), `sdk` (session writer, file sink, redaction), `validator` (library and `qe-report-validate` CLI), [`playwright`](ts/packages/playwright/README.md) (a Playwright Test reporter), [`read-model`](ts/packages/read-model/README.md) (validation-first projection of run directories into runs, histories, and flakiness), [`postgres`](ts/packages/postgres/README.md) (durable archive of complete validated runs in PostgreSQL, replayed through the read model, with retention and rebuildable query indexes; tested with Testcontainers), [`blob-fs`](ts/packages/blob-fs/README.md) (immutable content-addressed attachment bytes on the local filesystem, keyed by SHA-256, with an operator-level maintenance surface), [`http-api`](ts/packages/http-api/README.md) (authenticated HTTP API v1 on Fastify over the store and the query indexes, with project-scoped API keys, an operator CLI, and the [OpenAPI contract](openapi/qe-report-api-v1.json)), [`http-client`](ts/packages/http-client/README.md) (the producer side: uploads a completed run directory to that API, as a library and as the `qe-report-upload` command), and a test-only `equivalence` harness. Node 22 or newer. |
-| [`deploy/reference/`](deploy/reference/README.md) | The reference deployment: a production image, a Compose stack with a TLS edge, PostgreSQL 16, and the attachment store, and the operator procedures for migration, keys, retention, index repair, staging cleanup, backup, restore, upgrade, and rollback. |
+| [`deploy/reference/`](deploy/reference/README.md)                    | The reference deployment: a production image, a Compose stack with a TLS edge, PostgreSQL 16, and the attachment store, and the operator procedures for migration, keys, retention, index repair, staging cleanup, backup, restore, upgrade, and rollback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | [`ts/consumer-fixtures/`](ts/consumer-fixtures/playwright/README.md) | A Playwright project that consumes the reporter as a package; run by the reporter's consumer tests, not part of the build.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 Read [`protocol/README.md`](protocol/README.md) first: it explains the

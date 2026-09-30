@@ -39,6 +39,13 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.base.name="docker.io/library/node:24-bookworm-slim"
 ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+# The product version, from release/release.json. The release workflow passes it; a developer build
+# leaves it at the placeholder rather than claiming to be a release.
+ARG PRODUCT_VERSION=0.0.0-dev
+LABEL org.opencontainers.image.version="${PRODUCT_VERSION}"
+# Read back by `qe-report-server --version` and `qe-report-admin --version`, so a running container
+# can say which release it is without a second copy of the number in the application.
+ENV QE_REPORT_PRODUCT_VERSION="${PRODUCT_VERSION}"
 
 # A dedicated account with a fixed id, so a mounted volume's ownership is predictable.
 RUN groupadd --system --gid 10001 qe \

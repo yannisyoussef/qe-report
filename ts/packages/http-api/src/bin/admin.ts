@@ -2,9 +2,15 @@
 import pg from 'pg';
 import { USAGE, runAdmin } from '../admin.js';
 import { resolveDatabaseUrl, safeMessage } from '../secrets.js';
+import { productVersion } from '../version.js';
 
 /** `qe-report-admin`: one operator command against the configured database. */
 async function main(): Promise<number> {
+  // Answered before anything is opened: asking which release this is must not need a database.
+  if (process.argv.includes('--version')) {
+    process.stdout.write(`${productVersion(process.env)}\n`);
+    return 0;
+  }
   let url: string;
   try {
     url = resolveDatabaseUrl(process.env);
