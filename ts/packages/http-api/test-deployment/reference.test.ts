@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -776,12 +776,45 @@ describe('backup and a restore that really destroys what was there', () => {
     const backup = await stack.script('backup.sh', ['rehearsal']);
     expect(backup.code, backup.stderr).toBe(0);
     const directory = join(stack.backupDir, 'rehearsal');
-    expect(readdirSync(directory).sort()).toEqual([
-      'blobs.tar',
-      'checksums.sha256',
-      'database.dump',
-      'manifest.json',
-    ]);
+    const artefacts = ['blobs.tar', 'checksums.sha256', 'database.dump', 'manifest.json'];
+    expect(readdirSync(directory).sort()).toEqual(artefacts);
+
+    // The ownership contract, asserted as the ordinary user this test runs as, never as root.
+    // Every artefact is written by a container running as root into a host bind mount, so without
+    // the handover in backup.sh each one lands owned by root on Linux and the operator who took
+    // the backup cannot read it. This is the assertion that noticed that.
+    const uid = process.getuid?.() ?? -1;
+    const gid = process.getgid?.() ?? -1;
+    expect(uid).toBeGreaterThanOrEqual(0);
+    const dir = statSync(directory);
+    // Only its owner may enter it, and its owner is whoever ran the backup.
+    expect(dir.mode & 0o777).toBe(0o700);
+    expect(dir.uid).toBe(uid);
+    for (const artefact of artefacts) {
+      const file = statSync(join(directory, artefact));
+      expect(file.mode & 0o777, artefact).toBe(0o600);
+      expect(file.uid, artefact).toBe(uid);
+      // The whole backup has one owner, so an artefact a container wrote is in the same group as
+      // the directory the operator made. The group is checked against the directory rather than
+      // against this process on every platform because BSD gives a new file its parent
+      // directory's group, so on macOS these are group 0 while `id -g` is the user's own group.
+      // On Linux, where the deployment runs, the two are the same and the stricter check below
+      // applies.
+      expect(file.gid, artefact).toBe(dir.gid);
+      if (process.platform === 'linux') expect(file.gid, artefact).toBe(gid);
+    }
+
+    // And the inspections an operator actually performs, as that same user: read both text
+    // artefacts, and copy the whole backup somewhere else.
+    expect(readFileSync(join(directory, 'checksums.sha256'), 'utf8')).toMatch(
+      /^[0-9a-f]{64} {2}database\.dump$/mu,
+    );
+    const elsewhere = join(stack.backupDir, 'copied-by-hand');
+    mkdirSync(elsewhere, { recursive: true });
+    for (const artefact of artefacts) {
+      writeFileSync(join(elsewhere, artefact), readFileSync(join(directory, artefact)));
+    }
+    expect(readdirSync(elsewhere).sort()).toEqual(artefacts);
     const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8')) as {
       schemaVersion: number;
       postgresVersion: string;

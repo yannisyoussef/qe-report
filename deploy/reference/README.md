@@ -212,8 +212,25 @@ A backup directory is a trust boundary. It contains reporting data and the hashe
 `checksums.sha256` sits beside the files it describes, so anyone who can rewrite one can rewrite
 the other; `pg_restore` then executes whatever the dump contains, as the reporting role. The
 checksums detect bit rot and truncation, not an adversary. Protect a backup exactly as you protect
-the database: the files are written 0600 in a 0700 directory, and where they go from there is
-yours to decide.
+the database, and where it goes from here is yours to decide.
+
+The ownership it leaves behind is part of the contract, because a backup an operator cannot read is
+not a backup:
+
+```
+<backup directory>        0700, owned by whoever ran backup.sh
+  database.dump           0600, same owner
+  blobs.tar               0600, same owner
+  checksums.sha256        0600, same owner
+  manifest.json           0600, same owner
+```
+
+Three of those are written by a container running as root, which is what has the client tools and
+the volume, so on Linux they would otherwise land owned by root and be unreadable to the operator
+who asked for them. The script captures the invoking uid and gid and hands the finished artefacts
+over inside the container that wrote them, which is the only place that can. Nothing else changes
+hands: PostgreSQL's data directory, the attachment store, and the runtime volumes keep the owners
+that serve them.
 
 ## Restore
 

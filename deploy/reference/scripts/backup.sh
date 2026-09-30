@@ -49,6 +49,16 @@ lock_pid=''
 lock_name="qe-report-backup-$$-$(date -u +%s)"
 restarted=0
 
+# Who is taking this backup. Every artefact below is written by a container running as root, into a
+# directory bind-mounted from this host, so on Linux each one lands owned by root and an operator
+# who is not root cannot read the backup they just took. The exported artefacts are therefore
+# handed back to this identity, inside the container that wrote them, because only root can do it.
+#
+# Nothing else is chowned: not PostgreSQL's data directory, not the attachment store, not any
+# runtime volume. Those belong to the accounts that serve them.
+host_uid=$(id -u)
+host_gid=$(id -g)
+
 # A backup is as sensitive as the database it holds, so nothing in it is readable by anyone else.
 umask 077
 
@@ -163,10 +173,16 @@ still=$(lock_holder) || fail 'the maintenance lock could not be inspected'
 
 echo "checksumming" >&2
 # Computed where the files were written, so the backup does not depend on which checksum tool the
-# operator's own machine happens to have.
+# operator's own machine happens to have, and handed to the invoking identity in the same step,
+# because the very next thing that happens is this script reading the file it just wrote.
 $compose --profile tools run --rm -T \
   --volume "$(cd "$target" && pwd):/out" \
-  operator bash -c 'cd /out && sha256sum database.dump blobs.tar > checksums.sha256' \
+  --env "QE_REPORT_OWNER=$host_uid:$host_gid" \
+  operator bash -c 'set -e
+    cd /out
+    sha256sum database.dump blobs.tar > checksums.sha256
+    chown "$QE_REPORT_OWNER" database.dump blobs.tar checksums.sha256
+    chmod 0600 database.dump blobs.tar checksums.sha256' \
   || fail 'checksums could not be written'
 database_sha=$(awk '/database\.dump$/ {print $1}' "$target/checksums.sha256")
 blobs_sha=$(awk '/blobs\.tar$/ {print $1}' "$target/checksums.sha256")
@@ -199,8 +215,19 @@ MANIFEST
 # rather than only where a field happens to be read.
 $compose --profile tools run --rm -T \
   --volume "$(cd "$target" && pwd):/out" \
-  operator bash -c 'cd /out && sha256sum manifest.json >> checksums.sha256 && chmod 0600 database.dump blobs.tar checksums.sha256' \
+  --env "QE_REPORT_OWNER=$host_uid:$host_gid" \
+  operator bash -c 'set -e
+    cd /out
+    sha256sum manifest.json >> checksums.sha256
+    chown "$QE_REPORT_OWNER" database.dump blobs.tar checksums.sha256 manifest.json
+    chmod 0600 database.dump blobs.tar checksums.sha256 manifest.json' \
   || fail 'the manifest could not be checksummed'
+
+# The contract this backup promises, checked rather than assumed: a directory only its owner may
+# enter, four artefacts only its owner may read, all of them belonging to whoever ran this.
+for artefact in database.dump blobs.tar checksums.sha256 manifest.json; do
+  [ -r "$target/$artefact" ] || fail "$artefact is not readable by the operator who took this backup"
+done
 
 release_lock
 
