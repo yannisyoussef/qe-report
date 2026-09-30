@@ -1,3 +1,7 @@
+# Staged by release/stage-licenses.mjs into each publishable package before packing. The one
+# committed copy is the LICENSE at the repository root.
+ts/packages/*/LICENSE
+
 # Build output
 build/
 target/

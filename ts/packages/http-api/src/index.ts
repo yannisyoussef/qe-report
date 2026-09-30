@@ -32,3 +32,4 @@ export {
   type StagingProblemCode,
   type StagingReport,
 } from './staging-maintenance.js';
+export { UNKNOWN_VERSION, productVersion } from './version.js';

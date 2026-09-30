@@ -3,12 +3,14 @@ import { QeReportHttpClient } from './client.js';
 import { LocalRunDirectoryError, UploadRejectedError, UploadTransportError } from './errors.js';
 import { NotAnInstant, expiryAfter, parseOperationalInstant } from './instants.js';
 import { UploadAborted } from './transport.js';
+import { VERSION } from './version.js';
 
 export const USAGE = `qe-report-upload: uploads one completed run directory to a qe-report service
 
   qe-report-upload --run-dir <directory> [--url <base URL>]
                    (--expires-at <RFC 3339 instant> | --retention-ms <milliseconds>)
                    [--max-attempts <n>] [--attempt-timeout-ms <ms>] [--allow-insecure-http] [--json]
+  qe-report-upload --version
 
 The API key is read from QE_REPORT_API_KEY and is never accepted as an argument: an argument is
 visible in shell history and in the process list of every user on the machine. The service URL
@@ -53,11 +55,18 @@ export async function runUpload(
         'allow-insecure-http': { type: 'boolean' },
         json: { type: 'boolean' },
         help: { type: 'boolean' },
+        version: { type: 'boolean' },
       },
       strict: true,
     });
     if (values.help === true) {
       streams.err(USAGE);
+      return 0;
+    }
+    if (values.version === true) {
+      // On standard output, so a script can read it; the package's own version, printed by an
+      // installed copy of this command.
+      streams.out(`${VERSION}\n`);
       return 0;
     }
     const runDirectory = values['run-dir'];

@@ -1,9 +1,25 @@
 {
   "name": "qe-report-validator",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Validates a qe-report protocol event file",
-  "private": true,
   "license": "Apache-2.0",
+  "homepage": "https://github.com/yannisyoussef/qe-report#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yannisyoussef/qe-report.git",
+    "directory": "ts/packages/validator"
+  },
+  "bugs": {
+    "url": "https://github.com/yannisyoussef/qe-report/issues"
+  },
+  "author": "Yannis BA BINENI",
+  "keywords": [
+    "qe-report",
+    "test-reporting",
+    "test-results",
+    "json-schema",
+    "validation"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -24,19 +40,23 @@
     },
     "./cli": "./dist/cli.js"
   },
+  "bin": {
+    "qe-report-validate": "./dist/cli.js"
+  },
   "files": [
+    "LICENSE",
+    "README.md",
     "dist",
-    "schema",
-    "README.md"
+    "schema"
   ],
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node ./scripts/copy-schema.mjs && tsdown",
     "typecheck": "node ./scripts/copy-schema.mjs && tsc --noEmit -p tsconfig.json",
     "test": "node ./scripts/copy-schema.mjs && vitest run"
-  },
-  "bin": {
-    "qe-report-validate": "./dist/cli.js"
   },
   "dependencies": {
     "ajv": "8.20.0",

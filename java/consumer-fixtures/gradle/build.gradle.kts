@@ -6,8 +6,13 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    // The adapter on the test runtime classpath is all a consumer adds.
-    testRuntimeOnly("io.github.yannisyoussef:qe-report-junit-platform:0.1.0")
+    // The adapter on the test runtime classpath is all a consumer adds. Its version is supplied by
+    // whoever runs this fixture, so the same consumer proves the build's own artifact and, at
+    // release time, the one staged for Maven Central.
+    testRuntimeOnly(
+        "io.github.yannisyoussef:qe-report-junit-platform:" +
+            providers.gradleProperty("qe.adapterVersion").get(),
+    )
 }
 
 tasks.test {

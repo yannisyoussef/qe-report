@@ -5,15 +5,30 @@
 Use GitHub's private vulnerability reporting on this repository ("Report a
 vulnerability" under the Security tab). Do not open a public issue for a
 security problem. Reports are acknowledged within a week and fixed
-versions are noted in the release notes. Before 1.0, only the latest
-release of each package receives fixes.
+versions are noted in the release notes.
+
+## Which versions get fixes
+
+Security fixes target the latest stable 1.x release. Older 1.x lines are
+not maintained in parallel: if a fix lands in 1.4.2, the answer for a
+consumer on 1.2.0 is to move to 1.4.2, and `COMPATIBILITY.md` states what
+that is allowed to change.
+
+A backport to an older line may be made when there is a specific reason
+it is warranted, and it is a deliberate decision each time rather than a
+policy. There is no long-term-support programme, and promising one that
+does not exist would be worse than saying this.
+
+Because npm and Maven Central versions are immutable, a fix is always a
+new version. A bad version is superseded, never replaced; see the
+rollback section of `RELEASING.md` for what that means in practice.
 
 ## What this code handles
 
 The SDKs run inside test processes and write what test tools observe: HTTP
 exchanges, logs, stack traces, screenshots, and environment facts. The
 validator reads files produced by any such process. All of it is untrusted
-content. The invariants below hold from the first release and follow
+content. The invariants below hold in every release and follow
 [ADR-0003](https://github.com/yannisyoussef/qe-ecosystem/blob/develop/docs/adr/0003-redaction-and-attachment-handling.md):
 
 - Free text is redacted before serialisation and before a textual

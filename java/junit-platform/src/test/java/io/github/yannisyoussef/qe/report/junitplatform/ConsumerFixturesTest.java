@@ -35,6 +35,10 @@ class ConsumerFixturesTest {
   private static final Path FIXTURES = Path.of(System.getProperty("qe.consumerFixtures"));
   private static final Path RUNS = Path.of(System.getProperty("qe.consumerRuns"));
   private static final String LOCAL_REPO = System.getProperty("qe.localRepo");
+
+  /** The version the fixtures resolve, so they prove the artifact this build actually published. */
+  private static final String ADAPTER_VERSION = System.getProperty("qe.adapterVersion");
+
   private static final int CLASSES = 6;
   private static final int ATTEMPTS_PER_CLASS = 5;
 
@@ -65,6 +69,7 @@ class ConsumerFixturesTest {
             "--project-cache-dir",
             cache.toString(),
             "-Pqe.localRepo=" + LOCAL_REPO,
+            "-Pqe.adapterVersion=" + ADAPTER_VERSION,
             "-Pqe.report.dir=" + run,
             "-Pqe.report.runId=run-gradle-consumer");
     execute(command, FIXTURES.resolve("gradle"));
@@ -87,6 +92,7 @@ class ConsumerFixturesTest {
             "test",
             "-Dmaven.repo.local=" + repository,
             "-Dqe.localRepo=file://" + LOCAL_REPO,
+            "-Dqe.adapterVersion=" + ADAPTER_VERSION,
             "-Dqe.report.dir=" + run,
             "-Dqe.report.runId=run-maven-consumer");
     String output = execute(command, FIXTURES.resolve("maven"));
@@ -137,6 +143,7 @@ class ConsumerFixturesTest {
             "--project-cache-dir",
             cache.toString(),
             "-Pqe.localRepo=" + LOCAL_REPO,
+            "-Pqe.adapterVersion=" + ADAPTER_VERSION,
             "-Pqe.report.dir=" + root);
     execute(command, FIXTURES.resolve("gradle"));
     List<Path> runDirs;
