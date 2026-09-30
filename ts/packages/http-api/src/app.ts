@@ -30,6 +30,7 @@ import { resolveLimits, type TransportLimits } from './limits.js';
 import { Problem, problemBody, type ProblemCode } from './problems.js';
 import { decodeRunRef } from './run-ref.js';
 import { ROUTES, type RouteSpec } from './schemas.js';
+import { scrubConnectionStrings } from './secrets.js';
 import { checkRoots, rootUsable } from './staging.js';
 
 declare module 'fastify' {
@@ -369,8 +370,10 @@ const SECRET_MEMBER = /("(?:authorization|cookie|set-cookie)"\s*:\s*)"(?:[^"\\]|
  * The logger, with requests reduced to their method and route: no URL with a cursor or a run
  * reference, no header, no body. Header paths are redacted where they are known, and every line
  * is scrubbed once more as it is written, because a dependency may log headers under a path
- * nobody listed: no token, authorization value, cookie, or staging path leaves the process at
- * any level. A caller's object options are kept otherwise.
+ * nobody listed: no token, authorization value, cookie, staging path, or connection string
+ * leaves the process at any level. The last of those is why the scrub runs here and not only at
+ * start-up: a driver error raised while serving a request is logged with its own message, and
+ * that message may carry the DSN. A caller's object options are kept otherwise.
  */
 function loggerOptions(
   logger: FastifyServerOptions['logger'] | undefined,
@@ -398,10 +401,12 @@ function loggerOptions(
     },
     hooks: {
       streamWrite: (line: string): string =>
-        line
-          .replace(TOKEN_TEXT, '[redacted]')
-          .replace(SECRET_MEMBER, '$1"[redacted]"')
-          .replaceAll(staging, '[staging]'),
+        scrubConnectionStrings(
+          line
+            .replace(TOKEN_TEXT, '[redacted]')
+            .replace(SECRET_MEMBER, '$1"[redacted]"')
+            .replaceAll(staging, '[staging]'),
+        ),
     },
   } as Exclude<FastifyServerOptions['logger'], boolean | undefined>;
 }

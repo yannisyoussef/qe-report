@@ -53,8 +53,17 @@ describe('where the database secret comes from', () => {
     expect(both).toThrow(/only one of DATABASE_URL and DATABASE_URL_FILE/u);
     expect(both).not.toThrow(/sup3rs3cret/u);
     expect(() => resolveDatabaseUrl({})).toThrow(/one of DATABASE_URL and DATABASE_URL_FILE/u);
+
+    // Present is what counts, not non-empty. Compose sets an empty variable for the asking, and a
+    // deployment that named both forms and filled one in has still not said which it meant.
+    expect(() => resolveDatabaseUrl({ DATABASE_URL: '', DATABASE_URL_FILE: file })).toThrow(
+      /only one of DATABASE_URL and DATABASE_URL_FILE/u,
+    );
+    expect(() => resolveDatabaseUrl({ DATABASE_URL: SECRET, DATABASE_URL_FILE: '' })).toThrow(
+      /only one of DATABASE_URL and DATABASE_URL_FILE/u,
+    );
     expect(() => resolveDatabaseUrl({ DATABASE_URL: '', DATABASE_URL_FILE: '' })).toThrow(
-      /must be set/u,
+      /only one of DATABASE_URL and DATABASE_URL_FILE/u,
     );
   });
 
@@ -63,6 +72,9 @@ describe('where the database secret comes from', () => {
     const one = join(dir, 'one');
     writeFileSync(one, `${SECRET}\n`);
     expect(resolveDatabaseUrl({ DATABASE_URL_FILE: one })).toBe(SECRET);
+    const crlf = join(dir, 'crlf');
+    writeFileSync(crlf, `${SECRET}\r\n`);
+    expect(resolveDatabaseUrl({ DATABASE_URL_FILE: crlf })).toBe(SECRET);
     const two = join(dir, 'two');
     writeFileSync(two, `${SECRET}\n\n`);
     expect(() => resolveDatabaseUrl({ DATABASE_URL_FILE: two })).toThrow(/more than one line/u);
@@ -102,8 +114,18 @@ describe('what a message may say about a connection', () => {
     const two = scrubConnectionStrings(`${SECRET} then postgresql://other:pw@host/db`);
     expect(two).not.toContain('sup3rs3cret');
     expect(two).not.toContain(':pw@');
+    // A URL that carried no credential is returned as it was: inventing one would make an
+    // ordinary message look like a redacted secret.
     expect(scrubConnectionStrings('https://reports.example.com/v1/runs')).toBe(
-      'https://[redacted]@reports.example.com/v1/runs',
+      'https://reports.example.com/v1/runs',
+    );
+    // A password holding an unencoded `@` goes whole, not up to its first one.
+    const awkward = scrubConnectionStrings('postgres://qe:pa@ss@db.internal:5432/qe_report');
+    expect(awkward).toBe('postgres://[redacted]@db.internal:5432/qe_report');
+    expect(awkward).not.toContain('ss@db');
+    // An `@` in a path is not a credential.
+    expect(scrubConnectionStrings('https://example.com/runs/a@b')).toBe(
+      'https://example.com/runs/a@b',
     );
     // Ordinary text is left alone.
     expect(scrubConnectionStrings('the schema is not current')).toBe('the schema is not current');
@@ -145,6 +167,10 @@ describe('how the server stops', () => {
     const result = await lifecycle.shutdown('SIGTERM');
     expect(result.outcome).toBe('grace_exceeded');
     expect(result.exitCode).toBe(1);
+    // Abandoned, not closed: nothing closed, and a phase that said otherwise would be a lie an
+    // operator reading the state machine would believe.
+    expect(result.phase).toBe('abandoned');
+    expect(lifecycle.current).toBe('abandoned');
     expect(events).toEqual(['shutdown requested', 'shutdown grace exceeded']);
   });
 
@@ -170,8 +196,24 @@ describe('how the server stops', () => {
       throw new Error(`the pool could not close: ${SECRET}`);
     });
     const result: ShutdownResult = await lifecycle.shutdown('SIGTERM');
-    expect(result).toMatchObject({ outcome: 'failed', exitCode: 1 });
+    expect(result).toMatchObject({ outcome: 'failed', exitCode: 1, phase: 'abandoned' });
     expect(events).toEqual(['shutdown requested', 'shutdown failed']);
+  });
+
+  it('says why a close failed, with the credential taken out of the reason', async () => {
+    const facts: Record<string, unknown>[] = [];
+    const lifecycle = new ServerLifecycle({
+      close: async () => {
+        throw new Error(`the pool could not close: ${SECRET}`);
+      },
+      graceMs: 1_000,
+      log: (_event, f = {}) => facts.push(f),
+    });
+    await lifecycle.shutdown('SIGTERM');
+    const reason = JSON.stringify(facts);
+    // A bare error name tells an operator nothing; the message does, and it is safe to write.
+    expect(reason).toContain('the pool could not close');
+    expect(reason).not.toContain('sup3rs3cret');
   });
 
   it('reads the grace a deployment configured, and refuses one it cannot', () => {
@@ -291,9 +333,18 @@ describe('what staging cleanup will touch', () => {
         TypeError,
       );
     }
-    expect(() =>
-      new StagingMaintenance(join(root, 'nowhere')).preview({ before: new Date() }),
-    ).toThrow(/staging root cannot be read/u);
+    const missing = join(root, 'nowhere');
+    try {
+      new StagingMaintenance(missing).preview({ before: new Date() });
+      expect.unreachable('a staging root that cannot be read is an error');
+    } catch (e) {
+      const message = (e as Error).message;
+      expect(message).toContain('staging root cannot be read');
+      // This class promises never to report the root it was given, and Node's own message for a
+      // failed readdir embeds the path.
+      expect(message).not.toContain(missing);
+      expect(message).toContain('ENOENT');
+    }
     expect(() => new StagingMaintenance(root).preview({ before: new Date(), max: 0 })).toThrow(
       TypeError,
     );
@@ -328,7 +379,7 @@ describe('what the operator commands refuse before touching anything', () => {
 
   it('needs a destructive staging clean to be asked for explicitly', async () => {
     const root = freshDir('cli-staging');
-    const env = { QE_REPORT_STAGING_ROOT: root };
+    const env = { QE_REPORT_STAGING_ROOT: root, QE_REPORT_BLOB_ROOT: freshDir('cli-staging-b') };
     const withoutExecute = await run(['staging', 'clean', '--older-than-ms', '1000'], env);
     expect(withoutExecute.code).toBe(2);
     expect(withoutExecute.err).toContain('--execute');
@@ -342,7 +393,7 @@ describe('what the operator commands refuse before touching anything', () => {
 
   it('needs exactly one cutoff, and one root', async () => {
     const root = freshDir('cli-cutoff');
-    const env = { QE_REPORT_STAGING_ROOT: root };
+    const env = { QE_REPORT_STAGING_ROOT: root, QE_REPORT_BLOB_ROOT: freshDir('cli-cutoff-b') };
     for (const argv of [
       ['staging', 'preview'],
       ['staging', 'preview', '--before', '2027-01-01T00:00:00Z', '--older-than-ms', '1000'],
@@ -357,6 +408,65 @@ describe('what the operator commands refuse before touching anything', () => {
     const noRoot = await run(['staging', 'preview', '--older-than-ms', '1000'], {});
     expect(noRoot.code).toBe(2);
     expect(noRoot.err).toContain('QE_REPORT_STAGING_ROOT must be set');
+  });
+
+  it('refuses a cutoff or a ceiling that means the opposite of what it says', async () => {
+    const root = freshDir('cli-zero');
+    const env = { QE_REPORT_STAGING_ROOT: root, QE_REPORT_BLOB_ROOT: freshDir('cli-zero-b') };
+
+    // Zero milliseconds ago is now, which makes the mandatory cutoff mean "everything". The cutoff
+    // exists so that an operator has to say how old is old enough; zero is not an answer.
+    const zeroCutoff = await run(['staging', 'clean', '--older-than-ms', '0', '--execute'], env);
+    expect(zeroCutoff.code).toBe(2);
+    expect(zeroCutoff.err).toContain('--older-than-ms must be greater than zero');
+
+    // And a ceiling of zero is a command that reports success having looked at nothing.
+    const zeroMax = await run(['staging', 'preview', '--older-than-ms', '1000', '--max', '0'], env);
+    expect(zeroMax.code).toBe(2);
+    expect(zeroMax.err).toContain('--max must be greater than zero');
+
+    for (const bad of ['1.5', 'soon', '1e3', '0x10']) {
+      const answer = await run(['staging', 'preview', '--older-than-ms', bad], env);
+      expect(answer.code, bad).toBe(2);
+      expect(answer.err, bad).toContain('--older-than-ms must be a whole number');
+    }
+    // A negative value is refused by the argument parser before it is a number at all, which is
+    // the same answer for the operator: exit 2 and the usage.
+    const negative = await run(['staging', 'preview', '--older-than-ms', '-1'], env);
+    expect(negative.code).toBe(2);
+    expect(negative.err).toContain(USAGE_MARKER);
+  });
+
+  it('refuses a staging root it cannot treat as one, and one that is not separate from the blobs', async () => {
+    const blobRoot = freshDir('cli-nested-b');
+    const inside = join(blobRoot, 'staging');
+    mkdirSync(inside);
+    const nested = await run(['staging', 'preview', '--older-than-ms', '1000'], {
+      QE_REPORT_STAGING_ROOT: inside,
+      QE_REPORT_BLOB_ROOT: blobRoot,
+    });
+    expect(nested.code).toBe(2);
+    expect(nested.err).toContain('must be separate');
+
+    // A cleanup is the one command that deletes directories chosen by name, so the root it was
+    // given is checked here exactly as the server checks it at start-up.
+    const notADirectory = join(freshDir('cli-notdir'), 'file');
+    writeFileSync(notADirectory, 'x');
+    const refused = await run(['staging', 'preview', '--older-than-ms', '1000'], {
+      QE_REPORT_STAGING_ROOT: notADirectory,
+      QE_REPORT_BLOB_ROOT: blobRoot,
+    });
+    expect(refused.code).toBe(2);
+    expect(refused.err).toContain('is not a directory');
+  });
+
+  it('refuses a blob digest that is not one', async () => {
+    const env = { QE_REPORT_BLOB_ROOT: freshDir('cli-sha') };
+    for (const bad of ['deadbeef', 'Z'.repeat(64), `${'a'.repeat(63)}`, 'A'.repeat(64)]) {
+      const answer = await run(['maintenance', 'preview', '--now', '--after-sha256', bad], env);
+      expect(answer.code, bad).toBe(2);
+      expect(answer.err).toContain('--after-sha256 must be 64 lowercase hexadecimal characters');
+    }
   });
 
   it('needs a retention pass to state the instant it judges by', async () => {

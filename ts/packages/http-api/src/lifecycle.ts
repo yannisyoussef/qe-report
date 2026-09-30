@@ -1,11 +1,24 @@
+import { safeMessage } from './secrets.js';
+
 /**
- * How long a shutdown may take before it is abandoned. Long enough for an upload of the default
- * maximum size to finish on a slow link, short enough that an orchestrator's own patience is not
- * the thing that decides.
+ * How long a shutdown may take before it is abandoned: long enough for the requests a small
+ * deployment is normally serving to finish, short enough that an orchestrator's own patience is
+ * not the thing that decides.
+ *
+ * It is not long enough for every request this server will accept. A large upload arriving over a
+ * slow link can take longer than this, and such a request is abandoned when the grace runs out:
+ * the transfer fails, the producer retries, and nothing is half-written, because a run becomes
+ * archived in one transaction. A deployment that regularly accepts uploads near its configured
+ * maximum should raise this and the container's own stop grace together, keeping the container's
+ * the larger of the two.
  */
 export const DEFAULT_SHUTDOWN_GRACE_MS = 30_000;
 
-export type ShutdownPhase = 'running' | 'draining' | 'closed';
+/**
+ * Where a shutdown has got to. `closed` means everything was closed in time; `abandoned` means
+ * the drain was given up on, which is not the same thing and is not reported as though it were.
+ */
+export type ShutdownPhase = 'running' | 'draining' | 'closed' | 'abandoned';
 
 /** Why the process is stopping, for the one line it writes about it. */
 export type ShutdownOutcome = 'closed' | 'grace_exceeded' | 'forced' | 'failed';
@@ -106,8 +119,8 @@ export class ServerLifecycle {
       .close()
       .then(() => 'closed' as const)
       .catch((e: unknown) => {
-        // The reason, scrubbed by the caller's own logger; never the request that was running.
-        this.options.log('shutdown failed', { reason: e instanceof Error ? e.name : 'unknown' });
+        // The reason, scrubbed of any credential; never the request that was running.
+        this.options.log('shutdown failed', { reason: safeMessage(e) });
         return 'failed' as const;
       });
     const outcome = await Promise.race([
@@ -116,7 +129,7 @@ export class ServerLifecycle {
       timer.promise.then(() => 'grace_exceeded' as const),
     ]);
     timer.cancel();
-    this.phase = 'closed';
+    this.phase = outcome === 'closed' ? 'closed' : 'abandoned';
     const elapsedMs = now() - started;
     if (outcome === 'closed') {
       this.options.log('shutdown completed', { elapsedMs });

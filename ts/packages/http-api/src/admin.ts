@@ -4,6 +4,7 @@ import { FileBlobStore } from 'qe-report-blob-fs';
 import { parseOperationalInstant } from './instants.js';
 import { scrubConnectionStrings } from './secrets.js';
 import { StagingMaintenance, type StagingReport } from './staging-maintenance.js';
+import { checkRoots } from './staging.js';
 import {
   API_KEY_SCOPES,
   PostgresApiKeys,
@@ -15,11 +16,26 @@ import {
   type MaintenanceOptions,
 } from 'qe-report-postgres';
 
-export const USAGE = `qe-report-admin: operator actions against DATABASE_URL; nothing here is reachable over HTTP
+/**
+ * Problems that report contention rather than failure: nothing was changed, and a later pass
+ * does the work. They are printed, because an operator watching a pass should see them, but they
+ * do not fail the command, or a cleanup that found one stray file in a staging root would exit
+ * non-zero after having done exactly what it was asked to do.
+ */
+const SELF_RESOLVING: ReadonlySet<string> = new Set([
+  'RUN_DELETE_DECLINED',
+  'CATALOG_ROW_RETAINED',
+  'BLOB_CHANGED',
+  'NOT_A_REQUEST_ID',
+  'NOT_A_DIRECTORY',
+]);
+
+export const USAGE = `qe-report-admin: operator actions against the database named by DATABASE_URL
+or DATABASE_URL_FILE; nothing here is reachable over HTTP
 
   qe-report-admin migrate
       Applies pending schema migrations.
-  qe-report-admin schema
+  qe-report-admin schema [--json]
       Reports whether the schema is current, without changing it.
   qe-report-admin key create --project <projectId> --scope <runs:read|runs:write> [--scope ...]
                              [--label <text>] [--expires-at <RFC 3339 instant, offset, <=ms>]
@@ -81,7 +97,15 @@ export async function runAdmin(
       return 0;
     }
     if (command === 'schema') {
+      const { values } = parseArgs({
+        args: argv.slice(1),
+        options: { json: { type: 'boolean' } },
+        strict: true,
+      });
       const status = await schemaStatus(pool);
+      // On standard output, so a deployment script can record the version it backed up without
+      // knowing the name of a table. The human form stays on standard error, as everywhere else.
+      if (values.json === true) streams.out(`${asJson(status)}\n`);
       streams.err(
         status.current
           ? `the schema is current at version ${status.expectedVersion}\n`
@@ -272,24 +296,42 @@ export async function runAdmin(
       }
       const options: MaintenanceOptions = {
         asOf,
-        ...maybeInstant('--temp-before', values['temp-before'], 'tempBefore'),
-        ...maybeInstant(
+        ...maybeInstant<MaintenanceOptions>('--temp-before', values['temp-before'], 'tempBefore'),
+        ...maybeInstant<MaintenanceOptions>(
           '--orphan-objects-before',
           values['orphan-objects-before'],
           'orphanObjectsBefore',
         ),
-        ...maybeWhole('--lock-timeout-ms', values['lock-timeout-ms'], 'lockTimeoutMs'),
-        ...maybeWhole('--max-runs', values['max-runs'], 'maxRuns'),
-        ...maybeWhole('--max-blobs', values['max-blobs'], 'maxBlobs'),
-        ...maybeWhole(
+        ...maybeWhole<MaintenanceOptions>(
+          '--lock-timeout-ms',
+          values['lock-timeout-ms'],
+          'lockTimeoutMs',
+        ),
+        ...maybeWhole<MaintenanceOptions>('--max-runs', values['max-runs'], 'maxRuns'),
+        ...maybeWhole<MaintenanceOptions>('--max-blobs', values['max-blobs'], 'maxBlobs'),
+        ...maybeWhole<MaintenanceOptions>(
           '--max-uncatalogued-blobs',
           values['max-uncatalogued-blobs'],
           'maxUncataloguedBlobs',
         ),
-        ...maybeWhole('--max-bytes-examined', values['max-bytes-examined'], 'maxBytesExamined'),
-        ...maybeWhole('--max-temporary-files', values['max-temporary-files'], 'maxTemporaryFiles'),
-        ...maybeWhole('--max-legacy-reported', values['max-legacy-reported'], 'maxLegacyReported'),
-        ...(values['after-sha256'] === undefined ? {} : { afterSha256: values['after-sha256'] }),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-bytes-examined',
+          values['max-bytes-examined'],
+          'maxBytesExamined',
+        ),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-temporary-files',
+          values['max-temporary-files'],
+          'maxTemporaryFiles',
+        ),
+        ...maybeWhole<MaintenanceOptions>(
+          '--max-legacy-reported',
+          values['max-legacy-reported'],
+          'maxLegacyReported',
+        ),
+        ...(values['after-sha256'] === undefined
+          ? {}
+          : { afterSha256: sha256('--after-sha256', values['after-sha256']) }),
       };
       const maintenance = new RetentionMaintenance(
         pool,
@@ -313,12 +355,14 @@ export async function runAdmin(
             `  truncated               runs ${report.truncated.runs}, blobs ${report.truncated.blobs}, temporary ${report.truncated.temporaryFiles}\n`,
         );
         for (const problem of report.problems) {
+          const where =
+            problem.sha256 ?? (problem.path === undefined ? undefined : `./${problem.path}`);
           streams.err(
-            `  ${problem.code}${problem.sha256 === undefined ? '' : ` ${problem.sha256}`}: ${problem.message}\n`,
+            `  ${problem.code}${where === undefined ? '' : ` ${where}`}: ${problem.message}\n`,
           );
         }
       }
-      return report.problems.length === 0 ? 0 : 1;
+      return report.problems.some((p) => !SELF_RESOLVING.has(p.code)) ? 1 : 0;
     }
     if (command === 'staging' && (sub === 'preview' || sub === 'clean')) {
       const { values } = parseArgs({
@@ -339,17 +383,23 @@ export async function runAdmin(
       const before =
         values.before !== undefined
           ? instant('--before', values.before)
-          : new Date(Date.now() - whole('--older-than-ms', values['older-than-ms'] as string));
+          : new Date(Date.now() - positive('--older-than-ms', values['older-than-ms'] as string));
       if (sub === 'clean' && values.execute !== true) {
         throw new UsageError(
           'staging clean removes directories; pass --execute, and stop the API instance that owns the staging root first',
         );
       }
-      const maintenance = new StagingMaintenance(rootFrom(env, 'QE_REPORT_STAGING_ROOT'));
+      // Every argument first, then the environment: an operator who mistyped a bound should be
+      // told about the bound, not about a variable they have not got to yet.
       const options = {
         before,
-        ...(values.max === undefined ? {} : { max: whole('--max', values.max) }),
+        ...(values.max === undefined ? {} : { max: positive('--max', values.max) }),
       };
+      // The same check the server applies at start-up, so a mistyped root is refused here rather
+      // than treated as a staging directory whose contents this command may delete.
+      const maintenance = new StagingMaintenance(
+        stagingRoot(rootFrom(env, 'QE_REPORT_STAGING_ROOT'), rootFrom(env, 'QE_REPORT_BLOB_ROOT')),
+      );
       const report: StagingReport =
         sub === 'preview' ? maintenance.preview(options) : maintenance.clean(options);
       if (values.json === true) {
@@ -367,7 +417,7 @@ export async function runAdmin(
           streams.err(`  ${problem.code} ${JSON.stringify(problem.name)}: ${problem.message}\n`);
         }
       }
-      return report.problems.length === 0 ? 0 : 1;
+      return report.problems.some((p) => !SELF_RESOLVING.has(p.code)) ? 1 : 0;
     }
     throw new UsageError(
       command === undefined ? 'a command is required' : `unknown command ${argv.join(' ')}`,
@@ -382,6 +432,15 @@ export async function runAdmin(
       return 2;
     }
     throw e;
+  }
+}
+
+/** The staging root, checked the way the server checks it, as a usage error if it does not hold. */
+function stagingRoot(staging: string, blobs: string): string {
+  try {
+    return checkRoots(staging, blobs);
+  } catch (e) {
+    throw new UsageError((e as Error).message);
   }
 }
 
@@ -400,20 +459,31 @@ function instant(name: string, text: string): Date {
   }
 }
 
-function maybeInstant<K extends string>(
+/**
+ * The members of `T` that hold a given kind of value. The two mappers below are spread into an
+ * options literal, and a spread defeats excess-property checking, so the key each one is given is
+ * constrained here instead: a mistyped option name, or one whose member is not of the kind being
+ * parsed, does not compile. Eleven bounds reach retention this way, and nothing at run time would
+ * notice one of them silently going nowhere.
+ */
+type KeysHolding<T, V> = {
+  [K in keyof T]-?: T[K] extends V | undefined ? K : never;
+}[keyof T];
+
+function maybeInstant<T>(
   name: string,
   text: string | undefined,
-  key: K,
-): Record<K, Date> | Record<string, never> {
-  return text === undefined ? {} : ({ [key]: instant(name, text) } as Record<K, Date>);
+  key: KeysHolding<T, Date>,
+): Partial<T> {
+  return text === undefined ? {} : ({ [key]: instant(name, text) } as Partial<T>);
 }
 
-function maybeWhole<K extends string>(
+function maybeWhole<T>(
   name: string,
   text: string | undefined,
-  key: K,
-): Record<K, number> | Record<string, never> {
-  return text === undefined ? {} : ({ [key]: whole(name, text) } as Record<K, number>);
+  key: KeysHolding<T, number>,
+): Partial<T> {
+  return text === undefined ? {} : ({ [key]: whole(name, text) } as Partial<T>);
 }
 
 function whole(name: string, value: string): number {
@@ -421,6 +491,25 @@ function whole(name: string, value: string): number {
     throw new UsageError(`${name} must be a whole number`);
   }
   return Number(value);
+}
+
+/**
+ * A bound that must mean something. Zero is rejected because for a cutoff it means "everything",
+ * which is the one answer a mandatory cutoff exists to prevent an operator from giving by
+ * accident, and for a ceiling it means "nothing", which is a command that does no work while
+ * reporting success.
+ */
+function positive(name: string, value: string): number {
+  const parsed = whole(name, value);
+  if (parsed === 0) throw new UsageError(`${name} must be greater than zero`);
+  return parsed;
+}
+
+function sha256(name: string, value: string): string {
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new UsageError(`${name} must be 64 lowercase hexadecimal characters`);
+  }
+  return value;
 }
 
 function bigWhole(name: string, value: string): bigint {

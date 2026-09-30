@@ -95,7 +95,11 @@ export class StagingMaintenance {
     try {
       names = readdirSync(this.root).sort(byName);
     } catch (e) {
-      throw new Error(`the staging root cannot be read: ${(e as Error).message}`);
+      // Without the reason's own text: Node embeds the path in it, and this class promises that
+      // the root it was given is never part of what it reports.
+      throw new Error(
+        `the staging root cannot be read (${(e as { code?: string }).code ?? 'unknown'})`,
+      );
     }
 
     for (const name of names) {

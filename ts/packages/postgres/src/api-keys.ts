@@ -149,7 +149,6 @@ export class PostgresApiKeys {
     return { publicId: parsed.publicId, projectId: row.project_id, scopes: row.scopes };
   }
 
-  /** Revokes a key by its public id, at once; true when this call revoked it. */
   /**
    * A page of keys as metadata, for an operator deciding what to rotate. It cannot return a
    * secret: the column holding one is not even selected, and nothing stored could reproduce a
@@ -203,6 +202,7 @@ export class PostgresApiKeys {
     };
   }
 
+  /** Revokes a key by its public id, at once; true when this call revoked it. */
   async revoke(publicId: string): Promise<boolean> {
     if (typeof publicId !== 'string' || !/^[a-z2-7]{16}$/u.test(publicId)) {
       throw new TypeError('publicId must be the 16-character public id of a key');

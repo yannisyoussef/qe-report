@@ -74,8 +74,6 @@ export interface RunningServer {
   readonly app: FastifyInstance;
   /** Where it listens, as the operating system bound it. */
   readonly address: string;
-  /** The grace the deployment allows a shutdown, carried through from the configuration. */
-  readonly shutdownGraceMs: number;
   close(): Promise<void>;
 }
 
@@ -113,7 +111,6 @@ export async function startServer(config: ServerConfig): Promise<RunningServer> 
     return {
       app,
       address,
-      shutdownGraceMs: config.shutdownGraceMs,
       close: async () => {
         // Fastify stops listening and lets the requests already running finish; then nothing of
         // this process is holding a connection to the database.
