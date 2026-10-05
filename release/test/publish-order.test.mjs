@@ -67,6 +67,54 @@ describe('the npm publisher', () => {
   });
 });
 
+describe('the release reference check', () => {
+  const source = readFileSync(join(PUBLISH, '..', 'check-release-ref.mjs'), 'utf8');
+
+  it('stops when master could not be fetched, rather than trusting a stale ref', () => {
+    // The fetch used to go through a helper whose result was discarded, so a failed refresh left
+    // the check validating against whatever this checkout happened to be holding while reporting
+    // that the value was fresh.
+    const fetched = source.indexOf("git(['fetch'");
+    assert.notEqual(fetched, -1, 'it must fetch master explicitly');
+    const after = source.slice(fetched, fetched + 600);
+    assert.match(after, /fetched === undefined/u, 'the fetch result must be checked');
+    assert.match(after, /process\.exit\(1\)/u, 'a failed fetch must stop the check');
+    assert.ok(
+      source.indexOf('decideReleaseRef({') > fetched,
+      'the decision must come after the fetch is known to have succeeded',
+    );
+  });
+
+  it('hands the decision to the tested module rather than deciding in shell', () => {
+    assert.match(source, /import \{ decideReleaseRef \} from '\.\/release-ref\.mjs'/u);
+  });
+});
+
+describe('the bundle builder', () => {
+  const source = readFileSync(join(PUBLISH, '..', 'bundle-maven.mjs'), 'utf8');
+
+  it('passes the supplied passphrase through to the signer unchanged', () => {
+    // The defect this guards: a hard-coded empty passphrase, which makes every protected
+    // production key unusable and which nothing noticed until a real release.
+    assert.match(source, /QE_REPORT_SIGNING_PASSWORD: signingPassword/u);
+    assert.ok(
+      !/QE_REPORT_SIGNING_PASSWORD: ''/u.test(source),
+      'the passphrase must never be replaced with an empty one',
+    );
+  });
+
+  it('verifies in a keyring of its own in both modes, never the machine default', () => {
+    assert.match(source, /openKeyring\(/u);
+    assert.ok(!/GNUPGHOME/u.test(source), 'it must not reach for an inherited GPG home');
+    assert.match(source, /keyring\?\.close\(\)/u, 'the keyring must be closed in a finally');
+  });
+
+  it('requires signatures to have been made by the expected key', () => {
+    assert.match(source, /signaturesMatchKey/u);
+    assert.match(source, /signingFingerprint/u);
+  });
+});
+
 describe('the Maven publisher', () => {
   const source = read('maven.mjs');
 

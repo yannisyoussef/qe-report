@@ -26,13 +26,23 @@ if (tag === undefined || tag === '') {
   process.exit(2);
 }
 
+/** One git command, or nothing when it failed. A failure is never confused with empty output. */
 function git(args) {
   const finished = spawnSync('git', ['-C', ROOT, ...args], { encoding: 'utf8' });
   return finished.status === 0 ? (finished.stdout ?? '').trim() : undefined;
 }
 
-// master as the remote has it, not as this checkout last saw it.
-git(['fetch', '--no-tags', 'origin', 'master:refs/remotes/origin/master']);
+// master as the remote has it, not as this checkout last saw it. A failed refresh stops the
+// release: continuing would validate the tag against whatever this checkout happened to be holding
+// while reporting that the value was freshly fetched.
+const fetched = git(['fetch', '--no-tags', 'origin', 'master:refs/remotes/origin/master']);
+if (fetched === undefined) {
+  process.stderr.write(
+    '::error::master could not be fetched, so what this checkout holds for it cannot be trusted. ' +
+      'Refusing to validate the release reference against a stale ref.\n',
+  );
+  process.exit(1);
+}
 
 const tagCommit = git(['rev-parse', `${tag}^{commit}`]);
 const masterCommit = git(['rev-parse', 'refs/remotes/origin/master']);

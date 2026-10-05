@@ -16,16 +16,24 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PUBLISHED, compareNpmIntegrity } from '../evidence.mjs';
+import { decideNpmAuth } from '../npm-auth.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
 const { productVersion, npm } = contract;
 const NPM_OUT = join(ROOT, 'build', 'release', productVersion, 'npm');
 
-if (process.env.NODE_AUTH_TOKEN === undefined || process.env.NODE_AUTH_TOKEN === '') {
-  process.stderr.write('no npm credential: refusing to continue rather than skipping npm\n');
+/**
+ * Which era of npm authentication this release is in: a bootstrap token for a first publication, or
+ * trusted publishing once a publisher is configured. Nothing else, and never a guess.
+ */
+const npmVersion = spawnSync('npm', ['--version'], { encoding: 'utf8' }).stdout?.trim();
+const auth = decideNpmAuth(process.env, npmVersion);
+if (!auth.ok) {
+  process.stderr.write(`${auth.refusal}: ${auth.detail}\n`);
   process.exit(1);
 }
+process.stdout.write(`${auth.detail}\n`);
 
 const integrityOf = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
 /** What the registry serves, gathered as packages go out, for the comparison at the end. */
@@ -63,6 +71,9 @@ for (const name of npm.public) {
   }
 
   process.stdout.write(`publishing ${name}@${productVersion}\n`);
+  // The same command in both modes: in bootstrap mode npm reads the token from the environment, and
+  // in trusted-publishing mode it exchanges the workflow's OIDC identity itself. Provenance is
+  // always on, and no credential is ever an argument.
   const published = spawnSync('npm', ['publish', tarball, '--provenance', '--access', 'public'], {
     stdio: 'inherit',
     cwd: ROOT,
@@ -75,7 +86,13 @@ for (const name of npm.public) {
 // What the registry serves now, compared with what this release built, for every package. This is
 // the evidence the final manifest uses; presence and provenance alone would not establish that the
 // tarball a consumer installs is the one this release produced.
-const evidence = { origin: PUBLISHED, registry: 'https://registry.npmjs.org', packages: [] };
+const evidence = {
+  origin: PUBLISHED,
+  registry: 'https://registry.npmjs.org',
+  // Which era authenticated this release. Never the credential itself.
+  authentication: auth.mode,
+  packages: [],
+};
 const recorded = [];
 for (const name of npm.public) {
   const tarball = join(NPM_OUT, `${name}-${productVersion}.tgz`);

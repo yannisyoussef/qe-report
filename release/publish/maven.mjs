@@ -21,6 +21,13 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PUBLISHED, acceptCentralState, compareCentralArtifacts } from '../evidence.mjs';
+import {
+  gpgAvailable,
+  importKey,
+  openKeyring,
+  signaturesMatchKey,
+  verifyDetached,
+} from '../signing.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
@@ -84,44 +91,95 @@ function builtArtifacts() {
   });
 }
 
-/** What Central serves right now, by GAV. Public endpoints, no credential. */
-async function servedByCentral() {
+/**
+ * What Central serves right now, by GAV: the artifact bytes, and the signature bytes beside them.
+ *
+ * The signatures are downloaded rather than merely probed with HEAD, because the question is not
+ * whether a `.asc` exists but whether it was made by the release key. Correct bytes signed by
+ * somebody else is exactly the case a presence check cannot see.
+ */
+async function servedByCentral({ withBodies = false } = {}) {
   const served = {};
   for (const artifactId of maven.public) {
     const base = `${CENTRAL}/${groupPath}/${artifactId}/${productVersion}`;
     const classifiers = {};
     const signatures = [];
+    const bodies = {};
+    const signatureBodies = {};
     for (const [classifier, name] of Object.entries(servedNames(artifactId))) {
       const response = await fetch(`${base}/${name}`);
-      if (response.ok) classifiers[classifier] = sha256(Buffer.from(await response.arrayBuffer()));
-      const signature = await fetch(`${base}/${name}.asc`, { method: 'HEAD' });
-      if (signature.ok) signatures.push(classifier);
+      if (response.ok) {
+        const bytes = Buffer.from(await response.arrayBuffer());
+        classifiers[classifier] = sha256(bytes);
+        if (withBodies) bodies[classifier] = bytes;
+      }
+      const signature = await fetch(`${base}/${name}.asc`);
+      if (signature.ok) {
+        signatures.push(classifier);
+        if (withBodies) signatureBodies[classifier] = Buffer.from(await signature.arrayBuffer());
+      }
     }
-    served[`${maven.groupId}:${artifactId}:${productVersion}`] = { classifiers, signatures };
+    served[`${maven.groupId}:${artifactId}:${productVersion}`] = {
+      classifiers,
+      signatures,
+      bodies,
+      signatureBodies,
+    };
   }
   return served;
 }
 
-/** The public key the release signed with, which is not secret and is useful as evidence. */
-function signingEvidence() {
+/**
+ * Verifies the signatures Central serves against the release key, in a keyring of its own.
+ *
+ * This is what binds the published artifacts to the key. Not that a `.asc` is present, and not a
+ * fingerprint recorded alongside from the environment: that each published signature verifies, and
+ * that the signer is the release key. Every classifier is checked, Javadoc included -- its bytes
+ * are not constrained, but its signature is.
+ *
+ * The keyring holds the key only for the length of this function and is then removed. Only the
+ * fingerprint, which is public, ever leaves.
+ */
+function verifyCentralSignatures(served) {
   const key = process.env.QE_REPORT_SIGNING_KEY;
-  if (key === undefined || key === '') return undefined;
-  // The fingerprint only, read from the key's own public half. The private material is never
-  // written anywhere and never appears in the evidence.
-  const listed = spawnSync(
-    'gpg',
-    ['--batch', '--with-colons', '--import-options', 'show-only', '--import'],
-    {
-      input: key,
-      encoding: 'utf8',
-    },
-  );
-  const fingerprint = (listed.stdout ?? '')
-    .split('\n')
-    .filter((l) => l.startsWith('fpr:'))
-    .map((l) => l.split(':')[9])
-    .find((f) => typeof f === 'string' && f.length === 40);
-  return fingerprint === undefined ? undefined : { fingerprint };
+  const refuse = (what, detail) => ({
+    ok: false,
+    problems: [{ what, detail }],
+    checked: [],
+    fingerprint: undefined,
+  });
+  if (key === undefined || key === '')
+    return refuse('the release', 'no signing key to verify against');
+  if (!gpgAvailable()) return refuse('the runner', 'no GPG to verify signatures with');
+
+  const keyring = openKeyring();
+  try {
+    const expected = importKey(keyring, key).at(0);
+    if (expected === undefined) return refuse('the release key', 'it has no fingerprint');
+    const verifications = {};
+    for (const [gav, artifact] of Object.entries(served)) {
+      for (const classifier of ALL_CLASSIFIERS) {
+        const body = artifact.bodies?.[classifier];
+        const signature = artifact.signatureBodies?.[classifier];
+        const what = `${gav} ${classifier}`;
+        if (body === undefined || signature === undefined) {
+          verifications[what] = {
+            ok: false,
+            detail: 'the artifact or its signature was not served',
+          };
+          continue;
+        }
+        const artifactPath = join(keyring.home, 'artifact');
+        const signaturePath = join(keyring.home, 'artifact.asc');
+        writeFileSync(artifactPath, body);
+        writeFileSync(signaturePath, signature);
+        verifications[what] = verifyDetached(keyring, signaturePath, artifactPath);
+      }
+    }
+    return { ...signaturesMatchKey(verifications, expected), fingerprint: expected };
+  } finally {
+    keyring.close();
+  }
 }
 
 const built = builtArtifacts();
@@ -206,6 +264,21 @@ process.stdout.write(
   `${verified.checked.length} published artifacts match what this release built\n`,
 );
 
+// And every published signature was made by the release key. Bytes alone are not enough: correct
+// artifacts signed by somebody else are not this release, and the same check runs on a resume.
+const withBodies = await servedByCentral({ withBodies: true });
+const signed = verifyCentralSignatures(withBodies);
+if (!signed.ok) {
+  process.stderr.write("the signatures Central serves are not the release key's:\n");
+  for (const problem of signed.problems) {
+    process.stderr.write(`  - ${problem.what}: ${problem.detail}\n`);
+  }
+  process.exit(1);
+}
+process.stdout.write(
+  `${signed.checked.length} published signatures verify as ${signed.fingerprint.slice(-16)}\n`,
+);
+
 // The evidence the final manifest may use. It describes public artifacts, by their published
 // digests, not the transport object they arrived in.
 const evidence = {
@@ -222,7 +295,8 @@ const evidence = {
     ),
     signatures: served[artifact.gav]?.signatures ?? [],
   })),
-  signingKey: signingEvidence() ?? null,
+  // The public fingerprint only. No private material ever reaches an artifact.
+  signingKey: { fingerprint: signed.fingerprint, verifiedSignatures: signed.checked.length },
   // Recorded only when this job actually submitted one, and named for what it is: the transport
   // object, not the published artifacts.
   uploadBundle:

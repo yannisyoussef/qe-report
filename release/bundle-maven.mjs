@@ -18,16 +18,25 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  EPHEMERAL,
+  SUPPLIED,
+  decideSigningMode,
+  generateKey,
+  gpgAvailable,
+  importKey,
+  openKeyring,
+  signaturesMatchKey,
+  verifyDetached,
+} from './signing.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
@@ -54,75 +63,44 @@ function run(file, args, options = {}) {
   return output;
 }
 
-function has(command) {
-  const finished = spawnSync(command, ['--version'], { encoding: 'utf8' });
-  return finished.error === undefined && finished.status === 0;
-}
-
-/**
- * A key that exists only for this run, in a keyring of its own. Nothing here can touch, read, or
- * leave anything behind in the operator's own GnuPG configuration.
- */
-function ephemeralKey(home) {
-  const identity = 'qe-report release rehearsal <rehearsal@qe-report.invalid>';
-  const env = { ...process.env, GNUPGHOME: home };
-  run(
-    'gpg',
-    [
-      '--batch',
-      '--yes',
-      '--pinentry-mode',
-      'loopback',
-      '--passphrase',
-      '',
-      '--quick-generate-key',
-      identity,
-      'rsa3072',
-      'sign',
-      '1d',
-    ],
-    { env },
-  );
-  const listed = run('gpg', ['--batch', '--with-colons', '--list-secret-keys'], { env });
-  const fingerprint = listed
-    .split('\n')
-    .filter((l) => l.startsWith('fpr:'))
-    .map((l) => l.split(':')[9])
-    .find((f) => typeof f === 'string' && f.length === 40);
-  if (fingerprint === undefined) throw new Error('the ephemeral key has no fingerprint');
-  const armoured = run(
-    'gpg',
-    [
-      '--batch',
-      '--yes',
-      '--pinentry-mode',
-      'loopback',
-      '--passphrase',
-      '',
-      '--armor',
-      '--export-secret-keys',
-      fingerprint,
-    ],
-    { env },
-  );
-  return { fingerprint, armoured, env };
-}
-
 export function bundleMaven() {
   const problems = [];
-  const gpgAvailable = has('gpg');
-  const realKey = process.env.QE_REPORT_SIGNING_KEY;
-  let keyring;
-  let signingKey = realKey;
-  let signatureMode = 'none';
+  const decided = decideSigningMode(process.env, gpgAvailable());
+  if (!decided.ok) throw new Error(decided.detail);
 
-  if (typeof realKey === 'string' && realKey !== '') {
-    signatureMode = 'release key from the environment';
-  } else if (gpgAvailable) {
-    keyring = mkdtempSync(join(tmpdir(), 'qe-gnupg-'));
-    const key = ephemeralKey(keyring);
-    signingKey = key.armoured;
-    signatureMode = `ephemeral key ${key.fingerprint.slice(-16)}`;
+  // One keyring for the whole run, whichever mode this is. The release path used to verify against
+  // the machine's default keyring, which has never seen the release key: a correctly signed
+  // artifact would have failed there, or something else present would have passed for the wrong
+  // reason.
+  let keyring;
+  let signingKey;
+  let signingPassword = '';
+  let expectedFingerprint;
+  let signatureMode = decided.detail;
+
+  if (decided.mode === SUPPLIED) {
+    // The passphrase reaches the signer exactly as the release environment gave it. A protected key
+    // is unusable otherwise, and that is a defect that only appears during a real release.
+    signingPassword = decided.password;
+    signingKey = decided.key;
+    keyring = openKeyring(signingPassword);
+    expectedFingerprint = importKey(keyring, signingKey).at(0);
+    if (expectedFingerprint === undefined) {
+      throw new Error('the supplied signing key has no fingerprint');
+    }
+    signatureMode = `the release key ${expectedFingerprint.slice(-16)}`;
+  } else if (decided.mode === EPHEMERAL) {
+    // A non-empty passphrase here too, so a rehearsal exercises the same path a protected
+    // production key takes rather than an easier one.
+    signingPassword = 'qe-report-rehearsal-passphrase';
+    keyring = openKeyring(signingPassword);
+    const generated = generateKey(
+      keyring,
+      'qe-report release rehearsal <rehearsal@qe-report.invalid>',
+    );
+    signingKey = generated.armoured;
+    expectedFingerprint = generated.fingerprint;
+    signatureMode = `an ephemeral key ${expectedFingerprint.slice(-16)}`;
   }
 
   try {
@@ -132,7 +110,8 @@ export function bundleMaven() {
       env: {
         ...process.env,
         ...(signingKey === undefined ? {} : { QE_REPORT_SIGNING_KEY: signingKey }),
-        QE_REPORT_SIGNING_PASSWORD: '',
+        // The real passphrase, unchanged. Never logged, and never an argument.
+        QE_REPORT_SIGNING_PASSWORD: signingPassword,
       },
     });
 
@@ -161,7 +140,7 @@ export function bundleMaven() {
         }
         files.push(join(groupPath, artifactId, productVersion, name));
         for (const suffix of REQUIRED_SUFFIXES) {
-          if (suffix === '.asc' && signatureMode === 'none') continue;
+          if (suffix === '.asc' && keyring === undefined) continue;
           if (!present.includes(`${name}${suffix}`)) {
             problems.push(`${artifactId}/${name} has no ${suffix}`);
           } else {
@@ -212,23 +191,19 @@ export function bundleMaven() {
       }
     }
 
-    // Signatures, verified with the key that made them, in the same throwaway keyring.
+    // Every signature, verified against the key that made it, in this run's own keyring, and
+    // checked to have been made by that key rather than merely by something.
     let verified = 0;
-    if (signatureMode !== 'none' && gpgAvailable) {
+    if (keyring !== undefined) {
+      const verifications = {};
       for (const file of files.filter((f) => f.endsWith('.asc'))) {
         const signature = join(STAGING, file);
-        const signed = signature.replace(/\.asc$/u, '');
-        try {
-          run('gpg', ['--batch', '--verify', signature, signed], {
-            env: {
-              ...process.env,
-              ...(keyring === undefined ? {} : { GNUPGHOME: keyring }),
-            },
-          });
-          verified += 1;
-        } catch (e) {
-          problems.push(`the signature for ${file} did not verify: ${e.message.slice(-200)}`);
-        }
+        verifications[file] = verifyDetached(keyring, signature, signature.replace(/\.asc$/u, ''));
+      }
+      const byTheRightKey = signaturesMatchKey(verifications, expectedFingerprint);
+      verified = byTheRightKey.checked.length;
+      for (const problem of byTheRightKey.problems) {
+        problems.push(`${problem.what}: ${problem.detail}`);
       }
     }
 
@@ -260,6 +235,7 @@ export function bundleMaven() {
     return {
       problems,
       signatureMode,
+      signingFingerprint: expectedFingerprint,
       signaturesVerified: verified,
       files: files.length,
       bundle: relative(ROOT, bundle),
@@ -267,10 +243,9 @@ export function bundleMaven() {
       artifacts: maven.public.map((a) => `${maven.groupId}:${a}:${productVersion}`),
     };
   } finally {
-    if (keyring !== undefined) {
-      // The ephemeral key and its whole keyring go, whatever happened.
-      rmSync(keyring, { recursive: true, force: true });
-    }
+    // The keyring, the key inside it and the passphrase file all go, whatever happened, in both
+    // modes. Nothing of the signing key survives this function.
+    keyring?.close();
   }
 }
 
@@ -281,7 +256,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       `${result.signaturesVerified > 0 ? `, ${result.signaturesVerified} signatures verified` : ''}\n`,
   );
   for (const gav of result.artifacts) process.stdout.write(`  ${gav}\n`);
-  if (result.signatureMode === 'none') {
+  if (result.signingFingerprint === undefined) {
     process.stdout.write(
       'no GPG on this machine: the bundle shape was validated and signatures were not exercised\n',
     );

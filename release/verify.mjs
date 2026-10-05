@@ -27,7 +27,13 @@ function step(name, work) {
   process.stdout.write(`\n=== ${name}\n`);
   try {
     const detail = work();
-    results.push({ name, ok: true, ms: Date.now() - at, detail });
+    results.push({
+      name,
+      ok: true,
+      skipped: detail?.skipped === true,
+      ms: Date.now() - at,
+      detail,
+    });
     return detail;
   } catch (e) {
     results.push({ name, ok: false, ms: Date.now() - at, error: e.message });
@@ -45,6 +51,21 @@ function shell(file, args, options = {}) {
 
 function node(script, options = {}) {
   shell(process.execPath, [join(ROOT, 'release', script)], options);
+}
+
+/**
+ * A step that may legitimately not run here, such as one needing GPG. It is reported as skipped
+ * rather than as passing: a rehearsal that quietly counts an unexercised check as evidence is
+ * worse than one that says what it could not do.
+ */
+const NOT_EXERCISED = 3;
+function nodeMaySkip(script) {
+  const finished = spawnSync(process.execPath, [join(ROOT, 'release', script)], {
+    stdio: 'inherit',
+  });
+  if (finished.status === NOT_EXERCISED) return { skipped: true };
+  if (finished.status !== 0) throw new Error(`${script} exited ${finished.status}`);
+  return { skipped: false };
 }
 
 /**
@@ -104,9 +125,8 @@ function summarise() {
   process.stdout.write(`\n${'='.repeat(78)}\nrelease rehearsal for ${productVersion}\n`);
   for (const result of results) {
     const seconds = (result.ms / 1000).toFixed(1);
-    process.stdout.write(
-      `  ${result.ok ? 'ok  ' : 'FAIL'} ${result.name.padEnd(46)} ${seconds.padStart(6)}s\n`,
-    );
+    const verdict = result.ok ? (result.skipped ? 'skip' : 'ok  ') : 'FAIL';
+    process.stdout.write(`  ${verdict} ${result.name.padEnd(46)} ${seconds.padStart(6)}s\n`);
   }
   const total = ((Date.now() - started) / 1000).toFixed(1);
   process.stdout.write(`${'='.repeat(78)}\n${total}s total\n`);
@@ -123,6 +143,9 @@ step('both languages build', () => {
 step('the npm tarballs hold only what they should', () => node('audit-npm.mjs'));
 step('a clean install of those tarballs works', () => node('consume-npm.mjs'));
 step('the Central bundle is valid, signed where GPG exists', () => node('bundle-maven.mjs'));
+step('the supplied passphrase-protected signing branch works', () =>
+  nodeMaySkip('sign-regression.mjs'),
+);
 step('clean Gradle and Maven consumers work on Java 17', () => node('consume-maven.mjs'));
 step('the release image reports what it is', () => node('container.mjs'));
 step('the manifest, SBOM and checksums generate', () => {

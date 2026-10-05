@@ -127,15 +127,12 @@ jobs:
           cache-dependency-path: ts/pnpm-lock.yaml
           registry-url: https://registry.npmjs.org
 
-      - name: Refuse to continue without the credential this needs
+      # Trusted publishing needs an npm new enough to perform it, so the version is pinned here
+      # rather than inherited from whatever the Node image happens to ship.
+      - name: Pin an npm that can perform trusted publishing
         run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::no npm credential is configured in the release environment. See the"
-            echo "::error::preconditions in RELEASING.md. This release is not skipping npm."
-            exit 1
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm install --global "npm@>=11.5.1"
+          npm --version
 
       - name: Build the same artifacts the preflight approved
         working-directory: ts
@@ -143,9 +140,14 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm release:npm
 
+      # Both authentication eras. A token in the release environment means a bootstrap
+      # publication; no token plus this job's OIDC identity means trusted publishing, which is the
+      # steady state once a publisher is configured and the bootstrap credential is removed. With
+      # neither, the publisher fails closed rather than attempting an anonymous publish.
       - name: Publish, in dependency order, resuming what is already there
         run: node release/publish/npm.mjs
         env:
+          # Empty when no bootstrap token is configured, which selects trusted publishing.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # Provenance is not optional: a consumer should be able to see which workflow and which
           # commit produced the tarball they installed.
@@ -193,6 +195,8 @@ jobs:
             echo "::error::See the preconditions in RELEASING.md. This release is not skipping Central."
             exit 1
           fi
+          # The passphrase may legitimately be absent for an unprotected key, so it is not required
+          # here. What matters is that whatever is configured reaches the signer unchanged.
         env:
           QE_REPORT_SIGNING_KEY: ${{ secrets.QE_REPORT_SIGNING_KEY }}
           CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}

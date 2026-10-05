@@ -38,9 +38,11 @@ the release workflow is built to fail rather than to skip a registry it cannot r
 **npm**
 
 - [x] five public package names verified available
-- [ ] first-publication authentication configured
+- [ ] first-publication authentication configured -- a scoped `NPM_TOKEN` in the `release`
+      environment, if npm still requires one to create a package
 - [ ] trusted publishing / OIDC configured where npm permits it
-- [ ] bootstrap credential removed once trusted publishing is established
+- [ ] bootstrap credential removed once trusted publishing is established. Deleting `NPM_TOKEN` is
+      all that is needed: the workflow already supports both modes
 
 **GitHub**
 
@@ -62,9 +64,23 @@ account and has to be read there. Nothing in this repository claims it is.
 npm's steady state is trusted publishing, where the workflow authenticates through OIDC and no
 long-lived token exists. A package that does not exist yet may need one publication before a trusted
 publisher can be attached to it; if npm's current rules allow establishing it first, do that
-instead. Either way the credential lives in the protected `release` environment, is scoped as
-narrowly as npm allows, and is removed once trusted publishing is in place. Check npm's own
-documentation at the time of the release rather than trusting this paragraph.
+instead. Check npm's own documentation at the time of the release rather than trusting this
+paragraph.
+
+**The workflow supports both, and the instruction to remove the bootstrap credential is true of it.**
+The choice is made from the environment, not configured:
+
+- **bootstrap** -- `NPM_TOKEN` is present in the protected `release` environment. It is used for
+  this publication, scoped as narrowly as npm allows.
+- **trusted publishing** -- `NPM_TOKEN` is absent and the job has an OIDC identity, which it gets
+  from `id-token: write`. npm performs the authentication; nothing long-lived exists.
+
+So once `v1.0.0` has bootstrapped the packages into existence and a trusted publisher is configured
+for them, delete `NPM_TOKEN` from the environment and the next release authenticates without it. No
+workflow change is needed, and nothing silently falls back: with neither a token nor an OIDC
+identity the publisher fails closed rather than attempting an anonymous publish. The release job
+also installs an npm new enough to perform trusted publishing rather than relying on whichever
+version the Node image ships.
 
 ## Prerequisites on the machine
 
@@ -165,8 +181,11 @@ A re-run checks what already exists, and what it finds has to be what this relea
   replaced.
 - **Maven Central** reads the deployment state, and then reads back the artifacts Central actually
   serves and compares the deterministic ones -- the POM, the main jar, the sources jar -- with the
-  ones built from the tag. "The same coordinates exist" is not accepted as proof. Javadoc is checked
-  for presence and signature but not compared byte for byte.
+  ones built from the tag. "The same coordinates exist" is not accepted as proof. Javadoc's bytes are
+  not compared, because they are not constrained to be reproducible, but its signature is. Every
+  published signature is downloaded and verified against the release key in a keyring created for
+  the purpose, and the signer's fingerprint has to be that key: correct bytes signed by somebody
+  else are not this release.
 - **GHCR** inspects the exact version tag _before_ building anything. If it exists and its identity
   is this release -- same version, commit, source repository and platform -- that digest is adopted
   as the release digest and nothing is pushed to the exact tag. Only the moving aliases are

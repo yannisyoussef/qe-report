@@ -96,6 +96,14 @@ jobs:
         run: pnpm release:verify
         env:
           QE_REPORT_JAVA17_HOME: ${{ env.JAVA_HOME_17_X64 }}
+      # The branch a real release takes: a supplied, passphrase-protected key. It generates a
+      # throwaway one, so no production credential is involved, and it mutates the passphrase away
+      # to prove the passthrough is load-bearing. Runs here because this job has GPG and both JDKs.
+      - name: The production signing branch, with a throwaway protected key
+        if: matrix.node == 22
+        run: node release/sign-regression.mjs
+        env:
+          QE_REPORT_JAVA17_HOME: ${{ env.JAVA_HOME_17_X64 }}
       - name: The public API has not drifted from its recorded baseline
         if: matrix.node == 22
         run: node release/api-baseline.mjs
