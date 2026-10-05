@@ -113,6 +113,9 @@ function summarise() {
 }
 
 step('the release contract agrees with the code', () => node('verify-contract.mjs'));
+step('the release decisions and their guards hold', () =>
+  shell(process.execPath, ['--test', join(ROOT, 'release', 'test', '*.test.mjs')]),
+);
 step('both languages build', () => {
   shell('pnpm', ['run', 'build'], { cwd: join(ROOT, 'ts') });
   shell(join(ROOT, 'java', 'gradlew'), ['-p', join(ROOT, 'java'), '--quiet', 'assemble']);

@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { homedir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acceptCentralState, acceptPublishedEvidence } from './evidence.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
@@ -99,7 +100,14 @@ function npmDependencies() {
     ],
     { cwd: join(ROOT, 'ts') },
   );
-  if (listed === undefined) return found;
+  // Loudly, not quietly. This used to return an empty map when pnpm could not run, which produced
+  // a release SBOM that silently omitted every npm dependency and still looked like a valid one.
+  if (listed === undefined) {
+    throw new Error(
+      'pnpm could not list the production dependencies, so the SBOM would describe only part of ' +
+        'the release. Install dependencies first, and make sure pnpm is on PATH.',
+    );
+  }
   const walk = (dependencies) => {
     for (const [name, entry] of Object.entries(dependencies ?? {})) {
       // A workspace sibling is part of this release, not a third-party dependency of it.
@@ -231,6 +239,21 @@ function spdx(dependencies, commit) {
  */
 const requirePublished = process.argv.includes('--published');
 
+/**
+ * One piece of evidence a publishing job wrote, or nothing if that job has not run.
+ *
+ * Each is tagged with where it came from. That matters most for Maven: the rehearsal signs a bundle
+ * with an ephemeral key and the real release signs a different one with the production key, and the
+ * two are indistinguishable by shape. Recording the rehearsal's digest under a field that implies
+ * publication would state something untrue that nothing downstream could detect, so the final
+ * manifest refuses untagged or rehearsal evidence rather than relabelling it.
+ */
+function publishedEvidence(name) {
+  const path = join(OUT, `${name}-evidence.json`);
+  if (!existsSync(path)) return undefined;
+  return JSON.parse(readFileSync(path, 'utf8'));
+}
+
 export function generateManifest() {
   mkdirSync(join(OUT, 'sbom'), { recursive: true });
   mkdirSync(join(OUT, 'manifest'), { recursive: true });
@@ -272,6 +295,10 @@ export function generateManifest() {
   const openapi = join(ROOT, 'openapi', 'qe-report-api-v1.json');
   const schema = join(ROOT, 'protocol', 'schema', 'event.schema.json');
 
+  const mavenEvidence = publishedEvidence('maven');
+  const containerEvidence = publishedEvidence('container');
+  const npmEvidence = publishedEvidence('npm');
+
   const manifest = {
     $comment:
       'Generated. What this release is, as built. Fields a registry decides are null until the release workflow fills them.',
@@ -282,27 +309,44 @@ export function generateManifest() {
     runtimes,
     npm: {
       registry: 'https://registry.npmjs.org',
-      packages,
+      // `integrity` is what this release built; `registryIntegrity` is what the registry serves,
+      // and it appears only once the publishing job has compared the two and agreed.
+      packages: packages.map((entry) => {
+        const published = npmEvidence?.packages?.find((p) => p.name === entry.name);
+        return {
+          ...entry,
+          registryIntegrity: published?.registryIntegrity ?? null,
+          provenance: published?.provenance ?? null,
+        };
+      }),
       publishOrder: npm.public,
     },
     maven: {
       repository: 'https://central.sonatype.com',
       artifacts: maven.public.map((a) => `${maven.groupId}:${a}:${productVersion}`),
-      bundle: existsSync(bundle)
-        ? { file: relative(OUT, bundle), sha256: sha256File(bundle) }
+      // The bundle is a transport object, not a published artifact, and is labelled as the
+      // candidate it is. What describes the release publicly is the digests of what Central
+      // actually serves, which only the publishing job can know.
+      candidateBundle: existsSync(bundle)
+        ? { file: relative(OUT, bundle), sha256: sha256File(bundle), origin: 'rehearsal' }
         : null,
-      // Only Central can say this, so it arrives from the job that polled it.
-      deploymentState: process.env.QE_REPORT_CENTRAL_STATE ?? null,
+      published: mavenEvidence?.artifacts ?? null,
+      signingKey: mavenEvidence?.signingKey ?? null,
+      uploadBundle: mavenEvidence?.uploadBundle ?? null,
+      // Only Central can say this, so it comes from the job that polled it.
+      deploymentState: mavenEvidence?.state ?? null,
     },
     container: {
       repository: container.repository,
       tags: container.tags,
       platforms: container.platforms,
-      // Only a registry can say this, so it arrives from the job that pushed the image.
-      digest: process.env.QE_REPORT_CONTAINER_DIGEST ?? null,
+      // Only a registry can say this, so it comes from the job that pushed or adopted the image.
+      digest: containerEvidence?.digest ?? null,
       // BuildKit attests the image's own SBOM against that digest during the push.
-      sbom:
-        process.env.QE_REPORT_CONTAINER_DIGEST === undefined ? null : 'attested against the digest',
+      sbom: containerEvidence === undefined ? null : 'attested against the digest',
+      // True when a resume found the exact tag already published and adopted it rather than
+      // rebuilding, which is the only correct thing to do with an immutable tag.
+      adoptedExistingTag: containerEvidence?.adopted ?? null,
     },
     assets: {
       sbom: { file: relative(OUT, sbomPath), sha256: sha256File(sbomPath) },
@@ -363,13 +407,45 @@ export function generateManifest() {
   writeFileSync(sumsPath, `${sums.join('\n')}\n`);
 
   if (requirePublished) {
-    if (manifest.container.digest === null) problems.push('no container digest was recorded');
-    if (manifest.maven.deploymentState !== 'PUBLISHED') {
-      problems.push(`Central's deployment state is ${manifest.maven.deploymentState}`);
+    // Every registry fact has to have come from a publication and be tagged as such. Rehearsal
+    // evidence is refused here rather than relabelled.
+    for (const [what, evidence] of [
+      ['npm', npmEvidence],
+      ['maven', mavenEvidence],
+      ['the container', containerEvidence],
+    ]) {
+      const accepted = acceptPublishedEvidence(evidence, what);
+      if (!accepted.ok) problems.push(`${accepted.refusal}: ${accepted.detail}`);
     }
+    const central = acceptCentralState(manifest.maven.deploymentState);
+    if (!central.ok) problems.push(`${central.refusal}: ${central.detail}`);
+    if (manifest.container.digest === null) problems.push('no container digest was recorded');
     if (manifest.gitCommit === null) problems.push('no commit was recorded');
+
+    // What the registry serves, compared with what this release built. Presence is not proof.
     for (const entry of manifest.npm.packages) {
-      if (entry.integrity === null) problems.push(`${entry.name} has no integrity`);
+      if (entry.integrity === null) {
+        problems.push(`${entry.name} has no integrity for the tarball this release built`);
+      } else if (entry.registryIntegrity === null) {
+        problems.push(`${entry.name} has no registry integrity, so nothing was compared`);
+      } else if (entry.registryIntegrity !== entry.integrity) {
+        problems.push(
+          `${entry.name} is served as ${entry.registryIntegrity} but this release built ` +
+            `${entry.integrity}`,
+        );
+      }
+      if (entry.provenance !== true) problems.push(`${entry.name} has no provenance`);
+    }
+    if (manifest.maven.published === null) {
+      problems.push('no published Maven artifact digests were recorded');
+    }
+    // A candidate bundle is rehearsal evidence. It may sit in the manifest as the candidate it is,
+    // but it must never be the only thing describing a publication.
+    if (manifest.maven.candidateBundle !== null && manifest.maven.uploadBundle === null) {
+      problems.push(
+        'the manifest records a candidate bundle but no submitted one; a rehearsal bundle is not ' +
+          'evidence of publication',
+      );
     }
   }
 

@@ -12,9 +12,10 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PUBLISHED, compareNpmIntegrity } from '../evidence.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const contract = JSON.parse(readFileSync(join(ROOT, 'release', 'release.json'), 'utf8'));
@@ -27,6 +28,8 @@ if (process.env.NODE_AUTH_TOKEN === undefined || process.env.NODE_AUTH_TOKEN ===
 }
 
 const integrityOf = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+/** What the registry serves, gathered as packages go out, for the comparison at the end. */
+const registryView = {};
 
 for (const name of npm.public) {
   const tarball = join(NPM_OUT, `${name}-${productVersion}.tgz`);
@@ -69,4 +72,46 @@ for (const name of npm.public) {
     process.exit(1);
   }
 }
-process.stdout.write(`all ${npm.public.length} packages are published at ${productVersion}\n`);
+// What the registry serves now, compared with what this release built, for every package. This is
+// the evidence the final manifest uses; presence and provenance alone would not establish that the
+// tarball a consumer installs is the one this release produced.
+const evidence = { origin: PUBLISHED, registry: 'https://registry.npmjs.org', packages: [] };
+const recorded = [];
+for (const name of npm.public) {
+  const tarball = join(NPM_OUT, `${name}-${productVersion}.tgz`);
+  const built = integrityOf(readFileSync(tarball));
+  const response = await fetch(`https://registry.npmjs.org/${name}/${productVersion}`, {
+    headers: { accept: 'application/json' },
+  });
+  if (!response.ok) {
+    process.stderr.write(`${name}@${productVersion} is not served after publishing it\n`);
+    process.exit(1);
+  }
+  const published = await response.json();
+  const registryIntegrity = published.dist?.integrity;
+  const provenance = published.dist?.attestations !== undefined;
+  evidence.packages.push({ name, version: productVersion, registryIntegrity, provenance });
+  recorded.push({ name, version: productVersion, integrity: built });
+  registryView[`${name}@${productVersion}`] = {
+    integrity: registryIntegrity,
+    hasProvenance: provenance,
+  };
+}
+
+const compared = compareNpmIntegrity(recorded, registryView);
+if (!compared.ok) {
+  process.stderr.write('what npm serves is not what this release built:\n');
+  for (const problem of compared.problems) {
+    process.stderr.write(`  - ${problem.refusal}: ${problem.detail}\n`);
+  }
+  process.exit(1);
+}
+
+writeFileSync(
+  join(ROOT, 'build', 'release', productVersion, 'npm-evidence.json'),
+  `${JSON.stringify(evidence, null, 2)}\n`,
+);
+process.stdout.write(
+  `all ${npm.public.length} packages are published at ${productVersion}, ` +
+    `and ${compared.checked.length} match what this release built\n`,
+);

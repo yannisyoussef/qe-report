@@ -119,18 +119,34 @@ Promotion is a pull request a person merges; nothing automates it.
    else.
 6. Approve the `release` environment when the workflow asks. That approval is the last reversible
    moment.
-7. Watch the workflow. It publishes npm, then Maven Central, then GHCR, verifies each, and only then
-   creates the GitHub Release.
+7. Watch the workflow. After the preflight, the three registry families publish **independently and
+   in parallel** -- npm, Maven Central and GHCR each in their own job. There is no ordering between
+   them, and none is needed: nothing one publishes is an input to another. Within npm, the five
+   packages go out in dependency order. The GitHub Release job waits for all three and runs only if
+   every one of them succeeded.
 
 ## What the workflow checks before it publishes
 
 - the tag matches the product version in the contract;
-- the tagged commit is an ancestor of `master` and is `master`'s own release commit, so nothing can
-  be published from `develop`, a feature branch, or an unreviewed commit;
+- the tagged commit **is the current head of `master`**. Not an ancestor of it, not a commit master
+  later merged: exactly its head. So nothing can be published from `develop`, a feature branch, an
+  unreviewed commit, or a commit master has since moved past;
 - every artifact is built from that one commit;
 - the whole rehearsal passes;
 - every credential it needs is present. A missing credential fails the job. It never skips a
   registry and reports success.
+
+The rule and its refusals live in `release/release-ref.mjs`, which ordinary CI tests: the correct
+tag at master's head is accepted, and a wrong version, a commit off master, and an older ancestor of
+master are each refused.
+
+### What that means operationally
+
+A partially published release has to be completed before `master` advances to another release
+commit. Resuming the same tag is how a partial release finishes, and a resume is only valid while
+that tag is still master's head. Advancing master first strands the partial release: the tag stops
+being releasable, and because registries are immutable the version cannot be rebuilt under a new
+commit either. Finish the release, then move master.
 
 ## Publication is not atomic
 
@@ -142,10 +158,25 @@ on another:
 - do not republish a version a registry has already accepted;
 - fix the cause, and re-run the workflow from the same tag.
 
-A re-run checks what already exists. For npm it compares the registry's integrity for
-`package@version` with the tarball it just built: identical means already done, different is a hard
-failure. For Central it reads the deployment state. For GHCR it compares digests. It continues with
-what is missing and creates no second GitHub Release.
+A re-run checks what already exists, and what it finds has to be what this release built.
+
+- **npm** compares the registry's integrity for `package@version` with the tarball built from the
+  tag: identical means already done, different is a hard failure. A published version is never
+  replaced.
+- **Maven Central** reads the deployment state, and then reads back the artifacts Central actually
+  serves and compares the deterministic ones -- the POM, the main jar, the sources jar -- with the
+  ones built from the tag. "The same coordinates exist" is not accepted as proof. Javadoc is checked
+  for presence and signature but not compared byte for byte.
+- **GHCR** inspects the exact version tag _before_ building anything. If it exists and its identity
+  is this release -- same version, commit, source repository and platform -- that digest is adopted
+  as the release digest and nothing is pushed to the exact tag. Only the moving aliases are
+  repaired. A fresh rebuild is deliberately not required to match it byte for byte: BuildKit records
+  provenance and an SBOM into the image, so the same source can produce a different digest, and
+  demanding equality would fail a correct resume. If the existing tag is from another commit, the
+  release stops and nothing is mutated. If the registry cannot be asked at all, the release stops:
+  an unanswered question is not an absent tag.
+
+It continues with what is missing and creates no second GitHub Release.
 
 ## Versions are immutable
 
@@ -163,6 +194,21 @@ A container consumer can go back to an earlier immutable digest, and should pin 
 production. An exact SemVer image tag is never overwritten with different bytes. The moving aliases,
 `1.0` and `1`, advance to the newest matching release and nothing else. `latest` is not published in
 the initial v1 release.
+
+## What the final manifest says, and what it does not
+
+The manifest attached to the release describes immutable registry facts: the npm integrity the
+registry serves, the digests of the Maven artifacts Central serves, the container digest, and
+Central's `PUBLISHED` state. Each piece comes from the job that published it and is tagged as having
+come from a publication.
+
+The rehearsal's Maven bundle is deliberately not in it as a published artifact. The rehearsal signs
+a bundle with an ephemeral key and the real release signs a different one with the production key;
+they are indistinguishable by shape, so recording the rehearsal's digest under a field implying
+publication would state something untrue that nothing downstream could detect. Where a bundle digest
+appears at all it is the one the publishing job actually submitted, and the bundle is described as
+the transport object it is. A manifest generated with `--published` refuses rehearsal evidence
+rather than relabelling it.
 
 ## Verifying a release afterwards
 
