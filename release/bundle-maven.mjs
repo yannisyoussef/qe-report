@@ -106,14 +106,23 @@ export function bundleMaven() {
   try {
     // Restaged from scratch, with signing on if a key is available, so the tree matches the key.
     rmSync(STAGING, { recursive: true, force: true });
-    run(join(JAVA, 'gradlew'), ['-p', JAVA, '--quiet', 'publishToReleaseStaging'], {
-      env: {
-        ...process.env,
-        ...(signingKey === undefined ? {} : { QE_REPORT_SIGNING_KEY: signingKey }),
-        // The real passphrase, unchanged. Never logged, and never an argument.
-        QE_REPORT_SIGNING_PASSWORD: signingPassword,
+    // Emptying the staging repository makes publishing re-run, but not necessarily signing: the
+    // signature tasks' outputs live under each module's build directory, and Gradle will reuse
+    // them. That is fine for a bundle, and wrong for anything testing the signing path itself,
+    // which has to watch signatures actually being made. `--rerun-tasks` forces that.
+    const fromScratch = process.env.QE_REPORT_RESIGN_FROM_SCRATCH === '1';
+    run(
+      join(JAVA, 'gradlew'),
+      ['-p', JAVA, '--quiet', ...(fromScratch ? ['--rerun-tasks'] : []), 'publishToReleaseStaging'],
+      {
+        env: {
+          ...process.env,
+          ...(signingKey === undefined ? {} : { QE_REPORT_SIGNING_KEY: signingKey }),
+          // The real passphrase, unchanged. Never logged, and never an argument.
+          QE_REPORT_SIGNING_PASSWORD: signingPassword,
+        },
       },
-    });
+    );
 
     const groupPath = join(...maven.groupId.split('.'));
     const files = [];

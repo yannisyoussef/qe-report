@@ -43,8 +43,15 @@ try {
     `generated a throwaway key ${key.fingerprint.slice(-16)} with a passphrase\n`,
   );
 
-  // The release branch: a supplied key, with its own passphrase.
-  const supplied = { QE_REPORT_SIGNING_KEY: key.armoured, QE_REPORT_SIGNING_PASSWORD: PASSPHRASE };
+  // The release branch: a supplied key, with its own passphrase. Signing is forced to re-run in
+  // both calls below, because otherwise Gradle reuses signatures it already made and neither the
+  // real run nor the mutant would be exercising the signing path at all. That is exactly how the
+  // first version of this proof passed while checking nothing.
+  const supplied = {
+    QE_REPORT_SIGNING_KEY: key.armoured,
+    QE_REPORT_SIGNING_PASSWORD: PASSPHRASE,
+    QE_REPORT_RESIGN_FROM_SCRATCH: '1',
+  };
   const { bundleMaven } = await import('./bundle-maven.mjs');
   const before = { ...process.env };
   Object.assign(process.env, supplied);
