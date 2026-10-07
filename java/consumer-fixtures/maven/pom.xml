@@ -14,6 +14,9 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>6.1.3</junit.version>
     <qe.localRepo>file:///unset</qe.localRepo>
+    <!-- Supplied by whoever runs this fixture: the build's own artifact, or the one staged for
+         Maven Central at release time. -->
+    <qe.adapterVersion>unset</qe.adapterVersion>
     <qe.report.dir>target/qe-report</qe.report.dir>
     <qe.report.runId>run-maven-consumer</qe.report.runId>
   </properties>
@@ -35,7 +38,7 @@
     <dependency>
       <groupId>io.github.yannisyoussef</groupId>
       <artifactId>qe-report-junit-platform</artifactId>
-      <version>0.1.0</version>
+      <version>${qe.adapterVersion}</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

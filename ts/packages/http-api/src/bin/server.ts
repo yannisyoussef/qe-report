@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ServerLifecycle } from '../lifecycle.js';
 import { safeMessage } from '../secrets.js';
+import { productVersion } from '../version.js';
 import { configFrom, startServer } from '../server.js';
 
 /**
@@ -11,6 +12,12 @@ import { configFrom, startServer } from '../server.js';
  * process non-zero rather than leaving a container to be killed from outside.
  */
 async function main(): Promise<void> {
+  if (process.argv.includes('--version')) {
+    // What the image says it is. The application carries no version of its own: a server built
+    // from this source is whichever release packaged it, and the image records that.
+    process.stdout.write(`${productVersion(process.env)}\n`);
+    return;
+  }
   const config = configFrom(process.env);
 
   // Registered before anything is opened. A signal during start-up would otherwise reach Node's

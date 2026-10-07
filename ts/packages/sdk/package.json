@@ -1,9 +1,23 @@
 {
   "name": "qe-report-sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "qe-report producer SDK: session writer, file sink, redaction",
-  "private": true,
   "license": "Apache-2.0",
+  "homepage": "https://github.com/yannisyoussef/qe-report#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yannisyoussef/qe-report.git",
+    "directory": "ts/packages/sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/yannisyoussef/qe-report/issues"
+  },
+  "author": "Yannis BA BINENI",
+  "keywords": [
+    "qe-report",
+    "test-reporting",
+    "test-results"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -24,10 +38,14 @@
     }
   },
   "files": [
-    "dist",
-    "README.md"
+    "LICENSE",
+    "README.md",
+    "dist"
   ],
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit -p tsconfig.json",

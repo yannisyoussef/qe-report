@@ -1,0 +1,331 @@
+# The release workflow. It is not part of ordinary CI: it runs only for a release tag, and it is the
+# only thing in this repository that publishes anything.
+#
+# What it refuses to do:
+#
+#   - publish from anything but the release commit on master;
+#   - publish a version the tag does not name;
+#   - publish when a credential it needs is missing, rather than skipping that registry;
+#   - replace a version a registry has already accepted;
+#   - create the GitHub Release before npm, Maven Central and GHCR are all verified published.
+#
+# Publication across three registries is not one transaction. A partial release is resumed by
+# re-running this workflow from the same tag: every step checks what already exists and continues
+# with what is missing. See RELEASING.md.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # For resuming a partial release. It takes a tag, never an arbitrary commit, and validates it
+  # exactly as the tag trigger does.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The release tag to resume, for example v1.0.0'
+        required: true
+        type: string
+
+# Read-only by default. Each job asks for the least it needs, and only the last one may write to the
+# repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # Nothing is published until this passes. It establishes what is being released and proves the
+  # software is releasable, using no credential at all.
+  # ---------------------------------------------------------------------------------------------
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.contract.outputs.version }}
+      commit: ${{ steps.contract.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          # master is fetched below to prove where this tag sits.
+          fetch-depth: 0
+
+      # The tag must name the contract's version and point at the current head of master. Not an
+      # ancestor of master, not a commit master later merged: exactly its head. The rule and its
+      # refusals live in release/release-ref.mjs and are tested in ordinary CI.
+      - name: The tag and the commit it points at are releasable
+        id: contract
+        run: node release/check-release-ref.mjs "$RELEASE_TAG"
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            25
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ts/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ts/pnpm-lock.yaml
+
+      - name: The names this release needs are still ours to publish
+        run: node release/verify-npm-names.mjs
+
+      - name: The whole rehearsal, which publishes nothing
+        working-directory: ts
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm release:verify
+        env:
+          QE_REPORT_JAVA17_HOME: ${{ env.JAVA_HOME_17_X64 }}
+
+      - name: The public API has not drifted from its baseline
+        run: node release/api-baseline.mjs
+
+      - name: Keep the release candidate for the jobs that publish it
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate
+          path: build/release/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------------
+  # npm, in dependency order, with provenance. The `release` environment is where the credential
+  # lives and where a person approves an irreversible step.
+  # ---------------------------------------------------------------------------------------------
+  npm:
+    name: Publish to npm
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      # npm provenance is signed through this.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ts/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ts/pnpm-lock.yaml
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs an npm new enough to perform it, so the version is pinned here
+      # rather than inherited from whatever the Node image happens to ship.
+      - name: Pin an npm that can perform trusted publishing
+        run: |
+          npm install --global "npm@>=11.5.1"
+          npm --version
+
+      - name: Build the same artifacts the preflight approved
+        working-directory: ts
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm release:npm
+
+      # Both authentication eras. A token in the release environment means a bootstrap
+      # publication; no token plus this job's OIDC identity means trusted publishing, which is the
+      # steady state once a publisher is configured and the bootstrap credential is removed. With
+      # neither, the publisher fails closed rather than attempting an anonymous publish.
+      - name: Publish, in dependency order, resuming what is already there
+        run: node release/publish/npm.mjs
+        env:
+          # Empty when no bootstrap token is configured, which selects trusted publishing.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Provenance is not optional: a consumer should be able to see which workflow and which
+          # commit produced the tarball they installed.
+          NPM_CONFIG_PROVENANCE: 'true'
+
+      # What the registry now serves, for the final manifest. Evidence of a publication, produced
+      # by the job that performed it.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-evidence
+          path: build/release/*/npm-evidence.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------------
+  # Maven Central, through the Publisher Portal, from a bundle that was validated before any upload.
+  # ---------------------------------------------------------------------------------------------
+  maven:
+    name: Publish to Maven Central
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            25
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Refuse to continue without the credentials this needs
+        run: |
+          missing=''
+          [ -n "${QE_REPORT_SIGNING_KEY:-}" ] || missing="$missing signing-key"
+          [ -n "${CENTRAL_TOKEN:-}" ] || missing="$missing central-token"
+          if [ -n "$missing" ]; then
+            echo "::error::missing from the release environment:$missing"
+            echo "::error::See the preconditions in RELEASING.md. This release is not skipping Central."
+            exit 1
+          fi
+          # The passphrase may legitimately be absent for an unprotected key, so it is not required
+          # here. What matters is that whatever is configured reaches the signer unchanged.
+        env:
+          QE_REPORT_SIGNING_KEY: ${{ secrets.QE_REPORT_SIGNING_KEY }}
+          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+
+      - name: Stage, sign and validate the bundle with the release key
+        run: node release/bundle-maven.mjs
+        env:
+          QE_REPORT_SIGNING_KEY: ${{ secrets.QE_REPORT_SIGNING_KEY }}
+          QE_REPORT_SIGNING_PASSWORD: ${{ secrets.QE_REPORT_SIGNING_PASSWORD }}
+
+      # Submits the bundle this job signed with the production key, waits for Central to publish
+      # it, then reads back what Central serves and compares it with what was built from the tag.
+      - name: Upload to the Publisher Portal, wait for PUBLISHED, and verify what is served
+        run: node release/publish/maven.mjs
+        env:
+          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+          QE_REPORT_SIGNING_KEY: ${{ secrets.QE_REPORT_SIGNING_KEY }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: maven-evidence
+          path: build/release/*/maven-evidence.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------------
+  # GHCR. One build, one digest, three tags pointing at it, with provenance and an SBOM attested
+  # against the digest rather than against a tag.
+  # ---------------------------------------------------------------------------------------------
+  container:
+    name: Publish the container
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+
+      - name: Sign in to GHCR
+        # No external registry password: the workflow's own token is enough for this repository's
+        # packages, which is why no login action is needed either.
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' \
+            | docker login ghcr.io --username '${{ github.actor }}' --password-stdin
+
+      # Inspects the exact version tag before anything is built, and never pushes over one that
+      # exists: an existing tag whose identity is this release is adopted, and only the moving
+      # aliases are repaired.
+      - name: Publish the image, without ever moving an exact version tag
+        id: push
+        run: node release/publish/container.mjs
+        env:
+          PRODUCT_VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_REVISION: ${{ needs.preflight.outputs.commit }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-evidence
+          path: build/release/*/container-evidence.json
+          retention-days: 7
+
+      - name: Attest the digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/qe-report
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # ---------------------------------------------------------------------------------------------
+  # Last, and only if all three registries are verified. The GitHub Release is an index of things
+  # that already exist, so creating it before they do would be a lie.
+  # ---------------------------------------------------------------------------------------------
+  github-release:
+    name: Create the GitHub Release
+    needs: [preflight, npm, maven, container]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # The one job that writes to the repository, and only because a release has to be created.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: build/release/
+      # The evidence each publishing job produced. The final manifest accepts only this: a
+      # rehearsal artefact, however identical it looks, is not evidence of a publication.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: '*-evidence'
+          merge-multiple: true
+          path: build/release/
+
+      - name: Everything this release claims is published, and is what this release built
+        run: node release/verify-published.mjs '${{ needs.preflight.outputs.version }}'
+
+      - name: Record what was published, from the publishing jobs' own evidence
+        run: node release/manifest.mjs --published
+
+      - name: Create it, once, from the changelog
+        run: |
+          version='${{ needs.preflight.outputs.version }}'
+          out="build/release/$version"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "::notice::the release v$version already exists; this run is a resume and will not create a second"
+            exit 0
+          fi
+          node release/release-notes.mjs "$version" > "$out/release-notes.md"
+          gh release create "v$version" \
+            --title "qe-report $version" \
+            --notes-file "$out/release-notes.md" \
+            --verify-tag \
+            "$out/manifest/release-manifest.json" \
+            "$out/SHA256SUMS" \
+            "$out/sbom/qe-report-$version.spdx.json" \
+            openapi/qe-report-api-v1.json \
+            protocol/schema/event.schema.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

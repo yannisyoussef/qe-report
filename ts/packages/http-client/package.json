@@ -1,9 +1,23 @@
 {
   "name": "qe-report-http-client",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "qe-report producer transport: uploads a completed run directory to a qe-report service over API v1",
-  "private": true,
   "license": "Apache-2.0",
+  "homepage": "https://github.com/yannisyoussef/qe-report#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yannisyoussef/qe-report.git",
+    "directory": "ts/packages/http-client"
+  },
+  "bugs": {
+    "url": "https://github.com/yannisyoussef/qe-report/issues"
+  },
+  "author": "Yannis BA BINENI",
+  "keywords": [
+    "qe-report",
+    "test-reporting",
+    "test-results"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -20,10 +34,14 @@
     "qe-report-upload": "./dist/bin/upload.js"
   },
   "files": [
-    "dist",
-    "README.md"
+    "LICENSE",
+    "README.md",
+    "dist"
   ],
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit -p tsconfig.json",
