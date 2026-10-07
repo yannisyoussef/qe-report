@@ -2,9 +2,11 @@
 # committed copy is the LICENSE at the repository root.
 ts/packages/*/LICENSE
 
-# pnpm's content-addressable store. It lands here when pnpm runs without a writable home, such as
-# inside a container, and it is a cache: never tracked.
+# pnpm's content-addressable store. It lands in the repository when pnpm runs without a writable
+# home, such as inside a container, and it is a cache: never tracked. Both forms, because the
+# workspace root is `ts/` and a store can appear there as readily as here.
 /.pnpm-store/
+.pnpm-store/
 
 # Build output
 build/
